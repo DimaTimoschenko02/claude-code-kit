@@ -18,6 +18,10 @@ drops into **any** project (including a plain git repo, no Obsidian required).
 - `bash`, `jq` (≥1.6)
 - `claude` CLI logged into a **Max or Pro** plan, present on your interactive PATH
   (the hooks restore PATH for background forks via `_lib/env.sh`)
+- **Windows:** install **Git for Windows** (Git Bash). Claude Code runs hooks through
+  Git Bash by default on Windows, so the `.sh` hooks work as-is — see [Windows notes](#windows).
+  **Clone via `git`, don't download the ZIP** (ZIP can introduce CRLF that breaks hooks;
+  `.gitattributes` keeps a clone LF-clean).
 
 ## Install
 
@@ -123,6 +127,28 @@ git pull && ./install.sh --check /path/to/project   # see if outdated
   fallback in `_lib/paths.sh` covers the gap.
 - Windows backgrounding (Git-Bash) is best-effort; hooks use `bash "<path>"` so the +x
   bit and shebang quirks don't matter.
+
+<a name="windows"></a>
+### Windows
+
+Tested design target is **Git Bash** (Git for Windows). Claude Code uses Git Bash as
+its default hook shell on Windows, and `$CLAUDE_PROJECT_DIR` is exported to hooks, so
+the registered command `bash "$CLAUDE_PROJECT_DIR/.claude/hooks/..."` runs unchanged.
+No native-cmd / PowerShell port is shipped — without Git Bash the hooks won't run.
+
+`_lib/env.sh` adds Windows bin locations (`%APPDATA%\npm`, WindowsApps shim, native
+installer) so the background classifier can find `claude` — the #1 "0 entries" cause.
+
+**Verify on first run** (can't be confirmed from macOS/Linux):
+- After a real session, a day file appears under `.claude/learning-log/<YYYY-MM>/`.
+  Empty? Run `command -v claude` inside Git Bash — if found interactively but the log
+  stays empty, the forked classifier isn't inheriting PATH; add your `claude` dir to
+  `_lib/env.sh`.
+- **Background survival:** the classifier is detached via `nohup … & disown`. If MSYS
+  reaps the child when the `Stop` hook returns (log never fills despite `claude` being
+  found), switch the fork in `learning-log-trigger.sh` to
+  `cmd //c start //b bash "$ANALYZE_SCRIPT" …`. Not changed by default — needs a real
+  Windows box to confirm whether it's necessary.
 
 ## How it works (for contributors)
 

@@ -38,5 +38,16 @@ _ll_prepend "/opt/homebrew/bin"
 _ll_prepend "/usr/local/bin"
 _ll_prepend "/home/linuxbrew/.linuxbrew/bin"
 
+# Windows (Git Bash / MSYS2). $HOME maps to /c/Users/<user>, so forward-slash
+# user-profile paths resolve; npm-global is where `claude`/`jq` usually land.
+# cygpath converts the backslash %APPDATA%/%LOCALAPPDATA% env vars MSYS exports.
+# All no-op on macOS/Linux: those dirs don't exist and cygpath is absent.
+_ll_prepend "$HOME/AppData/Roaming/npm"                 # npm -g (claude, jq)
+_ll_prepend "$HOME/AppData/Local/Microsoft/WindowsApps" # winget/store shim
+if command -v cygpath >/dev/null 2>&1; then
+  [ -n "${APPDATA:-}" ]      && _ll_prepend "$(cygpath -u "$APPDATA")/npm"
+  [ -n "${LOCALAPPDATA:-}" ] && _ll_prepend "$(cygpath -u "$LOCALAPPDATA")/Programs/claude"
+fi
+
 export PATH
 unset _ll_nvm _ll_node_bin

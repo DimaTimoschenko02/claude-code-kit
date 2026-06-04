@@ -25,7 +25,9 @@ LL_WIKILINKS="false"
 # --- Config file layer ---
 _ll_cfg="${LL_CLAUDE_DIR:-}/learning-log.config.json"
 if command -v jq >/dev/null 2>&1 && [ -f "$_ll_cfg" ] && jq -e 'type=="object"' "$_ll_cfg" >/dev/null 2>&1; then
-  _ll_get() { jq -r --arg k "$1" '.[$k] // empty' "$_ll_cfg" 2>/dev/null; }
+  # tr -d '\r' guards a CRLF-saved config.json (Windows editors) from injecting a
+  # trailing \r that would break string compares like [ "$LL_ENABLED" = "true" ].
+  _ll_get() { jq -r --arg k "$1" '.[$k] // empty' "$_ll_cfg" 2>/dev/null | tr -d '\r'; }
   _v=$(_ll_get enabled);                       [ -n "$_v" ] && LL_ENABLED="$_v"
   _v=$(_ll_get threshold);                      [ -n "$_v" ] && LL_THRESHOLD="$_v"
   _v=$(_ll_get model);                          [ -n "$_v" ] && LL_MODEL="$_v"
