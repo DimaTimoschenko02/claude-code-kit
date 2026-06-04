@@ -59,8 +59,12 @@ done
 
 # --- Acquire lock (mkdir is atomic; reclaim if stale) ---
 if [ -d "$LOCK_DIR" ]; then
-  mt=$(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null)
-  [ -n "$mt" ] && [ $(( ( $(date +%s) - mt ) / 60 )) -ge "$LL_STALE_LOCK_MINUTES" ] && rmdir "$LOCK_DIR" 2>/dev/null
+  # GNU stat first (-c), BSD/macOS fallback (-f); guard against non-numeric output.
+  mt=$(stat -c %Y "$LOCK_DIR" 2>/dev/null || stat -f %m "$LOCK_DIR" 2>/dev/null)
+  case "$mt" in
+    ''|*[!0-9]*) : ;;  # can't determine age -> leave the lock alone
+    *) [ $(( ( $(date +%s) - mt ) / 60 )) -ge "$LL_STALE_LOCK_MINUTES" ] && rmdir "$LOCK_DIR" 2>/dev/null ;;
+  esac
 fi
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   exit 0  # another analyze is running
@@ -97,7 +101,7 @@ if [ "$(printf '%s' "$chunk" | wc -c)" -gt "$LL_MAX_CHUNK_BYTES" ]; then
 fi
 
 # Compact the chunk to a human-readable form for haiku (drop noise fields).
-chunk_compact=$(printf '%s\n' "$chunk" | jq -c '{
+chunk_compact=$(printf '%s\n' "$chunk" | jq -cR 'fromjson? // empty | {
   uuid: (.uuid // null),
   role: (.message.role // null),
   text: (
@@ -210,9 +214,10 @@ entry_count=$(printf '%s' "$response_clean" | jq 'length' 2>/dev/null)
 latest_uuid=$(jq -r 'select(.uuid)|.uuid' "$TRANSCRIPT_PATH" 2>/dev/null | tail -1)
 now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 if [ -n "$latest_uuid" ]; then
-  jq --arg u "$latest_uuid" --arg t "$now_iso" --arg s "$SID" \
-    '.anchors = (.anchors // {}) | .anchors[$s] = $u | .last_run_at = $t' \
-    "$STATE_FILE" > "$STATE_FILE.tmp" 2>/dev/null && mv "$STATE_FILE.tmp" "$STATE_FILE"
+  _st_tmp=$(mktemp "$STATE_DIR/.st.XXXXXX" 2>/dev/null) && \
+    jq --arg u "$latest_uuid" --arg t "$now_iso" --arg s "$SID" \
+      '.anchors = (.anchors // {}) | .anchors[$s] = $u | .last_run_at = $t' \
+      "$STATE_FILE" > "$_st_tmp" 2>/dev/null && mv "$_st_tmp" "$STATE_FILE" || rm -f "$_st_tmp"
 fi
 
 # Cap the skill-invocations log (runs whether or not we found entries).
@@ -233,7 +238,7 @@ today=$(date +%Y-%m-%d)
 month=$(date +%Y-%m)
 
 entries_md=$(printf '%s' "$response_clean" | jq -r --arg ts "$ts_local" --arg conv "$session_short" --arg wl "$LL_WIKILINKS" '
-  .[] |
+  .[] | select(type=="object") |
   "## " + $ts + "\n" +
   "- **Did:** " + (.did // "—") + "\n" +
   "- **Wanted:** " + (.wanted // "—") + "\n" +
@@ -245,7 +250,7 @@ entries_md=$(printf '%s' "$response_clean" | jq -r --arg ts "$ts_local" --arg co
     end
   ) + "\n" +
   "- **Status:** open\n" +
-  "- **Source:** auto (haiku, " + (.class // "user-correction") + ", conv=" + $conv + ", turn=" + (.turn_uuid // "?")[0:8] + ")\n"
+  "- **Source:** auto (haiku, " + (.class // "user-correction") + ", conv=" + $conv + ", turn=" + (.turn_uuid // "?")[0:8] + ")\n" + "\n"
 ' 2>/dev/null)
 
 if [ -z "$entries_md" ]; then

@@ -66,8 +66,9 @@ if [ -n "$last_uuid" ] && ! grep -q "$last_uuid" "$transcript_path" 2>/dev/null;
 fi
 
 # Record current session id; ensure .anchors exists.
-jq --arg s "$session_id" '.last_session_id = $s | .anchors = (.anchors // {})' \
-  "$STATE_FILE" > "$STATE_FILE.tmp" 2>/dev/null && mv "$STATE_FILE.tmp" "$STATE_FILE"
+_st_tmp=$(mktemp "$STATE_DIR/.st.XXXXXX" 2>/dev/null) && \
+  jq --arg s "$session_id" '.last_session_id = $s | .anchors = (.anchors // {})' \
+    "$STATE_FILE" > "$_st_tmp" 2>/dev/null && mv "$_st_tmp" "$STATE_FILE" || rm -f "$_st_tmp"
 
 # --- Slice transcript chunk since last analysis ---
 if [ -n "$last_uuid" ]; then
@@ -83,7 +84,7 @@ fi
 [ -z "$chunk" ] && exit 0
 
 # --- Count NEW real messages (text-bearing user/assistant turns only) ---
-msg_count=$(printf '%s\n' "$chunk" | jq -r '
+msg_count=$(printf '%s\n' "$chunk" | jq -rR 'fromjson? // empty |
   select(
     (.message.role == "user" or .message.role == "assistant")
     and (
@@ -108,12 +109,18 @@ fi
 
 # --- Skip an obviously redundant fork if an analyze is already running ---
 if [ -d "$LOCK_DIR" ]; then
-  mt=$(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null)
-  if [ -n "$mt" ] && [ $(( ( $(date +%s) - mt ) / 60 )) -ge "$LL_STALE_LOCK_MINUTES" ]; then
-    rmdir "$LOCK_DIR" 2>/dev/null   # stale lock — reclaim
-  else
-    exit 0                           # active lock
-  fi
+  # GNU stat first (-c), BSD/macOS fallback (-f); guard against non-numeric output.
+  mt=$(stat -c %Y "$LOCK_DIR" 2>/dev/null || stat -f %m "$LOCK_DIR" 2>/dev/null)
+  case "$mt" in
+    ''|*[!0-9]*) exit 0 ;;  # can't determine age -> assume active
+    *)
+      if [ $(( ( $(date +%s) - mt ) / 60 )) -ge "$LL_STALE_LOCK_MINUTES" ]; then
+        rmdir "$LOCK_DIR" 2>/dev/null   # stale -> reclaim
+      else
+        exit 0                           # active lock
+      fi
+      ;;
+  esac
 fi
 
 # Fork the background analyzer. CCLL_INACTIVE disarms hooks inside the fork.

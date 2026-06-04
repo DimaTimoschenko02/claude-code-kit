@@ -51,7 +51,11 @@ rm -f "$CLAUDE_DIR/hooks/learning-log-trigger.sh" \
       "$CLAUDE_DIR/hooks/_lib/config.sh" \
       "$CLAUDE_DIR/skills/learning-log/SKILL.md" \
       "$CLAUDE_DIR/.cc-learning-log.version"
+rm -f "$CLAUDE_DIR/skills/learning-log/"SKILL.md.bak.* 2>/dev/null || true
+# Drop now-empty managed dirs (rmdir is a no-op if the user has other files there).
 rmdir "$CLAUDE_DIR/skills/learning-log" 2>/dev/null || true
+rmdir "$CLAUDE_DIR/hooks/_lib" 2>/dev/null || true
+rmdir "$CLAUDE_DIR/hooks" 2>/dev/null || true
 echo "removed cc-learning-log scripts + skill" >&2
 
 # --- User data ---

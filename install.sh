@@ -23,7 +23,8 @@ if [ "$MODE" = "check" ]; then
   if [ -f "$VERSION_FILE" ] && command -v jq >/dev/null 2>&1; then
     inst="$(jq -r '.version // "?"' "$VERSION_FILE" 2>/dev/null)"
   else
-    inst="$( [ -f "$VERSION_FILE" ] && grep -o '"version"[^,}]*' "$VERSION_FILE" || echo "not installed" )"
+    inst="$( [ -f "$VERSION_FILE" ] && sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$VERSION_FILE" )"
+    [ -z "$inst" ] && inst="not installed"
   fi
   if [ "$inst" = "$PKG_VERSION" ]; then echo "up-to-date (v$PKG_VERSION)";
   elif [ "$inst" = "not installed" ]; then echo "not installed (package v$PKG_VERSION)";
@@ -60,8 +61,8 @@ TRIGGER='bash "$CLAUDE_PROJECT_DIR/.claude/hooks/learning-log-trigger.sh"'
 SKILLLOG='bash "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-invocation-log.sh"'
 
 JQ_MERGE='
-  def base(c): (c | capture("(?<f>[^/\"]+\\.sh)").f) // c;
-  def present(arr; c): any((arr // [])[]?.hooks[]?; ((.command // "") | (capture("(?<f>[^/\"]+\\.sh)").f // .)) == base(c));
+  def base(c): (c | capture("(?<f>[^/\\\\\"]+\\.sh)").f) // c;
+  def present(arr; c): any((arr // [])[]?.hooks[]?; ((.command // "") | (capture("(?<f>[^/\\\\\"]+\\.sh)").f // .)) == base(c));
   def ensure(ev; c):
     .hooks[ev] = ((.hooks[ev] // []) as $g
       | if present($g; c) then $g
