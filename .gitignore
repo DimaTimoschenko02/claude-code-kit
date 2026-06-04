@@ -1,0 +1,2 @@
+# Nothing to ignore in the package itself; the installer manages the target's .gitignore.
+*.bak.*

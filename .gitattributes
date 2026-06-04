@@ -1,0 +1,2 @@
+# Shell scripts must keep LF endings — CRLF breaks the shebang on Windows clones.
+*.sh text eol=lf
