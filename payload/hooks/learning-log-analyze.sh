@@ -129,30 +129,48 @@ fi
 # --- Build prompt (literal heredoc + token substitution; no escape traps) ---
 read -r -d '' SYSTEM_PROMPT <<'EOF' || true
 You analyze a conversation between Claude (an AI coding assistant) and __PERSONA__.
-Your job: find moments worth logging as learning signals. TWO classes count:
+Your job: find moments worth logging as learning signals. THREE classes count:
 
 1. "user-correction" — __PERSONA__ tells Claude it did something wrong, should
    have done something else, or expresses frustration about a mistake.
 2. "self-correction" — Claude itself notices and fixes its own mistake, or
    admits doing something suboptimal, WITHOUT being told first.
+3. "win" — Claude or __PERSONA__ reached a NON-TRIVIAL, REUSABLE solution worth
+   keeping for the future: a tool gotcha + its workaround, a working pattern, a
+   derived rule. NOT every completed task — only something reusable BEYOND the
+   current task.
 
-Output a JSON array. Each item describes one event:
+Output a JSON array. Each item describes one event.
 
+For a mistake (class "user-correction" or "self-correction"):
 {
   "class": "user-correction | self-correction",
   "did": "what Claude actually did (1-2 sentences, past tense, in __LANGUAGE__)",
   "wanted": "what should have happened instead (1 sentence, in __LANGUAGE__)",
   "cause_hypothesis": "skill | claude-md | memory | habit | unknown",
   "cause_explanation": "1 short phrase in __LANGUAGE__ explaining the hypothesis",
+  "runtime_fix": "self-correction ONLY: what Claude did to recover in the moment (1 phrase in __LANGUAGE__); else null",
   "related_skill_or_file": "name of skill or file if related, else null",
   "turn_uuid": "uuid of the relevant turn"
 }
 
+For a win (class "win"):
+{
+  "class": "win",
+  "what": "the solution/pattern Claude arrived at (1-2 sentences, in __LANGUAGE__)",
+  "reusable": "why it is valuable / where it can be reused (1 sentence, in __LANGUAGE__)",
+  "target": "memory | skill | convention (best guess where to promote it)",
+  "related_skill_or_file": "name of skill or file, else null",
+  "turn_uuid": "uuid of the relevant turn"
+}
+
 Rules:
-- Return BOTH clear user-corrections AND clear self-corrections.
-- DO NOT invent. If there is no clear correction of either class, return [].
-- DO NOT include corrections about formatting, typos, or content nuances.
-  Focus on behavioral/process mistakes (Claude did X, should have done Y).
+- Return clear user-corrections, clear self-corrections, AND clear wins.
+- DO NOT invent. If there is no clear event of any class, return [].
+- DO NOT include nitpicks about formatting, typos, or content nuance.
+  Mistakes = behavioral/process (Claude did X, should have done Y).
+- Be CONSERVATIVE with wins: only genuinely reusable insight, never routine
+  "task completed". When unsure whether something is a win, omit it.
 - The "related_skill_or_file" field: cross-reference the provided skills_invoked
   list. If the event happened while a specific skill was active, name that skill.
 
@@ -231,18 +249,53 @@ if [ "$entry_count" -eq 0 ]; then
   exit 0
 fi
 
-# --- Format entries as markdown ---
+# --- Format entries and prepend them to the right file(s) ---
+# Mistakes (user/self-correction) → day file <YYYY-MM>/<YYYY-MM-DD>.md ("## HH:MM").
+# Wins                            → wins/candidates.md buffer            ("## YYYY-MM-DD HH:MM").
 session_short="${SID:0:8}"
-ts_local=$(date +%H:%M)     # entry header is HH:MM (date lives in folder/filename)
+ts_local=$(date +%H:%M)     # mistake header is HH:MM (date lives in folder/filename)
 today=$(date +%Y-%m-%d)
 month=$(date +%Y-%m)
 
-entries_md=$(printf '%s' "$response_clean" | jq -r --arg ts "$ts_local" --arg conv "$session_short" --arg wl "$LL_WIKILINKS" '
-  .[] | select(type=="object") |
+# Prepend $block into $target before the first existing "## " header (newest on
+# top), or after the H1 if none. Creates $target with $h1 if missing. Entries
+# come from a FILE (never `awk -v`: it interprets backslash escapes and special
+# markdown chars silently break it — empty output, a real bug hit in dev).
+prepend_block() {
+  local target="$1" h1="$2" block="$3" dir tmp entries_tmp
+  [ -z "$block" ] && return 1
+  dir=$(dirname "$target")
+  mkdir -p "$dir" 2>/dev/null || { log_err "failed to mkdir: $dir"; return 1; }
+  if [ ! -f "$target" ]; then
+    printf '%s\n' "$h1" > "$target" 2>/dev/null || { log_err "failed to create: $target"; return 1; }
+  fi
+  tmp=$(mktemp "$dir/.ll.XXXXXX" 2>/dev/null) || { log_err "mktemp failed"; return 1; }
+  entries_tmp=$(mktemp "$dir/.ent.XXXXXX" 2>/dev/null) || { log_err "mktemp failed"; rm -f "$tmp"; return 1; }
+  printf '%s\n' "$block" > "$entries_tmp"
+  awk '
+    NR==FNR { buf = buf $0 ORS; next }
+    /^## / && !inserted { printf "%s", buf; inserted=1 }
+    { print }
+    END { if (!inserted) { print ""; printf "%s", buf } }
+  ' "$entries_tmp" "$target" > "$tmp" 2>/dev/null
+  rm -f "$entries_tmp"
+  if [ -s "$tmp" ]; then
+    mv "$tmp" "$target" 2>/dev/null || { log_err "failed to replace: $target"; rm -f "$tmp"; return 1; }
+  else
+    log_err "awk produced empty output for $target"; rm -f "$tmp"; return 1
+  fi
+  return 0
+}
+
+# Mistakes → day file.
+mistakes_md=$(printf '%s' "$response_clean" | jq -r --arg ts "$ts_local" --arg conv "$session_short" --arg wl "$LL_WIKILINKS" '
+  .[] | select(type=="object") | select((.class // "user-correction") != "win") |
   "## " + $ts + "\n" +
   "- **Did:** " + (.did // "—") + "\n" +
   "- **Wanted:** " + (.wanted // "—") + "\n" +
   "- **Cause:** " + (.cause_hypothesis // "unknown") + " — " + (.cause_explanation // "—") + "\n" +
+  (if (.runtime_fix // null) != null and (.runtime_fix // "") != ""
+   then "- **Runtime-fix:** " + .runtime_fix + "\n" else "" end) +
   "- **Related:** " + (
     if (.related_skill_or_file // null) == null or (.related_skill_or_file // "") == "" then "—"
     elif $wl == "true" then "[[" + .related_skill_or_file + "]]"
@@ -253,47 +306,24 @@ entries_md=$(printf '%s' "$response_clean" | jq -r --arg ts "$ts_local" --arg co
   "- **Source:** auto (haiku, " + (.class // "user-correction") + ", conv=" + $conv + ", turn=" + (.turn_uuid // "?")[0:8] + ")\n" + "\n"
 ' 2>/dev/null)
 
-if [ -z "$entries_md" ]; then
-  log_err "failed to format entries to markdown"
-  exit 0
-fi
+# Wins → candidates buffer (full date in header, single file).
+wins_md=$(printf '%s' "$response_clean" | jq -r --arg ts "$today $ts_local" --arg conv "$session_short" '
+  .[] | select(type=="object") | select((.class // "") == "win") |
+  "## " + $ts + "\n" +
+  "- **What:** " + (.what // .did // "—") + "\n" +
+  "- **Reusable:** " + (.reusable // "—") + "\n" +
+  "- **Target:** " + (.target // "—") + "\n" +
+  "- **Status:** open\n" +
+  "- **Source:** auto (haiku, win, conv=" + $conv + ", turn=" + (.turn_uuid // "?")[0:8] + ")\n" + "\n"
+' 2>/dev/null)
 
-# --- Write entries to today's day file (prepend, newest on top) ---
-DAY_DIR="$LEARNING_LOG_DIR/$month"
-DAY_FILE="$DAY_DIR/$today.md"
+DAY_FILE="$LEARNING_LOG_DIR/$month/$today.md"
+WINS_FILE="$LEARNING_LOG_DIR/wins/candidates.md"
 
-if ! mkdir -p "$DAY_DIR" 2>/dev/null; then
-  log_err "failed to mkdir day dir: $DAY_DIR"
-  exit 0
-fi
+wrote=0
+[ -n "$mistakes_md" ] && { prepend_block "$DAY_FILE" "# Learning Log — $today" "$mistakes_md" && wrote=1; }
+[ -n "$wins_md" ] && { prepend_block "$WINS_FILE" "# Win Candidates" "$wins_md" && wrote=1; }
 
-if [ ! -f "$DAY_FILE" ]; then
-  printf '# Learning Log — %s\n' "$today" > "$DAY_FILE" 2>/dev/null \
-    || { log_err "failed to create day file: $DAY_FILE"; exit 0; }
-fi
-
-# Insert before the first existing '## HH:MM' (newest on top), or after the H1 if
-# none. Entries are read from a FILE (not `awk -v`): awk -v interprets backslash
-# escapes and special markdown chars silently break it (empty output — a real bug
-# hit during development). mktemp lives next to the dest so mv is a same-fs rename.
-TMP=$(mktemp "$DAY_DIR/.day.XXXXXX" 2>/dev/null) || { log_err "mktemp failed"; exit 0; }
-ENTRIES_TMP=$(mktemp "$DAY_DIR/.ent.XXXXXX" 2>/dev/null) || { log_err "mktemp failed"; rm -f "$TMP"; exit 0; }
-printf '%s\n' "$entries_md" > "$ENTRIES_TMP"
-
-awk '
-  NR==FNR { buf = buf $0 ORS; next }
-  /^## [0-9][0-9]:[0-9][0-9]/ && !inserted { printf "%s", buf; inserted=1 }
-  { print }
-  END { if (!inserted) { print ""; printf "%s", buf } }
-' "$ENTRIES_TMP" "$DAY_FILE" > "$TMP" 2>/dev/null
-rm -f "$ENTRIES_TMP"
-
-if [ -s "$TMP" ]; then
-  mv "$TMP" "$DAY_FILE" 2>/dev/null || { log_err "failed to replace day file"; rm -f "$TMP"; exit 0; }
-else
-  log_err "awk produced empty output"
-  rm -f "$TMP"
-  exit 0
-fi
+[ "$wrote" -eq 0 ] && log_err "no entries written (empty format output for all $entry_count classified items)"
 
 exit 0

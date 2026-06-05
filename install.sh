@@ -114,9 +114,11 @@ cat >&2 <<SUMMARY
 
 cc-learning-log v$PKG_VERSION installed into: $CLAUDE_DIR
   hooks:   learning-log-trigger.sh, learning-log-analyze.sh, skill-invocation-log.sh (+ _lib/)
-  skill:   skills/learning-log/SKILL.md   (commands: /log, /learning-log, analyze, flush)
+  skill:   skills/learning-log/SKILL.md   (commands: /log, /learning-log, analyze, wins, flush)
   config:  learning-log.config.json       (edit threshold/model/persona/language/wikilinks)
-  logs:    .claude/learning-log/<YYYY-MM>/<YYYY-MM-DD>.md   (GITIGNORED by default)
+  logs:    .claude/learning-log/<YYYY-MM>/<YYYY-MM-DD>.md   mistakes   (GITIGNORED by default)
+           .claude/learning-log/wins/candidates.md          win candidates
+           .claude/learning-log/resolutions.md              fix registry (recurrence)
   state:   .claude/state/                 (per-machine, gitignored)
   runtime requires: jq + 'claude' CLI logged into a Max/Pro plan
 
