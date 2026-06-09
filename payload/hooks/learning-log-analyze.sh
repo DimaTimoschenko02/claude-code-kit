@@ -79,6 +79,12 @@ if [ -n "$last_uuid" ] && ! grep -q "$last_uuid" "$TRANSCRIPT_PATH" 2>/dev/null;
   last_uuid=""
 fi
 
+# With NO anchor, scan only the TAIL — never the whole file. Whole-file rescans
+# re-classify already-logged turns and spam duplicates (one turn can land N×
+# across sessions on resumed/forked transcripts). The trigger fires on new
+# activity, so the tail covers the unprocessed window; content dedup (below)
+# catches any overlap. Override via LL_NO_ANCHOR_TAIL_LINES in config.
+no_anchor_tail="${LL_NO_ANCHOR_TAIL_LINES:-40}"
 if [ -n "$last_uuid" ]; then
   chunk=$(awk -v anchor="$last_uuid" '
     BEGIN { found=0 }
@@ -86,7 +92,7 @@ if [ -n "$last_uuid" ]; then
     $0 ~ anchor { found=1 }
   ' "$TRANSCRIPT_PATH" 2>/dev/null)
 else
-  chunk=$(cat "$TRANSCRIPT_PATH" 2>/dev/null)
+  chunk=$(tail -n "$no_anchor_tail" "$TRANSCRIPT_PATH" 2>/dev/null)
 fi
 
 if [ -z "$chunk" ]; then
@@ -169,8 +175,18 @@ Rules:
 - DO NOT invent. If there is no clear event of any class, return [].
 - DO NOT include nitpicks about formatting, typos, or content nuance.
   Mistakes = behavioral/process (Claude did X, should have done Y).
+- NOISE FILTER (critical). Do NOT log a self-correction that is a one-off
+  technical slip Claude already fixed in the same turn with NO lasting lesson:
+  wrong shell flag, quoting/escaping, syntax error, reserved variable name, a
+  race condition, a miscount/redo. These are cause="habit" with a runtime_fix
+  and teach nothing reusable — OMIT them. Log a self-correction ONLY when it
+  points to a fixable infrastructure gap (cause skill/claude-md/memory) or
+  repeats a known pattern. User-corrections: always log.
 - Be CONSERVATIVE with wins: only genuinely reusable insight, never routine
   "task completed". When unsure whether something is a win, omit it.
+- For wins, also OMIT anything that is general programming common knowledge or
+  likely already recorded (a basic tool fact, a one-line gotcha). A win must be
+  a non-obvious, reusable pattern. When in doubt, omit.
 - The "related_skill_or_file" field: cross-reference the provided skills_invoked
   list. If the event happened while a specific skill was active, name that skill.
 
@@ -257,6 +273,21 @@ ts_local=$(date +%H:%M)     # mistake header is HH:MM (date lives in folder/file
 today=$(date +%Y-%m-%d)
 month=$(date +%Y-%m)
 
+DAY_FILE="$LEARNING_LOG_DIR/$month/$today.md"
+WINS_FILE="$LEARNING_LOG_DIR/wins/candidates.md"
+
+# --- Content-level dedup by turn_uuid ---
+# A turn re-scanned by another session (resumed/forked transcript, tail overlap)
+# must not produce a duplicate entry. Match the 8-char turn short already
+# embedded in existing Source lines and drop any item already logged.
+seen_turns=$(cat "$DAY_FILE" "$WINS_FILE" 2>/dev/null \
+  | grep -oE 'turn=[0-9a-fA-F]{6,8}' | sed 's/turn=//' \
+  | sort -u | jq -R . | jq -sc . 2>/dev/null)
+[ -z "$seen_turns" ] && seen_turns='[]'
+response_clean=$(printf '%s' "$response_clean" | jq -c --argjson seen "$seen_turns" \
+  '[ .[] | select( ((.turn_uuid // "?")[0:8]) as $t | ($seen | index($t)) | not ) ]' 2>/dev/null)
+[ -z "$response_clean" ] && response_clean='[]'
+
 # Prepend $block into $target before the first existing "## " header (newest on
 # top), or after the H1 if none. Creates $target with $h1 if missing. Entries
 # come from a FILE (never `awk -v`: it interprets backslash escapes and special
@@ -316,9 +347,6 @@ wins_md=$(printf '%s' "$response_clean" | jq -r --arg ts "$today $ts_local" --ar
   "- **Status:** open\n" +
   "- **Source:** auto (haiku, win, conv=" + $conv + ", turn=" + (.turn_uuid // "?")[0:8] + ")\n" + "\n"
 ' 2>/dev/null)
-
-DAY_FILE="$LEARNING_LOG_DIR/$month/$today.md"
-WINS_FILE="$LEARNING_LOG_DIR/wins/candidates.md"
 
 wrote=0
 [ -n "$mistakes_md" ] && { prepend_block "$DAY_FILE" "# Learning Log — $today" "$mistakes_md" && wrote=1; }

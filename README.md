@@ -149,6 +149,7 @@ Wins are conservative: routine task completion is NOT a win — only insight reu
 | `max_chunk_bytes` | `300000` | truncate long backlogs to the last N bytes |
 | `stale_lock_minutes` | `5` | reclaim a stuck lock after N minutes |
 | `skill_log_lookback` | `20` | recent skill calls fed to the classifier |
+| `no_anchor_tail_lines` | `40` | with no session anchor, scan only the last N transcript lines (never the whole file — prevents duplicate spam on resumed/forked transcripts) |
 | `classifier_timeout_seconds` | `120` | cap a hung `claude -p` |
 | `force_subscription` | `true` | unset `ANTHROPIC_API_KEY` so the Max/Pro sub is used, never the billed API |
 | `persona` | `"the user"` | who Claude talks to (set to a name to personalize entries) |
