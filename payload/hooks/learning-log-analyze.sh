@@ -40,7 +40,17 @@ STATE_DIR="$LL_CLAUDE_DIR/state"
 ERROR_LOG="$STATE_DIR/analyze-errors.log"
 LOCK_DIR="$STATE_DIR/.analyze.lock.d"
 SKILL_LOG="$STATE_DIR/skill-invocations.jsonl"
-LEARNING_LOG_DIR="$LL_CLAUDE_DIR/learning-log"
+# Log destination: LL_LOG_DIR overrides (relative -> resolved against project
+# root, so a vault path like "99 meta/learning-log" lands inside the repo).
+# Empty -> default to <project>/.claude/learning-log.
+if [ -n "$LL_LOG_DIR" ]; then
+  case "$LL_LOG_DIR" in
+    /*) LEARNING_LOG_DIR="$LL_LOG_DIR" ;;
+    *)  LEARNING_LOG_DIR="$PROJECT_ROOT/$LL_LOG_DIR" ;;
+  esac
+else
+  LEARNING_LOG_DIR="$LL_CLAUDE_DIR/learning-log"
+fi
 
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 

@@ -48,9 +48,13 @@ chmod +x "$CLAUDE_DIR"/hooks/*.sh
 dest="$CLAUDE_DIR/skills/learning-log/SKILL.md"
 marker="cc-learning-log:managed"
 if [ -f "$dest" ] && ! grep -q "$marker" "$dest"; then
-  cp "$dest" "$dest.bak.$(date +%s)"; echo "backed up foreign SKILL.md -> $dest.bak.*" >&2
+  # Project-owned SKILL (e.g. a notes-vault flavor with obsidian-CLI I/O).
+  # Preserve it: the executable hooks are the shared source of truth, but the
+  # agent-facing skill prose legitimately differs per project. Re-run safe.
+  echo "kept project-owned SKILL.md (no '$marker' marker) — not overwritten" >&2
+else
+  cp "$PKG_DIR/payload/skills/learning-log/SKILL.md" "$dest"
 fi
-cp "$PKG_DIR/payload/skills/learning-log/SKILL.md" "$dest"
 
 # Seed config only if absent (preserve user edits on re-install).
 [ -f "$CLAUDE_DIR/learning-log.config.json" ] || cp "$PKG_DIR/config.defaults.json" "$CLAUDE_DIR/learning-log.config.json"

@@ -156,6 +156,13 @@ Wins are conservative: routine task completion is NOT a win — only insight reu
 | `language` | `"the conversation's language"` | language for entry text |
 | `classifier_extra_instructions` | `""` | appended verbatim to the classifier system prompt |
 | `wikilinks` | `false` | `false` → `` `name` ``; `true` → `[[name]]` (Obsidian) |
+| `log_dir` | `""` | log destination relative to project root; empty → `.claude/learning-log`. Set e.g. `"99 meta/learning-log"` to write into a notes vault. Also `CCLL_LOG_DIR` env. |
+
+## Enable / disable
+
+- **Globally:** `enabled: false` in the config (durable, survives re-install), or `CCLL_ENABLED=false` env.
+- **Per-chat (opt-out one session):** add its `session_id` to `.claude/state/ll-excluded-sessions.json` (a JSON array). The `Stop`/`SessionEnd` hook skips listed sessions; everything else still logs. The skill's `/learning-log on|off [chat|global]` and `/learning-log status` commands manage both layers (default scope = `chat`).
+- **Subagents never trigger capture** — the hooks bind only `Stop` + `SessionEnd`; Task-tool subagents fire `SubagentStop`, which is intentionally not registered.
 
 ## Verify
 

@@ -22,13 +22,19 @@ LL_PERSONA="the user"
 LL_LANGUAGE="the conversation's language"
 LL_EXTRA=""
 LL_WIKILINKS="false"
+# Log destination, relative to project root (empty -> "<root>/.claude/learning-log").
+# Set to e.g. "99 meta/learning-log" to write logs into a notes vault instead.
+LL_LOG_DIR=""
 
 # --- Config file layer ---
 _ll_cfg="${LL_CLAUDE_DIR:-}/learning-log.config.json"
 if command -v jq >/dev/null 2>&1 && [ -f "$_ll_cfg" ] && jq -e 'type=="object"' "$_ll_cfg" >/dev/null 2>&1; then
   # tr -d '\r' guards a CRLF-saved config.json (Windows editors) from injecting a
   # trailing \r that would break string compares like [ "$LL_ENABLED" = "true" ].
-  _ll_get() { jq -r --arg k "$1" '.[$k] // empty' "$_ll_cfg" 2>/dev/null | tr -d '\r'; }
+  # NB: `.[$k] // empty` would swallow a literal `false` (jq's // triggers on
+  # both null AND false) — so `enabled:false` / `wikilinks:false` were silently
+  # ignored. Explicit null-check preserves boolean false.
+  _ll_get() { jq -r --arg k "$1" 'if .[$k] == null then empty else .[$k] end' "$_ll_cfg" 2>/dev/null | tr -d '\r'; }
   _v=$(_ll_get enabled);                       [ -n "$_v" ] && LL_ENABLED="$_v"
   _v=$(_ll_get threshold);                      [ -n "$_v" ] && LL_THRESHOLD="$_v"
   _v=$(_ll_get model);                          [ -n "$_v" ] && LL_MODEL="$_v"
@@ -42,6 +48,7 @@ if command -v jq >/dev/null 2>&1 && [ -f "$_ll_cfg" ] && jq -e 'type=="object"' 
   _v=$(_ll_get language);                        [ -n "$_v" ] && LL_LANGUAGE="$_v"
   _v=$(_ll_get classifier_extra_instructions);  [ -n "$_v" ] && LL_EXTRA="$_v"
   _v=$(_ll_get wikilinks);                       [ -n "$_v" ] && LL_WIKILINKS="$_v"
+  _v=$(_ll_get log_dir);                          [ -n "$_v" ] && LL_LOG_DIR="$_v"
   unset _v
 fi
 
@@ -58,3 +65,4 @@ fi
 [ -n "${CCLL_SKILL_LOG_LOOKBACK:-}" ] && LL_SKILL_LOG_LOOKBACK="$CCLL_SKILL_LOG_LOOKBACK"
 [ -n "${CCLL_LANGUAGE:-}" ]         && LL_LANGUAGE="$CCLL_LANGUAGE"
 [ -n "${CCLL_EXTRA:-}" ]            && LL_EXTRA="$CCLL_EXTRA"
+[ -n "${CCLL_LOG_DIR:-}" ]          && LL_LOG_DIR="$CCLL_LOG_DIR"

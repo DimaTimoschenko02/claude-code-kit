@@ -11,5 +11,6 @@
   "persona": "the user",
   "language": "the conversation's language",
   "classifier_extra_instructions": "",
-  "wikilinks": false
+  "wikilinks": false,
+  "log_dir": ""
 }

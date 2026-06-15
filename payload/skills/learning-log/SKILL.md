@@ -1,7 +1,7 @@
 <!-- cc-learning-log:managed -->
 ---
 name: learning-log
-description: Накопление и разбор наблюдений за поведением Claude (self-learning log) — промахи (mistakes) и удачные переиспользуемые решения (wins). Используется когда пользователь говорит "/log <текст>", "/learning-log", "/learning-log analyze", "/learning-log wins", "/learning-log flush", "покажи лог", "разбери лог", "что я там накопил", "анализ ошибок". Также при повторных коррекциях ("я же говорил", "опять то же", "again the same") — предложить добавить запись через /log.
+description: Накопление и разбор наблюдений за поведением Claude (self-learning log) — промахи (mistakes) и удачные переиспользуемые решения (wins). Используется когда пользователь говорит "/log <текст>", "/learning-log", "/learning-log analyze", "/learning-log wins", "/learning-log flush", "/learning-log on|off [chat|global]", "/learning-log status", "покажи лог", "разбери лог", "что я там накопил", "анализ ошибок", "выключи лог", "не логируй этот чат". Также при повторных коррекциях ("я же говорил", "опять то же", "again the same") — предложить добавить запись через /log.
 ---
 
 # Learning Log
@@ -207,6 +207,58 @@ Registry: R failed-фиксов (рецидивы) — см. /learning-log analy
 
 ---
 
+## Command: `/learning-log on|off [chat|global]` · `/learning-log status`
+
+Тумблер захвата на двух уровнях. **Scope по умолчанию = `chat`** (точечно, авто-истекает с концом сессии — нельзя забыть вернуть). `global` — только по явному слову (постоянный, переживает рестарты).
+
+**Приоритет:** `global off` перебивает всё (выключено везде). При `global on` чат из exclude-списка не логируется, остальные — да. То есть `off chat` = «кроме вот этого чата».
+
+### Резолв session_id текущего чата
+`CLAUDE_SESSION_ID` в env нет. Берём transcript текущей сессии по содержимому (как в `flush`); basename без `.jsonl` = session_id:
+```bash
+PROOT="$(pwd)"
+SID=$(for f in "$HOME"/.claude/projects/*/*.jsonl; do
+    [ -f "$f" ] || continue
+    c=$(head -n1 "$f" | jq -r '.cwd // empty' 2>/dev/null)
+    [ "$c" = "$PROOT" ] && printf '%s\t%s\n' "$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f")" "$f"
+  done | sort -rn | head -1 | cut -f2 | xargs -I{} basename {} .jsonl)
+```
+
+### `/learning-log off chat` (default) / `on chat`
+Правит `.claude/state/ll-excluded-sessions.json` (JSON-массив session_id; читается hook'ом trigger.sh):
+```bash
+EX=".claude/state/ll-excluded-sessions.json"; mkdir -p "$(dirname "$EX")"
+[ -f "$EX" ] || echo '[]' > "$EX"
+# off chat:  добавить уникально
+jq --arg s "$SID" 'if any(.[]?; .==$s) then . else . + [$s] end' "$EX" > "$EX.t" && mv "$EX.t" "$EX"
+# on  chat:  убрать
+jq --arg s "$SID" 'map(select(. != $s))' "$EX" > "$EX.t" && mv "$EX.t" "$EX"
+```
+
+### `/learning-log off global` / `on global`
+Правит `enabled` в конфиге (durable, переживает переустановку пакета):
+```bash
+CFG=".claude/learning-log.config.json"
+jq '.enabled=false' "$CFG" > "$CFG.t" && mv "$CFG.t" "$CFG"   # off global
+jq '.enabled=true'  "$CFG" > "$CFG.t" && mv "$CFG.t" "$CFG"   # on  global
+```
+
+### `/learning-log status`
+Показать оба уровня + накопление:
+```bash
+GLOBAL=$(jq -r '.enabled // true' .claude/learning-log.config.json 2>/dev/null)
+THISCHAT=$(jq -e --arg s "$SID" 'any(.[]?; .==$s)' .claude/state/ll-excluded-sessions.json >/dev/null 2>&1 && echo excluded || echo active)
+LASTRUN=$(jq -r '.last_run_at // "never"' .claude/state/learning-log.json 2>/dev/null)
+```
+Вывести компактно:
+```
+global:    on            (или off)
+this chat: active ✓       (или excluded ✗)
+last run:  2026-06-15T12:02Z
+```
+
+---
+
 ## Auto-classifier overview
 
 - **Триггер:** Stop hook форкает классификатор при `threshold` новых user/assistant-сообщений (default 6). SessionEnd — флеш хвоста.
@@ -224,7 +276,8 @@ Registry: R failed-фиксов (рецидивы) — см. /learning-log analy
 | `.claude/learning-log/<YYYY-MM>/<YYYY-MM-DD>.md` | Mistakes (дневные, open + addressed/wontfix) |
 | `.claude/learning-log/wins/candidates.md` | Win-кандидаты (буфер) |
 | `.claude/learning-log/resolutions.md` | Registry эффективности фиксов (паттерн = строка) |
-| `.claude/learning-log.config.json` | Конфиг (threshold, model, persona, language, wikilinks…) |
+| `.claude/learning-log.config.json` | Конфиг (threshold, model, persona, language, wikilinks, log_dir, enabled…) |
+| `.claude/state/ll-excluded-sessions.json` | per-chat opt-out: session_id'ы, которые hook пропускает |
 | `.claude/hooks/learning-log-trigger.sh` | Stop/SessionEnd entry |
 | `.claude/hooks/learning-log-analyze.sh` | Background haiku-классификатор (mistakes + wins) |
 | `.claude/hooks/skill-invocation-log.sh` | PostToolUse Skill logger |

@@ -49,6 +49,14 @@ STATE_FILE="$STATE_DIR/learning-log.json"
 LOCK_DIR="$STATE_DIR/.analyze.lock.d"
 ANALYZE_SCRIPT="$SCRIPT_DIR/learning-log-analyze.sh"
 
+# Per-chat opt-out: `/learning-log off chat` adds this session_id to the
+# exclusion list (JSON array). Global stays enabled; only THIS chat is skipped.
+EXCLUDE_FILE="$STATE_DIR/ll-excluded-sessions.json"
+if [ -n "$session_id" ] && [ -f "$EXCLUDE_FILE" ] && \
+   jq -e --arg s "$session_id" 'any(.[]?; . == $s)' "$EXCLUDE_FILE" >/dev/null 2>&1; then
+  exit 0
+fi
+
 mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
 # Initialize state file if missing.
