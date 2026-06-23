@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "threshold": 6,
+  "model": "claude-haiku-4-5-20251001",
+  "max_chunk_bytes": 300000,
+  "stale_lock_minutes": 5,
+  "skill_log_lookback": 20,
+  "no_anchor_tail_lines": 40,
+  "classifier_timeout_seconds": 120,
+  "force_subscription": true,
+  "persona": "the user",
+  "language": "the conversation's language",
+  "classifier_extra_instructions": "",
+  "wikilinks": false,
+  "log_dir": ""
+}
