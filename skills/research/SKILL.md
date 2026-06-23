@@ -1,6 +1,6 @@
 ---
 name: research
-description: Web research dispatcher. Use whenever the user wants to research a topic, find/compare options, or asks to search the web — "поищи в интернете", "загугли", "найди в сети", "что популярно", "сравни", "research X", "поиск в сети", "/research". Assesses scope, proposes a cost-appropriate mode, routes cheap models by default, then runs the `research` workflow. Triage first: trivial single-fact lookups get a direct WebSearch, NOT the workflow.
+description: 'Web research dispatcher. Use whenever the user wants to research a topic, find/compare options, or asks to search the web — "поищи в интернете", "загугли", "найди в сети", "что популярно", "сравни", "research X", "поиск в сети", "/research". Assesses scope, proposes a cost-appropriate mode, routes cheap models by default, then runs the `research` workflow. Triage first — trivial single-fact lookups get a direct WebSearch, NOT the workflow.'
 ---
 
 # research — web research dispatcher
