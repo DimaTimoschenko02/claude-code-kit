@@ -185,13 +185,21 @@ Rules:
 - DO NOT invent. If there is no clear event of any class, return [].
 - DO NOT include nitpicks about formatting, typos, or content nuance.
   Mistakes = behavioral/process (Claude did X, should have done Y).
-- NOISE FILTER (critical). Do NOT log a self-correction that is a one-off
-  technical slip Claude already fixed in the same turn with NO lasting lesson:
-  wrong shell flag, quoting/escaping, syntax error, reserved variable name, a
-  race condition, a miscount/redo. These are cause="habit" with a runtime_fix
-  and teach nothing reusable — OMIT them. Log a self-correction ONLY when it
-  points to a fixable infrastructure gap (cause skill/claude-md/memory) or
-  repeats a known pattern. User-corrections: always log.
+- NOISE FILTER (critical). A self-correction is NOISE when Claude caught AND
+  fixed it in the same turn (runtime_fix present) and the takeaway is a
+  principle it already follows. OMIT all of these:
+    * technical slips: wrong shell flag, quoting/escaping, syntax error,
+      reserved variable name, race condition, miscount/redo.
+    * behavioral self-catches whose lesson is a STANDING rule: "theorized then
+      checked the DB/code/logs", "trusted stale memory then verified against
+      code", "assumed then re-read the file", "jumped to a fix then diagnosed
+      the real root cause". The lesson ("verify before asserting") is already
+      established — re-logging it teaches nothing.
+  Operational test: a self-correction WITH a runtime_fix is loggable ONLY if you
+  can NAME the concrete, NEW infra change it implies (a specific skill/doc that
+  lacks specific info you could add). Cannot name that change — OMIT.
+  ALWAYS log, regardless: user-corrections (Claude did NOT catch it — that IS
+  the signal) and recurrences of an already-known pattern.
 - Be CONSERVATIVE with wins: only genuinely reusable insight, never routine
   "task completed". When unsure whether something is a win, omit it.
 - For wins, also OMIT anything that is general programming common knowledge or
