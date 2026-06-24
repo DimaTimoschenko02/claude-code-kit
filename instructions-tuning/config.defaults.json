@@ -1,0 +1,10 @@
+{
+  "gates": [
+    { "path_prefix": ".claude/skills/", "skill": "instructions-tuning" },
+    { "path_prefix": ".claude/rules/", "skill": "instructions-tuning" },
+    { "path_prefix": ".claude/hooks/", "skill": "instructions-tuning" },
+    { "path_prefix": ".claude/agents/", "skill": "instructions-tuning" },
+    { "path_exact": "CLAUDE.md", "skill": "instructions-tuning" },
+    { "path_exact": "AGENTS.md", "skill": "instructions-tuning" }
+  ]
+}
