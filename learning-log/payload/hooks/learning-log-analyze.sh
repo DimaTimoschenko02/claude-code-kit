@@ -110,14 +110,14 @@ if [ -z "$chunk" ]; then
   exit 0
 fi
 
-# --- Truncate oversized chunk: keep the LAST bytes; drop the first partial line ---
-if [ "$(printf '%s' "$chunk" | wc -c)" -gt "$LL_MAX_CHUNK_BYTES" ]; then
-  chunk=$(printf '%s' "$chunk" | tail -c "$LL_MAX_CHUNK_BYTES" | sed '1d')
-  log_err "info: chunk truncated to last ${LL_MAX_CHUNK_BYTES} bytes (long backlog, session $SID)"
-fi
-
-# Compact the chunk to a human-readable form for haiku (drop noise fields).
-chunk_compact=$(printf '%s\n' "$chunk" | jq -cR 'fromjson? // empty | {
+# --- Compact FIRST (strip tool-output noise), THEN truncate ---
+# The byte budget must hold CONVERSATION, not raw tool dumps. A single tool
+# result (DB dump, log query, subagent output) can exceed LL_MAX_CHUNK_BYTES of
+# raw jsonl by itself and evict the small text turns — where corrections and
+# reasoning live — when the RAW chunk is truncated. Compacting before the byte
+# cap keeps ~80x more real turns in the same budget. Per-line compaction streams
+# fine even on a multi-MB window.
+chunk_compact_lines=$(printf '%s\n' "$chunk" | jq -cR 'fromjson? // empty | {
   uuid: (.uuid // null),
   role: (.message.role // null),
   text: (
@@ -128,7 +128,17 @@ chunk_compact=$(printf '%s\n' "$chunk" | jq -cR 'fromjson? // empty | {
   ),
   tool_name: (.message.content // [] | if type=="array" then
     (map(select(type=="object" and .type=="tool_use") | .name) | first) else null end)
-}' 2>/dev/null | jq -sc . 2>/dev/null)
+}' 2>/dev/null)
+
+# Truncate the COMPACTED stream if still oversized: keep the LAST bytes, drop the
+# first (now-partial) line. Compacted text is dense conversation, so the cap bites
+# only on a genuinely huge backlog of real turns.
+if [ "$(printf '%s' "$chunk_compact_lines" | wc -c)" -gt "$LL_MAX_CHUNK_BYTES" ]; then
+  chunk_compact_lines=$(printf '%s' "$chunk_compact_lines" | tail -c "$LL_MAX_CHUNK_BYTES" | sed '1d')
+  log_err "info: compacted chunk truncated to last ${LL_MAX_CHUNK_BYTES} bytes (very long backlog, session $SID)"
+fi
+
+chunk_compact=$(printf '%s\n' "$chunk_compact_lines" | jq -sc . 2>/dev/null)
 
 if [ -z "$chunk_compact" ] || [ "$chunk_compact" = "null" ]; then
   log_err "failed to compact transcript chunk"
@@ -198,13 +208,15 @@ Rules:
   Operational test: a self-correction WITH a runtime_fix is loggable ONLY if you
   can NAME the concrete, NEW infra change it implies (a specific skill/doc that
   lacks specific info you could add). Cannot name that change — OMIT.
+  ESCAPED ARTIFACT EXCEPTION: a self-correction is ALWAYS loggable if the wrong
+  conclusion was written to a durable artifact (memory file, committed code, Jira
+  comment, Slack message) BEFORE Claude realized the error. Escaped = it mattered.
   ALWAYS log, regardless: user-corrections (Claude did NOT catch it — that IS
   the signal) and recurrences of an already-known pattern.
-- Be CONSERVATIVE with wins: only genuinely reusable insight, never routine
-  "task completed". When unsure whether something is a win, omit it.
-- For wins, also OMIT anything that is general programming common knowledge or
-  likely already recorded (a basic tool fact, a one-line gotcha). A win must be
-  a non-obvious, reusable pattern. When in doubt, omit.
+- Be CONSERVATIVE with wins. OMIT: results of one-off investigations, patterns
+  that only apply to the specific task at hand, and anything already in memory
+  or skills. A win qualifies only if it PREVENTS A FUTURE MISTAKE in a DIFFERENT
+  task, or enables a genuinely new capability. When unsure, omit.
 - The "related_skill_or_file" field: cross-reference the provided skills_invoked
   list. If the event happened while a specific skill was active, name that skill.
 
