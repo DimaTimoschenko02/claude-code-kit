@@ -63,8 +63,14 @@ boundary=""
 if [ -n "$transcript" ] && [ -f "$transcript" ]; then
   boundary=$(grep 'isCompactSummary' "$transcript" 2>/dev/null \
     | jq -rc 'select(.isCompactSummary==true)|.timestamp' 2>/dev/null | tail -1)
-  [ -z "$boundary" ] && boundary=$(grep -m1 '"timestamp"' "$transcript" 2>/dev/null \
-    | jq -r '.timestamp // empty' 2>/dev/null)
+  # Session start = first entry with a TOP-LEVEL .timestamp. Don't grep for the
+  # bare string: the transcript opens with a `file-history-snapshot` entry whose
+  # timestamp is nested under .snapshot, so `grep -m1 '"timestamp"' | jq .timestamp`
+  # yields null -> empty boundary -> the gate fail-opens for the WHOLE session
+  # (observed 2026-08-01: a new file under a governed path was written ungated).
+  # head -N keeps this cheap — the session start is always in the first lines.
+  [ -z "$boundary" ] && boundary=$(head -100 "$transcript" 2>/dev/null \
+    | jq -rc 'select(.timestamp != null) | .timestamp' 2>/dev/null | head -1)
 fi
 [ -z "$boundary" ] && exit 0   # can't locate boundary -> fail-open
 
