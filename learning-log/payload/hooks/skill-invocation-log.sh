@@ -29,11 +29,13 @@ mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
 ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+session=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
 turn=""
 [ -n "$transcript" ] && [ -f "$transcript" ] && \
   turn=$(jq -r 'select(.uuid)|.uuid' "$transcript" 2>/dev/null | tail -1)
 
-jq -nc --arg ts "$ts" --arg turn "$turn" --arg skill "$skill" \
-  '{ts:$ts, turn_uuid:$turn, skill:$skill}' >> "$STATE_DIR/skill-invocations.jsonl" 2>/dev/null
+# session_id lets require-git-skill.sh scope the gate to THIS session.
+jq -nc --arg ts "$ts" --arg turn "$turn" --arg skill "$skill" --arg session "$session" \
+  '{ts:$ts, turn_uuid:$turn, skill:$skill, session_id:$session}' >> "$STATE_DIR/skill-invocations.jsonl" 2>/dev/null
 
 exit 0

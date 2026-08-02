@@ -43,6 +43,8 @@ command -v claude >/dev/null 2>&1 || echo "NOTE: 'claude' CLI not on PATH; the c
 mkdir -p "$CLAUDE_DIR/hooks/_lib" "$CLAUDE_DIR/skills/learning-log"
 cp "$PKG_DIR"/payload/hooks/_lib/*.sh "$CLAUDE_DIR/hooks/_lib/"
 cp "$PKG_DIR"/payload/hooks/*.sh      "$CLAUDE_DIR/hooks/"
+# compaction helper ships as python (invoked manually after a big analyze pass)
+cp "$PKG_DIR"/payload/hooks/*.py      "$CLAUDE_DIR/hooks/" 2>/dev/null || true
 chmod +x "$CLAUDE_DIR"/hooks/*.sh
 
 dest="$CLAUDE_DIR/skills/learning-log/SKILL.md"
@@ -117,8 +119,9 @@ fi
 cat >&2 <<SUMMARY
 
 cc-learning-log v$PKG_VERSION installed into: $CLAUDE_DIR
-  hooks:   learning-log-trigger.sh, learning-log-analyze.sh, skill-invocation-log.sh (+ _lib/)
-  skill:   skills/learning-log/SKILL.md   (commands: /log, /learning-log, analyze, wins, flush)
+  hooks:   learning-log-trigger.sh, learning-log-analyze.sh, skill-invocation-log.sh,
+           learning-log-compact.py (+ _lib/)
+  skill:   skills/learning-log/SKILL.md   (commands: /log, /learning-log, analyze, flush)
   config:  learning-log.config.json       (edit threshold/model/persona/language/wikilinks)
   logs:    .claude/learning-log/<YYYY-MM>/<YYYY-MM-DD>.md   mistakes   (GITIGNORED by default)
            .claude/learning-log/wins/candidates.md          win candidates

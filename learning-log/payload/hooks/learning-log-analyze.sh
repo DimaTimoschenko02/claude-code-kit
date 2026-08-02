@@ -161,10 +161,13 @@ Your job: find moments worth logging as learning signals. THREE classes count:
    have done something else, or expresses frustration about a mistake.
 2. "self-correction" — Claude itself notices and fixes its own mistake, or
    admits doing something suboptimal, WITHOUT being told first.
-3. "win" — Claude or __PERSONA__ reached a NON-TRIVIAL, REUSABLE solution worth
-   keeping for the future: a tool gotcha + its workaround, a working pattern, a
-   derived rule. NOT every completed task — only something reusable BEYOND the
-   current task.
+There is NO "win" class. It was removed 2026-08-02 after measuring the buffer:
+of 111 win candidates collected over 21 days, 85 (77%) merely duplicated what
+was already in memory, and 10 more had been contradicted or superseded within
+hours of being written. Root cause: a win is recorded at the moment of DISCOVERY,
+before the fact is verified, while durable knowledge is already written to
+memory/ during the work itself. Do not emit wins. Do not invent a substitute
+class for them.
 
 Output a JSON array. Each item describes one event.
 
@@ -176,22 +179,12 @@ For a mistake (class "user-correction" or "self-correction"):
   "cause_hypothesis": "skill | claude-md | memory | habit | unknown",
   "cause_explanation": "1 short phrase in __LANGUAGE__ explaining the hypothesis",
   "runtime_fix": "self-correction ONLY: what Claude did to recover in the moment (1 phrase in __LANGUAGE__); else null",
-  "related_skill_or_file": "name of skill or file if related, else null",
-  "turn_uuid": "uuid of the relevant turn"
-}
-
-For a win (class "win"):
-{
-  "class": "win",
-  "what": "the solution/pattern Claude arrived at (1-2 sentences, in __LANGUAGE__)",
-  "reusable": "why it is valuable / where it can be reused (1 sentence, in __LANGUAGE__)",
-  "target": "memory | skill | convention (best guess where to promote it)",
-  "related_skill_or_file": "name of skill or file, else null",
+  "related_skill_or_file": "the skill, hook or file where the fix would go — REQUIRED",
   "turn_uuid": "uuid of the relevant turn"
 }
 
 Rules:
-- Return clear user-corrections, clear self-corrections, AND clear wins.
+- Return clear user-corrections and clear self-corrections. Nothing else.
 - DO NOT invent. If there is no clear event of any class, return [].
 - DO NOT include nitpicks about formatting, typos, or content nuance.
   Mistakes = behavioral/process (Claude did X, should have done Y).
@@ -213,12 +206,27 @@ Rules:
   comment, Slack message) BEFORE Claude realized the error. Escaped = it mattered.
   ALWAYS log, regardless: user-corrections (Claude did NOT catch it — that IS
   the signal) and recurrences of an already-known pattern.
-- Be CONSERVATIVE with wins. OMIT: results of one-off investigations, patterns
-  that only apply to the specific task at hand, and anything already in memory
-  or skills. A win qualifies only if it PREVENTS A FUTURE MISTAKE in a DIFFERENT
-  task, or enables a genuinely new capability. When unsure, omit.
+- Never emit a "win"-shaped item under another class name. "Claude figured X out"
+  is not a mistake and must not be logged at all.
 - The "related_skill_or_file" field: cross-reference the provided skills_invoked
   list. If the event happened while a specific skill was active, name that skill.
+- HARD SCHEMA on "cause_hypothesis" — exactly one of: skill | claude-md | memory |
+  habit | unknown. Nothing else. Measured 2026-08-01: 9 entries carried invented
+  values (verification, code-style, single-layer, self-review, planning,
+  misunderstanding, git-discipline) — a value outside the schema means no fix has
+  an address, so the entry is unactionable. Those names describe the TOPIC; put the
+  topic in "cause_explanation" and pick the real cause from the five.
+- "habit" IS NOT THE DEFAULT. It means: no skill, no CLAUDE.md rule and no memory
+  file covers this — the miss is pure behaviour. Measured 2026-08-01: 45 of 105
+  entries (43%) said "habit", most of them wrongly — a rule existed and was skipped,
+  which is "skill" or "claude-md". Ask first: does a document already cover it?
+  If yes -> that document is the cause. Use "unknown" when you cannot tell.
+- "related_skill_or_file" must NEVER be null. It is the ADDRESS of the future fix;
+  26% of entries had none and could not be acted on. If no skill was active, name
+  the file, hook or skill where the rule WOULD live (best guess is fine).
+- LANGUAGE: every free-text field in __LANGUAGE__, consistently. Measured
+  2026-08-01: entries came back mixing Ukrainian, Russian and English inside one
+  log — the daily file must read as one voice.
 
 Output ONLY a JSON array. No prose, no explanation, no markdown fences.
 EOF

@@ -2,8 +2,9 @@
 
 Drop-in self-learning log for Claude Code.
 
-- **What:** a background Claude Haiku classifier reads each session transcript and records three signal classes (`user-correction`, `self-correction`, `win`) as markdown under the project's `.claude/`.
-- **Review:** slash commands (`/log`, `/learning-log`, `/learning-log analyze`, `/learning-log wins`, `/learning-log flush`).
+- **What:** a background Claude Haiku classifier reads each session transcript and records two signal classes (`user-correction`, `self-correction`) as markdown under the project's `.claude/`.
+- **Review:** slash commands (`/log`, `/learning-log`, `/learning-log analyze`, `/learning-log flush`).
+- **Note (v1.7.0):** the `win` capture class was **removed** — see "Why wins were dropped" below. `/learning-log wins` still exists to drain a pre-existing buffer.
 - **Cost:** runs on the Max/Pro subscription. Never the billed API.
 - **Blocking:** never — the classifier is a detached background fork.
 - **Portability:** drops into any project, including a plain git repo. No Obsidian required.
@@ -55,7 +56,7 @@ Entries quote the conversation. `.claude/learning-log/` is gitignored by default
 
 ## Channels
 
-Three artifacts. Distinct schemas, distinct lifecycles. Mistakes and wins are NOT merged into one format.
+Two live artifacts (mistakes + registry), plus a legacy wins buffer that is no longer filled. Distinct schemas, distinct lifecycles.
 
 ### Mistakes — `learning-log/<YYYY-MM>/<YYYY-MM-DD>.md`
 
@@ -75,7 +76,7 @@ Daily files. One entry per behavioral miss. Header `## HH:MM` (date lives in the
 - **Resolution:** YYYY-MM-DD — what was done   # optional; addressed/wontfix
 ```
 
-### Wins — `learning-log/wins/candidates.md`
+### Wins — `learning-log/wins/candidates.md` (LEGACY, no longer written)
 
 Single buffer. One entry per reusable solution caught in the moment — a candidate for promotion to memory/skill/convention. Header `## YYYY-MM-DD HH:MM`. Newest on top.
 
@@ -113,18 +114,30 @@ The classifier is semantic (no regex prefilter). It returns three classes:
 |---|---|---|
 | `user-correction` | the user corrected Claude | day file |
 | `self-correction` | Claude caught its own miss unprompted | day file (+ `Runtime-fix` if it recovered) |
-| `win` | non-trivial, reusable solution | `candidates.md` |
+| ~~`win`~~ | removed in v1.7.0 — see below | — |
 
-Wins are conservative: routine task completion is NOT a win — only insight reusable beyond the current task.
+**Why wins were dropped (measured, v1.7.0).** After 21 days one project accumulated 111 win
+candidates. On review: **85 (77%) merely duplicated knowledge already written to durable memory**,
+and **10 more had been contradicted or superseded within hours** of being recorded — in one case a
+"tool behaves like X" win was disproved by a measurement 20 minutes later, and promoting the buffer
+as-is would have written 10 false facts into memory.
+
+Root cause is structural, not prompt tuning: **a win is captured at the moment of discovery, before
+the fact is verified**, whereas durable knowledge gets written during the work itself. The channel
+therefore collects unverified hypotheses that the real workflow has already superseded. Mistakes do
+not have this problem — a correction is a fact at the moment it happens.
+
+If you want a signal in this space, prefer one that is checked by code rather than judged by a
+model: e.g. verifying that anchors already in memory (`file.ts:123`, symbols, commits) still exist.
 
 ## Commands
 
 | Command | Action |
 |---|---|
-| `/log <text>` | force-write one entry from the current session; type (mistake/win) inferred from the text |
-| `/learning-log` | list open mistakes (grouped by cause) + open wins; flag `failed` rows in the registry |
+| `/log <text>` | force-write one mistake entry from the current session |
+| `/learning-log` | list open mistakes (grouped by cause); flag `failed` rows in the registry |
 | `/learning-log analyze` | review open mistakes; apply fixes; write registry rows; detect recurrence; flip status in place |
-| `/learning-log wins` | review open win candidates; promote (→ memory/skill/convention) or discard |
+| `/learning-log wins` | drain a LEGACY win buffer, if one exists; promote or discard. Nothing new is captured. |
 | `/learning-log flush` | run the classifier over the unprocessed transcript tail right now |
 
 ## Lifecycle
@@ -176,7 +189,7 @@ ls -R .claude/learning-log/                    # files appear after a few exchan
 - **0 entries ever written** → almost always PATH: the forked classifier can't find `claude`/`jq`. `_lib/env.sh` covers nvm/brew/`~/.local/bin`/volta/asdf; add your bin dir if it differs.
 - **Unexpected API billing** → keep `force_subscription: true` (unsets `ANTHROPIC_API_KEY` for the classifier call).
 - **`claude -p` hangs / auth prompt** → run `claude` interactively once after login (unlock keychain). `classifier_timeout_seconds` caps a stuck call.
-- **Wins/registry never appear** → wins need a `win`-class detection (conservative; rare). The registry is written only by `/learning-log analyze`, never by the classifier.
+- **Registry never appears** → it is written only by `/learning-log analyze`, never by the classifier. Wins are no longer captured at all (v1.7.0).
 
 ## Upgrade
 
