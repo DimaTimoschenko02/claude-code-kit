@@ -32,6 +32,19 @@ gate any skill, not just `instructions-tuning`. Keyed to the context-reset bound
 (one invocation per session / `/compact` window). Its own `README.md` / `install.sh` /
 `VERSION`. See [`instructions-tuning/README.md`](instructions-tuning/README.md).
 
+### chat-audit (`chat-audit/`)
+
+A self-contained, installable package that audits your **past Claude Code sessions** to find how the work
+itself could go better — friction, work repeated by hand, knowledge never written down, rules that exist but
+never fire. It exists because the obvious version of this request ("re-read the last chats and find where
+things could be faster") reliably returns two vague bullets: nothing defined what "better" means, and
+gigabytes of `.jsonl` cannot be read by eye. So the skill makes intake mandatory (goal, lens, horizon, and
+what a finding becomes) and does the reading with deterministic Node extractors that compress a session to
+~1% of its size before an agent sees it. Findings carry anchors, get classified against the infra that
+already exists, and are proposed — never applied — with every verdict logged so repeat runs don't repeat
+themselves. Its own `README.md` / `install.sh` / `VERSION`.
+See [`chat-audit/README.md`](chat-audit/README.md).
+
 ### Learning log (`learning-log/`)
 
 A self-contained, installable package: a self-learning log for Claude Code that captures the
@@ -50,6 +63,7 @@ These are building blocks, not a framework — copy what you want.
   under the matching event in `settings.json` (`PreToolUse` for the two guards, `SessionStart`
   with matcher `compact` for memory-checkpoint). Make them executable (`chmod +x`).
 - **instructions-tuning** (skill + skill-gate hook) → run its own `instructions-tuning/install.sh`.
+- **chat-audit** (skill + extractors + nudge hook) → run its own `chat-audit/install.sh`.
 - **learning-log** → run its own `learning-log/install.sh`.
 
 ## License

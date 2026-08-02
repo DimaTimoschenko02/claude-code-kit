@@ -1,0 +1,11 @@
+{
+  "agent_model": "sonnet",
+  "default_days": 14,
+  "max_sessions": 20,
+  "max_slice_kb": 600,
+  "min_session_bytes": 2048,
+  "exclude_current_session": true,
+  "default_lenses": ["friction", "repetition"],
+  "report_dir": null,
+  "nudge": true
+}
