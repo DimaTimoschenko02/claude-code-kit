@@ -13,6 +13,8 @@
 //                    [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
 //                    [--top 25] [--json]
 import fs from 'node:fs';
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { scrub } from './scrub.mjs';
@@ -310,7 +312,10 @@ function printReport(r, sections) {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// argv[1] is the path as typed; import.meta.url is resolved through symlinks.
+// The skill is installed as a symlink into the kit repo, so a raw string compare
+// never matched and every CLI silently did nothing (exit 0, no output).
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const project = path.resolve(arg('project', process.cwd()));
   const r = analyze(project, {
     scope: arg('scope', 'subtree'),

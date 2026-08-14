@@ -15,6 +15,8 @@
 // Usage:
 //   node memory-drift.mjs [--project <dir>] [--memory <dir>] [--file X.md] [--quiet] [--json]
 import fs from 'node:fs';
+import { realpathSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
@@ -262,7 +264,10 @@ function arg(name, fallback = null) {
   return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// argv[1] is the path as typed; import.meta.url is resolved through symlinks.
+// The skill is installed as a symlink into the kit repo, so a raw string compare
+// never matched and every CLI silently did nothing (exit 0, no output).
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const res = checkMemory({
     projectDir: path.resolve(arg('project', process.cwd())),
     memoryDir: arg('memory'),
