@@ -117,6 +117,14 @@ export function projectFolders(projectDir, scope = 'subtree') {
 
 const META_MARKERS = ['"ai-title"', '"type":"user"', '"gitBranch"', '"agent-name"'];
 
+function isHumanTurn(o) {
+  const c = o.message && o.message.content;
+  if (typeof c === 'string') return c.trim().length > 0;
+  if (!Array.isArray(c)) return false;
+  if (c.some((b) => b && b.type === 'tool_result')) return false;
+  return c.some((b) => b && b.type === 'text' && String(b.text || '').trim().length > 0);
+}
+
 /** Cheap per-session metadata: title, span, size, turn count, branch. */
 export function sessionMeta(file) {
   const st = fs.statSync(file);
@@ -137,7 +145,9 @@ export function sessionMeta(file) {
     if (o.gitBranch && !branch) branch = o.gitBranch;
     if (o.cwd && !cwd) cwd = o.cwd;
     if (o.version && !version) version = o.version;
-    if (o.type === 'user' && !o.isMeta) { if (o.isSidechain) sidechains++; else userTurns++; }
+    // A `user` record is a HUMAN turn only when its content is text; tool_result records share the
+    // type and outnumber real turns ~10:1 (5058 vs 248 in one audit, 2026-09-06).
+    if (o.type === 'user' && !o.isMeta && isHumanTurn(o)) { if (o.isSidechain) sidechains++; else userTurns++; }
   }
   return {
     session: path.basename(file, '.jsonl'),
@@ -151,7 +161,7 @@ export function sessionMeta(file) {
 
 export function listSessions(projectDir, opts = {}) {
   const { scope = 'subtree', days = null, limit = null, grep = null, exclude = [] } = opts;
-  const excluded = new Set(exclude.filter(Boolean));
+  const excluded = exclude.filter(Boolean);   // full ids or prefixes (a short id must exclude too)
   const cutoff = days ? Date.now() - days * 86400000 : null;
   const rows = [];
   for (const { folder } of projectFolders(projectDir, scope)) {
@@ -163,16 +173,19 @@ export function listSessions(projectDir, opts = {}) {
       try { st = fs.statSync(file); } catch { continue; }
       if (cutoff && st.mtime.getTime() < cutoff) continue;
       if (st.size < 2048) continue; // empty / aborted session
-      if (excluded.has(path.basename(f, '.jsonl'))) continue;
+      if (excluded.some((x) => path.basename(f, '.jsonl').startsWith(x))) continue;
       rows.push(file);
     }
   }
   let metas = rows.map((f) => { try { return sessionMeta(f); } catch { return null; } }).filter(Boolean);
+  // mtime above is only a cheap pre-filter: a session resumed today but STARTED months ago is not
+  // "the last N days" (two such sessions slipped into a 14-day audit, 2026-09-06).
+  if (cutoff) metas = metas.filter((m) => !m.started || Date.parse(m.started) >= cutoff);
   if (grep) {
     const re = new RegExp(grep, 'i');
     metas = metas.filter((m) => re.test(`${m.title || ''} ${m.branch || ''} ${m.agentName || ''}`));
   }
-  metas.sort((a, b) => (a.mtime < b.mtime ? 1 : -1));
+  metas.sort((a, b) => ((a.started || a.mtime) < (b.started || b.mtime) ? 1 : -1));   // same metric as the filter
   return limit ? metas.slice(0, limit) : metas;
 }
 

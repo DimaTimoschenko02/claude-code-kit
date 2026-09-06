@@ -26,9 +26,10 @@ import path from 'node:path';
 import { scrub } from './scrub.mjs';
 import { listSessions } from './discover.mjs';
 
-// A user turn that looks like the user pushing back on what the agent just did.
-// These are the highest-signal lines in any transcript: each one marks a place
-// the agent's default behaviour was wrong.
+// A user turn that LOOKS like the user pushing back on what the agent just did.
+// These are the highest-signal lines in any transcript — but this regex is a HINT, not a
+// count: measured recall 36 of 83 hand-labelled correctionHints (43%, 2026-09-06). Hence the
+// field is `correctionHints`; the real count comes from an agent reading `--pairs`.
 const CORRECTION = new RegExp(
   [
     'я (?:же )?(?:говорил|сказал|просил)', 'не (?:то|так|это)\\b', 'имел ввиду', 'мав на увазі',
@@ -77,7 +78,7 @@ export function extractSession(file, opts = {}) {
     session, file,
     title: null, branch: null, cwd: null, version: null, models: new Set(),
     started: null, ended: null,
-    userTurns: [], corrections: [], interruptions: 0, compactions: 0,
+    userTurns: [], correctionHints: [], interruptions: 0, compactions: 0,
     toolCounts: new Map(), bashShapes: new Map(), bashHeads: new Map(),
     errors: [], skills: new Map(), skillCalls: [], agents: [], agentTypes: new Map(),
     hooks: new Map(), hookErrors: [], filesTouched: new Map(),
@@ -194,7 +195,7 @@ export function extractSession(file, opts = {}) {
     const prev = takeReply();
     if (prev) entry.prevReply = prev;
     out.userTurns.push(entry);
-    if (CORRECTION.test(t.slice(0, 800))) out.corrections.push(entry);
+    if (CORRECTION.test(t.slice(0, 800))) out.correctionHints.push(entry);
   }
 
   const top = opts.top || 40;
@@ -204,7 +205,7 @@ export function extractSession(file, opts = {}) {
     started: out.started, ended: out.ended,
     metrics: {
       userTurns: out.turnCount, sidechainTurns: out.sidechainTurns,
-      corrections: out.corrections.length, interruptions: out.interruptions,
+      correctionHints: out.correctionHints.length, interruptions: out.interruptions,
       compactions: out.compactions, errors: out.errors.length,
       toolCalls: [...out.toolCounts.values()].reduce((a, b) => a + b, 0),
       agentCalls: out.agents.length, skillCalls: out.skillCalls.length,
@@ -222,7 +223,7 @@ export function extractSession(file, opts = {}) {
     hookErrors: out.hookErrors.slice(0, 20),
     longTurns: out.longTurns.slice(0, 20),
     errors: out.errors.slice(0, 60),
-    corrections: out.corrections,
+    correctionHints: out.correctionHints,
     userTurns: out.userTurns,
   };
 }
@@ -272,7 +273,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
       const m = s.metrics;
       console.log(`\n=== ${s.session.slice(0, 8)} ${s.title || '(no title)'}`);
       console.log(`    ${(s.started || '').slice(0, 16)} → ${(s.ended || '').slice(0, 16)}  ${(m.bytes / 1048576).toFixed(1)}M  ${s.branch || ''}`);
-      console.log(`    turns=${m.userTurns} corrections=${m.corrections} interrupts=${m.interruptions} ` +
+      console.log(`    turns=${m.userTurns} hints(regex)=${m.correctionHints} interrupts=${m.interruptions} ` +
                   `errors=${m.errors} tools=${m.toolCalls} agents=${m.agentCalls} skills=${m.skillCalls} compacts=${m.compactions}`);
       if (s.bashRepeats.length) console.log(`    repeated bash: ${s.bashRepeats.slice(0, 5).map((r) => `${r.count}× ${r.key.slice(0, 60)}`).join(' | ')}`);
     }

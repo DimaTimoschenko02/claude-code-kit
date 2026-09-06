@@ -294,9 +294,9 @@ function printReport(r, sections) {
   if (has('tools')) table('tools', r.tools, (x) => `${String(x.count).padStart(5)}  ${x.key}`);
   if (has('bash')) table('bash binaries', r.bash, (x) => `${String(x.count).padStart(5)}  ${x.key}`);
   if (has('bash')) table('repeated commands (>=3× — script candidates)', r.repeatedCommands,
-    (x) => `${String(x.count).padStart(5)}  ${x.example}`);
+    (x) => `${String(x.count).padStart(5)}  ${x.example ?? x.shape}`);
   if (has('retries')) table('retries (same command within 3 steps)', r.retries,
-    (x) => `${String(x.count).padStart(5)}  ${x.example}`);
+    (x) => `${String(x.count).padStart(5)}  ${x.example ?? x.shape}`);
   if (has('inline')) table(`inline code written from scratch (${r.inlineTotal} total — tool candidates)`, r.inlineCode,
     (x) => `${String(x.count).padStart(5)}  [${x.lang}, ${x.sessions} sess] ${x.sample.split('\n')[0].slice(0, 90)}`);
   if (has('fails')) table('failures', r.failures, (x) => `${String(x.count).padStart(5)}  ${x.error}`);

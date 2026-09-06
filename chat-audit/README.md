@@ -71,10 +71,10 @@ Usable standalone, without the skill:
 
 ```bash
 lib/discover.mjs config   --project <dir>   # config dirs, memory locations, infra inventory
-lib/discover.mjs sessions --project <dir> --days 14 [--grep RE] [--scope exact|subtree|all]
+lib/discover.mjs sessions --project <dir> --days 14 [--grep RE] [--exclude ID-or-prefix,...] [--scope exact|subtree|all]
 lib/extract.mjs  --sessions a.jsonl,b.jsonl --out slice.json --summary [--pairs 1600]
 lib/analyze.mjs  --project <dir> --days 21 [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
-lib/memory-drift.mjs --project <dir> [--all]
+lib/memory-drift.mjs --project <dir> [--all]        # anchors: file.ts#symbol (preferred), file.ts:NN, `sha`
 lib/agent-cost.mjs   --sessions a.jsonl,b.jsonl [--per-session] [--json]
 ```
 
@@ -123,3 +123,14 @@ The frequency and drift analysis is a generalized port of three tools built for 
 ```bash
 ./uninstall.sh /path/to/project [--purge]   # --purge also drops config and ledger
 ```
+
+## Changes
+
+- **1.2.0** (2026-09-06) — `discover`: `--days` filters by session START (mtime is only a pre-filter), `userTurns`
+  counts human turns only (tool_result records excluded; the old number was ~10× inflated), `--exclude` accepts
+  id prefixes. `extract`: `corrections` → `correctionHints` (regex recall measured at 43%). `memory-drift`:
+  `file.ts#symbol` anchors resolved inside the named file (`symbol-not-in-file`). Modes: agents return text,
+  never write files; recurrence ≥2 forces a predicate/hook (`recur` in the ledger); `example ?? shape` in
+  `analyze` tables.
+- **1.1.0** — `extract --pairs`, `agent-cost.mjs`, memory-drift fixes (worktrees, same-basename, `.claude` indexed),
+  nudge off by default.

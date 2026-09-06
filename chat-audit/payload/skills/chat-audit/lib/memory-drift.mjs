@@ -29,6 +29,10 @@ const INDEX_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|kt|rb|php|sql|sh|ya?ml
 const INDEX_SKIP = /(^|\/)(node_modules|dist|build|coverage)\/|\.(min|bundle)\.|(^|\/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$/;
 // `path/file.ts:123` or file.ts#123
 const ANCHOR_LINE = /`?([\w./-]+\.(?:ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|sql|sh))[:#](\d{1,5})`?/g;
+// `path/file.ts#symbolName` (optionally `#symbolName:123`) — the preferred anchor: a line number rots
+// on every edit above it, a symbol rots only when the code is actually gone. Resolved IN the named
+// file, not in the flat identifier index — «symbol exists somewhere» is not «exists where memory says».
+const ANCHOR_FSYM = /`?([\w./-]+\.(?:ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|sql|sh))#([A-Za-z_][A-Za-z0-9_]{2,80})(?::\d{1,5})?`?/g;
 // A commit hash must actually look like one: hex WITH letters. Bare digit runs
 // are IDs (user, bonus, order) and reporting them as dead commits is noise.
 const ANCHOR_COMMIT = /`([0-9a-f]{7,40})`/g;
@@ -225,6 +229,11 @@ export function checkMemory({ projectDir, memoryDir = null, onlyFile = null,
         anchors++;
         pending.push({ type: 'line', file: md, line: i + 1, ref: m[1], lno: Number(m[2]) });
       }
+      for (const m of line.matchAll(ANCHOR_FSYM)) {
+        if (PLACEHOLDER.test(path.basename(m[1]))) continue;
+        anchors++;
+        pending.push({ type: 'fsym', file: md, line: i + 1, ref: m[1], sym: m[2] });
+      }
       for (const m of line.matchAll(ANCHOR_COMMIT)) {
         const sha = m[1];
         if (!/^[0-9a-f]{7,40}$/.test(sha)) continue;
@@ -271,6 +280,16 @@ export function checkMemory({ projectDir, memoryDir = null, onlyFile = null,
           const note = cands.length > 1 ? `longest of ${cands.length} same-named files has ${best} lines` : `file now has ${best} lines`;
           findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'line-out-of-range', anchor: `${p.ref}:${p.lno}`, note });
         }
+      }
+    } else if (p.type === 'fsym') {
+      const base = path.basename(p.ref);
+      const cands = (fileIdx.get(base) || []).filter((q) => q.endsWith(p.ref) || path.basename(q) === base);
+      if (!cands.length) {
+        findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'missing-file', anchor: `${p.ref}#${p.sym}`, note: 'file not found in any repo' });
+      } else {
+        const re = new RegExp(`\\b${p.sym}\\b`);
+        const hit = cands.some((c) => { try { return re.test(fs.readFileSync(c, 'utf8')); } catch { return false; } });
+        if (!hit) findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'symbol-not-in-file', anchor: `${p.ref}#${p.sym}`, note: `symbol absent from ${cands.length} candidate file(s) — moved or renamed` });
       }
     } else if (p.type === 'commit' && !aliveCommits.has(p.sha)) {
       findings.push({ severity: 'medium', file: p.file, line: p.line, kind: 'missing-commit', anchor: p.sha, note: 'commit not reachable' });

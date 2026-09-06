@@ -24,7 +24,7 @@ Read the slice for these before dispatching agents — several findings fall out
 
 | Signal | Reads as |
 |---|---|
-| `corrections` | the agent's default was wrong here — the highest-value lines in any transcript |
+| `correctionHints` | user turns that LOOK like push-back (regex, ~43% recall measured) — a starting list, not a count; the real corrections come from an agent reading `--pairs` |
 | `interruptions` | the user stopped the agent mid-flight; it was going somewhere they didn't want |
 | repeated commands (3+) | a script that was never written |
 | `inlineCode` with `candidate: true` | the same program rewritten from memory more than once — a tool waiting to exist |

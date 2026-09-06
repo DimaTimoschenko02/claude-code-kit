@@ -42,6 +42,12 @@ Two rules when applying:
   already failed is the mistake this audit exists to catch.
 - **A `exists-but-did-not-fire` finding never gets a second rule.** Change form, placement, or make it
   deterministic. Two rules saying the same thing is how instruction files rot.
+- **Recurrence forces form.** Before proposing prose, count how often this class was already "fixed":
+  the ledger's earlier lines for the same `class`/claim, and the project's own recurrence registry if it
+  keeps one (a learning-log with `Recur` counts, a resolutions file). Seen twice or more → the destination
+  is an observable predicate or a hook, never prose; prose is reserved for a judgment gap with no
+  predicate. Record the count as `recur` in the ledger line. Data behind the rule (2026-09-06): every
+  class that recurred ≥2 under a prose fix was eventually closed by a hook; the prose rounds were waste.
 
 ## Write the report
 
@@ -57,7 +63,7 @@ convention just because this skill has a path.
 `.claude/state/chat-audit/ledger.jsonl`, one line per finding, whatever the verdict:
 
 ```json
-{"ts":"<iso>","audit":"<date>-<lens>","claim":"<one line>","class":"<class>","anchor":"<session/ts>","verdict":"accepted|edited|rejected","applied":"<path or null>"}
+{"ts":"<iso>","audit":"<date>-<lens>","claim":"<one line>","class":"<class>","anchor":"<session/ts>","verdict":"accepted|edited|rejected","applied":"<path or null>","recur":<n or 0>}
 ```
 
 This is what keeps the next run from repeating this one. Rejected findings matter most — without them recorded,

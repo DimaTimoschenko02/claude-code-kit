@@ -18,6 +18,11 @@ Each agent gets, in its prompt:
 4. **The ledger** — findings already reported in past runs (`.claude/state/chat-audit/ledger.jsonl`), so it
    does not resurface them.
 
+Agents return **text**, in the shape below, and nothing else. Never ask an agent to write a file: a
+subagent's Write is refused by the harness ("subagents return text"), and the orchestrator then re-types
+the report by hand — ~30k tokens of context for four agents (2026-09-06). Files are written once, in
+`land.md`, by the orchestrator.
+
 ## Required output shape
 
 Every finding, no exceptions:
