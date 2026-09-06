@@ -72,10 +72,20 @@ Usable standalone, without the skill:
 ```bash
 lib/discover.mjs config   --project <dir>   # config dirs, memory locations, infra inventory
 lib/discover.mjs sessions --project <dir> --days 14 [--grep RE] [--scope exact|subtree|all]
-lib/extract.mjs  --sessions a.jsonl,b.jsonl --out slice.json --summary
+lib/extract.mjs  --sessions a.jsonl,b.jsonl --out slice.json --summary [--pairs 1600]
 lib/analyze.mjs  --project <dir> --days 21 [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
 lib/memory-drift.mjs --project <dir> [--all]
+lib/agent-cost.mjs   --sessions a.jsonl,b.jsonl [--per-session] [--json]
 ```
+
+`--pairs N` attaches the agent's reply that preceded each user turn (head + tail, N chars total). A user
+message is a reaction to something; without the reply it answers, lenses like "the answer got better but is
+still not what I want" or "I write X and the user never reacts" have nothing to read. Off by default — it
+roughly doubles the slice.
+
+`agent-cost.mjs` joins `<session>/subagents/agent-*.jsonl` with their `.meta.json` and reports token spend per
+subagent type (calls, output, cache read/create, median and max per call) with the main thread as baseline —
+the number behind "review agents on a one-line change".
 
 `discover` finds things rather than assuming them: `CLAUDE_CONFIG_DIR` and sibling configs (dual-account
 setups), `projects/` symlinked between accounts, and memory living in `.claude/memory/`, a symlink into a
@@ -98,7 +108,8 @@ you commit.
   "exclude_current_session": true, // it's still being written, and it contains the skill's own instructions
   "default_lenses": ["friction", "repetition"],
   "report_dir": null,             // null -> the memory location discovery found
-  "nudge": true                   // false disables the hook without uninstalling
+  "nudge": false                  // the UserPromptSubmit nudge; off by default since 1.1.0 — it fired on any
+                                  // mention of the word "chat-audit"; set true if you want the reminder
 }
 ```
 

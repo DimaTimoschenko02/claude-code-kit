@@ -12,6 +12,13 @@
 //   node extract.mjs --sessions <f1.jsonl,f2.jsonl>   [--out slice.json]
 //   node extract.mjs --project <dir> [--days N] [--limit N]
 //   ... [--max-turn-chars 1200] [--top 40] [--summary]
+//   ... [--pairs 1200]   attach the agent's reply that preceded each user turn
+//
+// --pairs: a user turn is a reaction to something. Without the reply it answers,
+// a lens like "the answer was better but still not what I wanted" or "I write X
+// and the user never reacts to it" has nothing to read. Kept off by default —
+// it roughly triples the slice — and stores head + tail of the reply, since the
+// first line is the verdict and the tail is what the user actually reacts to.
 import fs from 'node:fs';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -62,7 +69,7 @@ const topN = (map, n) => [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0,
   .map(([k, v]) => ({ key: k, count: v }));
 
 export function extractSession(file, opts = {}) {
-  const { maxTurnChars = 1200 } = opts;
+  const { maxTurnChars = 1200, pairChars = 0 } = opts;
   const raw = fs.readFileSync(file, 'utf8');
   const session = path.basename(file, '.jsonl');
 
@@ -78,6 +85,20 @@ export function extractSession(file, opts = {}) {
   };
 
   const toolUseById = new Map(); // tool_use_id -> {name, brief}
+  // Text the agent wrote since the last real user turn (main thread only).
+  let replyBuf = [];
+  let replyTs = null;
+  const takeReply = () => {
+    if (!pairChars || !replyBuf.length) return null;
+    const full = replyBuf.join('\n').trim();
+    replyBuf = [];
+    if (!full) return null;
+    const half = Math.floor(pairChars / 2);
+    const head = full.slice(0, half);
+    const tail = full.length > pairChars ? full.slice(-half) : full.slice(half);
+    return { ts: replyTs, chars: full.length, head: scrub(head), tail: scrub(tail),
+             truncated: full.length > pairChars };
+  };
 
   for (const line of raw.split('\n')) {
     if (!line || line.length < 20) continue;
@@ -104,6 +125,10 @@ export function extractSession(file, opts = {}) {
 
     if (o.type === 'assistant' && Array.isArray(o.message?.content)) {
       if (o.message.model) out.models.add(o.message.model);
+      if (pairChars && !o.isSidechain) {
+        const txt = textOf(o.message);
+        if (txt) { replyBuf.push(txt); replyTs = o.timestamp; }
+      }
       for (const b of o.message.content) {
         if (b.type !== 'tool_use') continue;
         bump(out.toolCounts, b.name);
@@ -166,6 +191,8 @@ export function extractSession(file, opts = {}) {
     out.turnCount++;
     const entry = { ts: o.timestamp, uuid: o.uuid, text: scrub(t.slice(0, maxTurnChars)),
                     truncated: t.length > maxTurnChars, chars: t.length };
+    const prev = takeReply();
+    if (prev) entry.prevReply = prev;
     out.userTurns.push(entry);
     if (CORRECTION.test(t.slice(0, 800))) out.corrections.push(entry);
   }
@@ -225,7 +252,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   }
   if (!files.length) { console.error('no sessions matched'); process.exit(1); }
 
-  const opts = { maxTurnChars: Number(arg('max-turn-chars', 1200)), top: Number(arg('top', 40)) };
+  const opts = { maxTurnChars: Number(arg('max-turn-chars', 1200)), top: Number(arg('top', 40)),
+                 pairChars: Number(arg('pairs', 0)) };
   const slices = [];
   for (const f of files) {
     try { slices.push(extractSession(f, opts)); }

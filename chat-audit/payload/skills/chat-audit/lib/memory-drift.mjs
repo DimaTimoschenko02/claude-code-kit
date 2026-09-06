@@ -49,10 +49,14 @@ function run(args, cwd) {
   }
 }
 
-/** Git repos at or under the project dir (depth<=2) — the code memory points at. */
+/** Git repos at or under the project dir (depth<=2) — the code memory points at.
+ *  A worktree has `.git` as a FILE pointing into the main repo; it is the same code
+ *  on another branch, so indexing it only adds a stale twin for every basename and
+ *  makes anchor resolution a coin toss. Main repos (`.git` directory) only. */
+const isMainRepo = (dir) => { try { return fs.statSync(path.join(dir, '.git')).isDirectory(); } catch { return false; } };
 export function findRepos(projectDir) {
   const repos = [];
-  if (fs.existsSync(path.join(projectDir, '.git'))) repos.push(projectDir);
+  if (isMainRepo(projectDir)) repos.push(projectDir);
   const walk = (dir, depth) => {
     if (depth > 2) return;
     let entries;
@@ -60,7 +64,7 @@ export function findRepos(projectDir) {
     for (const e of entries) {
       if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') continue;
       const p = path.join(dir, e.name);
-      if (fs.existsSync(path.join(p, '.git'))) repos.push(p);
+      if (fs.existsSync(path.join(p, '.git'))) { if (isMainRepo(p)) repos.push(p); }
       else walk(p, depth + 1);
     }
   };
@@ -68,19 +72,34 @@ export function findRepos(projectDir) {
   return repos;
 }
 
-/** basename -> [full paths] across all repos. One pass, then pure lookups. */
-function buildFileIndex(repos) {
+/** basename -> [full paths] across all repos, plus plain dirs (the project's own
+ *  `.claude/` — hooks, scripts, libs — is what a good share of memory anchors point
+ *  at, and it is neither a repo nor reachable through `git ls-files`). */
+function buildFileIndex(repos, extraDirs = []) {
   const idx = new Map();
+  const add = (full) => {
+    const base = path.basename(full);
+    if (!idx.has(base)) idx.set(base, []);
+    idx.get(base).push(full);
+  };
   for (const repo of repos) {
     const r = run(['git', 'ls-files'], repo);
     if (r.code !== 0) continue;
     for (const rel of r.out.split('\n')) {
-      if (!rel || !CODE_EXT.test(rel)) continue;
-      const base = path.basename(rel);
-      if (!idx.has(base)) idx.set(base, []);
-      idx.get(base).push(path.join(repo, rel));
+      if (rel && CODE_EXT.test(rel)) add(path.join(repo, rel));
     }
   }
+  const walk = (dir) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name === 'node_modules' || e.name === 'state' || e.name === '.git') continue;
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (CODE_EXT.test(e.name)) add(full);
+    }
+  };
+  for (const d of extraDirs) walk(d);
   return idx;
 }
 
@@ -173,7 +192,7 @@ export function checkMemory({ projectDir, memoryDir = null, onlyFile = null,
   const memDirs = memoryDir
     ? [{ realPath: memoryDir, kind: 'explicit' }]
     : findMemory(projectDir).filter((m) => includeEphemeral || m.kind !== 'remember-plugin');
-  const fileIdx = buildFileIndex(repos);
+  const fileIdx = buildFileIndex(repos, [path.join(projectDir, '.claude')]);
   const findings = [];
   let filesChecked = 0, anchors = 0;
 
@@ -240,10 +259,17 @@ export function checkMemory({ projectDir, memoryDir = null, onlyFile = null,
       if (!cands.length) {
         findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'missing-file', anchor: `${p.ref}:${p.lno}`, note: 'file not found in any repo' });
       } else {
-        if (!lineCache.has(cands[0])) lineCache.set(cands[0], countLines(cands[0]));
-        const n = lineCache.get(cands[0]);
-        if (n && p.lno > n) {
-          findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'line-out-of-range', anchor: `${p.ref}:${p.lno}`, note: `file now has ${n} lines` });
+        // Several files share a basename across repos (balance.service.ts ×2).
+        // A bare `file.ts:NN` anchor names any of them, so it is alive if ANY
+        // candidate still has line NN; reporting against the first hit was a coin toss.
+        let best = 0;
+        for (const c of cands) {
+          if (!lineCache.has(c)) lineCache.set(c, countLines(c));
+          best = Math.max(best, lineCache.get(c) || 0);
+        }
+        if (best && p.lno > best) {
+          const note = cands.length > 1 ? `longest of ${cands.length} same-named files has ${best} lines` : `file now has ${best} lines`;
+          findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'line-out-of-range', anchor: `${p.ref}:${p.lno}`, note });
         }
       }
     } else if (p.type === 'commit' && !aliveCommits.has(p.sha)) {
