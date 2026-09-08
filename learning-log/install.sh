@@ -20,12 +20,18 @@ VERSION_FILE="$CLAUDE_DIR/.cc-learning-log.version"
 
 # --- --check mode ---
 if [ "$MODE" = "check" ]; then
-  if [ -f "$VERSION_FILE" ] && command -v jq >/dev/null 2>&1; then
-    inst="$(jq -r '.version // "?"' "$VERSION_FILE" 2>/dev/null)"
-  else
-    inst="$( [ -f "$VERSION_FILE" ] && sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$VERSION_FILE" )"
-    [ -z "$inst" ] && inst="not installed"
+  # Every read below is guarded. Under `set -e` a bare `[ -f x ] && cmd` whose
+  # test is false returns 1 and kills the script, so --check against a project
+  # that never installed the package printed nothing instead of "not installed".
+  inst=""
+  if [ -f "$VERSION_FILE" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      inst="$(jq -r '.version // ""' "$VERSION_FILE" 2>/dev/null || true)"
+    else
+      inst="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$VERSION_FILE" || true)"
+    fi
   fi
+  [ -n "$inst" ] || inst="not installed"
   if [ "$inst" = "$PKG_VERSION" ]; then echo "up-to-date (v$PKG_VERSION)";
   elif [ "$inst" = "not installed" ]; then echo "not installed (package v$PKG_VERSION)";
   else echo "outdated: installed=$inst package=$PKG_VERSION — re-run ./install.sh to upgrade"; fi
