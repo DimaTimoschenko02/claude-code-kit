@@ -18,6 +18,14 @@ TARGET="$(cd "${TARGET:-$PWD}" 2>/dev/null && pwd)" || { echo "target dir not fo
 CLAUDE_DIR="$TARGET/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
 
+# instructions-tuning ships the same logger and its skill-gate READS the jsonl the
+# logger writes. Deleting the logger there leaves the gate registered but blind, and
+# the gate is fail-open — it would stop gating silently. Keep the logger (and the
+# _lib it sources) whenever that package is installed; its own uninstaller is
+# symmetric and keeps ours.
+IT_PRESENT=0
+[ -f "$CLAUDE_DIR/.instructions-tuning.version" ] && IT_PRESENT=1
+
 # --- Strip our tagged hook entries from settings.json ---
 if command -v jq >/dev/null 2>&1 && [ -f "$SETTINGS" ]; then
   if ! jq empty "$SETTINGS" 2>/dev/null; then
@@ -45,12 +53,17 @@ fi
 # --- Remove our files ---
 rm -f "$CLAUDE_DIR/hooks/learning-log-trigger.sh" \
       "$CLAUDE_DIR/hooks/learning-log-analyze.sh" \
-      "$CLAUDE_DIR/hooks/skill-invocation-log.sh" \
-      "$CLAUDE_DIR/hooks/_lib/env.sh" \
-      "$CLAUDE_DIR/hooks/_lib/paths.sh" \
-      "$CLAUDE_DIR/hooks/_lib/config.sh" \
       "$CLAUDE_DIR/skills/learning-log/SKILL.md" \
       "$CLAUDE_DIR/.cc-learning-log.version"
+
+if [ "$IT_PRESENT" = 1 ]; then
+  echo "kept skill-invocation-log.sh + hooks/_lib — instructions-tuning's skill-gate reads that log" >&2
+else
+  rm -f "$CLAUDE_DIR/hooks/skill-invocation-log.sh" \
+        "$CLAUDE_DIR/hooks/_lib/env.sh" \
+        "$CLAUDE_DIR/hooks/_lib/paths.sh" \
+        "$CLAUDE_DIR/hooks/_lib/config.sh"
+fi
 rm -f "$CLAUDE_DIR/skills/learning-log/"SKILL.md.bak.* 2>/dev/null || true
 # Drop now-empty managed dirs (rmdir is a no-op if the user has other files there).
 rmdir "$CLAUDE_DIR/skills/learning-log" 2>/dev/null || true
