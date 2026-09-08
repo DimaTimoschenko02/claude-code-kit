@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Blocks personal / workspace-specific content from entering this public repo.
+#
+# Why: skills are tuned in the field, inside real workspaces, so private paths and
+# employer names accrete in them. When the kit was a hand-made export that went
+# unnoticed for months. Now the skills are symlinked here and every field edit lands
+# in this working tree — so the check has to happen at commit time.
+#
+# Scope: only ADDED lines in the staged diff. Pre-existing matches are legacy and
+# must not block unrelated work; touching such a line does surface it, on purpose.
+set -uo pipefail
+
+# Workspace paths, employer/domain names, absolute home paths, personal names.
+PATTERN='~/work|/Users/|sharkscode|casino|bestsrv|dim\.timoschenko|Дим[аеуой]|jira'
+
+# This file is excluded: it necessarily contains every pattern it looks for.
+# -E on both greps: in BSD grep's BRE, '\+' is a repetition operator, so '^\+\+\+'
+# is an invalid regex — it errored out and the hook passed everything through.
+added="$(git diff --cached -U0 --diff-filter=ACM -- . ':(exclude).githooks/pre-commit' \
+  | grep -E '^\+' | grep -vE '^\+\+\+' || true)"
+[ -z "$added" ] && exit 0
+
+hits="$(printf '%s\n' "$added" | grep -inE "$PATTERN" || true)"
+[ -z "$hits" ] && exit 0
+
+echo "🚧 pre-commit: personal content in staged lines — this repo is public." >&2
+printf '%s\n' "$hits" | head -10 | sed 's/^/   /' >&2
+echo "   Move workspace specifics to that project's .claude/rules/, then re-stage." >&2
+echo "   Deliberate exception: git commit --no-verify" >&2
+exit 1

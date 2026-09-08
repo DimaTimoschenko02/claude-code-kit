@@ -1,6 +1,6 @@
 ---
 name: instructions-tuning
-description: "Use whenever creating OR editing any instruction/meta file an agent reads — CLAUDE.md, AGENTS.md, SKILL.md, agent definitions, system prompts, hooks, .claude/rules, or a knowledge base's meta docs. Trigger on any request to write, tune, fix, tighten, reword, or improve a rule/instruction for an agent; when an instruction keeps getting ignored; or when the user says 'инструкции', 'правило', 'правь CLAUDE.md', 'поправь скилл', 'мета-файл'. Diagnoses WHY an instruction fails and picks the right FORM (prohibition / positive recipe / structural slot / predicate-conditional / hook) under a conciseness + altitude budget."
+description: "Use whenever creating OR editing any instruction/meta file an agent reads — CLAUDE.md, AGENTS.md, SKILL.md, agent definitions, system prompts, hooks, or .claude/rules. Trigger on any request to write, tune, fix, tighten, reword, or improve a rule/instruction for an agent; when an instruction keeps getting ignored; or when the user says 'инструкции', 'правило', 'правь CLAUDE.md', 'поправь скилл', 'мета-файл'. Diagnoses WHY an instruction fails and picks the right FORM (prohibition / positive recipe / structural slot / predicate-conditional / hook) under a conciseness + altitude budget. Also covers fixing a HOLE found in our own tooling — a hook, script, tool or agent that misfires, stays silent when it should fire, or lacks the tools its own instructions require: when to fix without asking, and how to fix the class instead of the instance."
 ---
 
 # Instructions Tuning
@@ -68,6 +68,82 @@ Two cross-cutting levers:
 
 Show the diff, one line of *why*, get a light OK. For a CLAUDE.md/SKILL.md edit, after applying, sanity-check that behavior actually shifts — one observation, not a test suite. (Full eval loops / TDD are deliberately out of scope here.)
 
+## Дыры в инструментах — чинить самому
+
+Область: **свои** инструменты — хуки, скрипты и либы в `.claude/`, тулзы в `bin/`, набор
+инструментов у агента, формат его отчёта. Продуктовый код, чужие репозитории, CI, прод — не сюда,
+там по-прежнему спрашиваем.
+
+### Спрашивать или чинить — по тому, ЧТО меняется
+
+| Меняется | Решение |
+|---|---|
+| механика, обслуживающая меня: ошибка в коде хука, сломанный вызов, агенту не выдан инструмент, агент не вернул отчёт в ожидаемой форме | **чиню молча.** Цель инструмента прежняя, чинится способ, которым он её достигает |
+| назначение или поведение — моё либо агента: у агента другая цель, скилл не покрывает часть работы, правило начинает требовать другого | **обсуждаю.** Это уже решение о том, как мы работаем, а не починка |
+
+Тест на границу: *«после правки инструмент делает то же, что и раньше, просто теперь работает?»*
+Да → чиню. Нет, он начнёт делать что-то ещё → спрашиваю.
+
+**Дыра = инструмент даёт неверный результат** — ложно сработал, молча не сработал, потерял данные.
+«Неудобно» и «я бы сделал иначе» дырой не являются: без этого признака починка расползётся во вкусовщину.
+
+### Когда
+
+**После того как сдан текущий deliverable**, не посреди задачи. Заметил в процессе — одна строка
+в ответе о находке, правка следующим шагом. Переключение посреди работы дороже самой дыры.
+
+### Как — сначала класс, потом файл
+
+🔴 Главная ошибка: починить тот экземпляр, об который споткнулся, и уйти. Перед правкой:
+
+> *Этот инструмент единственный такой, или он экземпляр паттерна?* Ответ ищи не в файле, а в
+> назначении: **зачем** инструмент существует, **когда** срабатывает, **на чьё состояние** опирается.
+
+Образец (2026-08-10): один хук читал общий файл сброса, из-за чего чужая сессия обнуляла гейт.
+Вопрос «на чьё состояние опирается» превратил один баг в класс — 8 мест с общим состоянием при
+5-7 параллельных сессиях, из них 3 кусались ежедневно. Точечная починка оставила бы семь.
+
+Дефект класса ищется в обе стороны:
+- **тот же механизм у соседей** — кто ещё читает тот же файл, зовёт ту же либу, повторяет ту же строку;
+- **обратное направление** — гейт может не только срабатывать вхолостую, но и молчать, когда должен
+  сработать. Второе незаметно, поэтому проверяется специально.
+- **внутри одного файла** — *если в файле СФОРМУЛИРОВАН принцип, проверь все места, где тот же
+  вопрос решается второй раз.* Половины файла пишутся в разное время под разную боль, и правило не
+  едет за границу своей секции само. Образец (2026-08-16): хук приёмки карты засчитывал ПРИЁМКУ по
+  эффекту, с явным комментарием «намерение — не результат», а двадцатью строками выше писал
+  АВТОРСТВО по намерению — по одному `tool_input`, не глядя, упал ли инструмент. Чинить надо не
+  логику, а её недостающую половину.
+
+После правки — проверить оба конца: и что дыра закрыта, и что штатный сценарий не сломался
+(в образце: чужой `SessionStart` больше не сбрасывает гейт **и** свой `/compact` по-прежнему сбрасывает).
+
+## Пишешь bash-хук — чеклист
+
+Диагноз сказал «это детерминизм → хук». Дальше класс дефектов смещается: правило верное,
+ломается реализация. Разбор learning-log 2026-08-13 дал 13 таких записей за 12 дней — больше,
+чем любой содержательный класс. Все восемь пунктов ниже выведены из конкретных срабатываний,
+это не гигиена вообще.
+
+1. **stdin парсить только `jq`.** Жадный `sed` по JSON захватил хвост с `session_id`, и проверка
+   темы срабатывала всегда, независимо от текста промпта.
+2. **Отсечь системные события.** `<task-notification>` и `[SYSTEM NOTIFICATION]` приезжают тем же
+   каналом, что промпт пользователя: хук выстрелил по собственному выводу агента.
+   `case "$prompt" in *'<task-notification>'*) exit 0 ;; esac`
+3. **Состояние — per-session файл, не общий.** Параллельные окна тут норма: чужой SessionStart
+   затирал общий маркер и сбрасывал гейт посреди работы — четыре раза за сессию.
+4. **Свежесть контекста меряется reset-файлом, не wall-clock TTL.** Окно «2 часа» истекало
+   в середине использования; `/clear` и `/compact` выносят текст из контекста, а `resume` — нет,
+   и время об этом ничего не знает. Читай reset-маркер, а не часы.
+5. **Вывод человеку ≤3 строк.** 25 строк инструкций, положенные в `reason`, уехали человеку в чат.
+   Детали — в файл рядом, в сообщении ссылка.
+6. **Regex: границы слов + исключить тела heredoc.** Хук трижды подряд принял примеры команд
+   внутри heredoc за исполняемые команды.
+7. **Не писать состояние внутрь рабочего репо.** `gitflow-check` клал файлы в `.claude/state/`
+   репозитория и ломал собственную проверку чистоты дерева. Стейт — в `<workspace>/.claude/state/`.
+8. **Тест обязателен в ОБЕ стороны, до подключения:** срабатывает на целевом случае И молчит на
+   соседнем. Половина списка выше — «сработало, когда не должно», и ловится только вторым тестом.
+   Проверять и сам факт подключения: `settings.json` валиден, хук в нужном событии.
+
 ## What this skill does NOT do
 
 - No TDD / failing-test-first gate, no eval-viewer, no description-optimizer loops — too heavy for routine tuning.
@@ -76,4 +152,4 @@ Show the diff, one line of *why*, get a light OK. For a CLAUDE.md/SKILL.md edit,
 
 ## Project deltas
 
-This skill is the universal engine. Project-specific conventions attach via the project's own `.claude/rules/` (path-scoped) or project CLAUDE.md — they are NOT carried here. Example: a notes-vault project might require that files under `docs/**` also obey wiki-link / `description`-frontmatter / single-source-of-truth conventions, supplied by a path-scoped `.claude/rules/meta-docs.md` loaded only when those files are touched.
+This skill is the universal engine. Project-specific conventions attach via the project's own `.claude/rules/` (path-scoped) or project CLAUDE.md — they are NOT carried here. Example: in the `mind` vault, editing files under `99 meta/**` also obeys the vault's wiki-link / `description`-frontmatter / single-source-of-truth conventions, supplied by `mind/.claude/rules/meta-99.md` and loaded only when those files are touched.

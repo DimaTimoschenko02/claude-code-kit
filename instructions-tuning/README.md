@@ -6,7 +6,9 @@ before touching those files.
 
 - **Skill:** `instructions-tuning` — diagnoses *why* an instruction fails and picks
   the right form (prohibition / positive recipe / structural slot / predicate /
-  hook) under a conciseness + altitude budget.
+  hook) under a conciseness + altitude budget. Also covers **fixing holes in your own
+  tooling** (when to fix without asking; fix the *class*, not the instance) and a
+  **bash-hook checklist** — eight rules derived from real hook misfires.
 - **Gate:** `skill-gate-guard.sh` (PreToolUse Write|Edit) — blocks an edit to a
   *governed* path until its owner skill was invoked **this context window**. Pure
   prose is advisory; the gate is the deterministic backstop for "must invoke first".
@@ -51,6 +53,37 @@ cd claude-code-kit/instructions-tuning
 By default the skill installs project-local (`.claude/skills/instructions-tuning/`).
 To share one copy across projects, also copy it to `~/.claude/skills/instructions-tuning/`
 — the hooks and config stay per-project regardless.
+
+### Editing the skill without drift (`--link`)
+
+A copied skill drifts: you tune it in the field, the package stays at the version
+someone last exported by hand, and months later the two have to be merged. If you
+keep this repo checked out, install with `--link` instead:
+
+```bash
+./install.sh --link /path/to/project   # the skill becomes a symlink into payload/
+```
+
+For the **global** skill, link it directly — don't point the installer at `~`, or it
+will also register hooks in your global `settings.json`:
+
+```bash
+ln -sfn "$PWD/payload/skills/instructions-tuning" ~/.claude/skills/instructions-tuning
+```
+
+Now there is exactly one copy on disk — the one under version control. Tuning the
+skill mid-task edits the repo, and `git status` shows it the same day; all that's
+left is to commit. Trade-offs worth knowing:
+
+- One skill for every project — project differences go in `.claude/rules/`, not in a
+  forked SKILL.md. That's the point, but it is a real constraint.
+- The link is absolute; moving the clone breaks it (re-run `--link`).
+- Linking over a skill that already differs from the package is **refused**, so
+  in-place edits can't be silently discarded — port them into `payload/` first, or
+  pass `--force` to drop them deliberately.
+- Hooks are always copied, never linked: the package ships a standalone
+  `skill-invocation-log.sh` while cc-learning-log ships an `_lib`-based one, and
+  that difference is intentional.
 
 ## What gets installed
 

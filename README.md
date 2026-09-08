@@ -66,6 +66,24 @@ These are building blocks, not a framework — copy what you want.
 - **chat-audit** (skill + extractors + nudge hook) → run its own `chat-audit/install.sh`.
 - **learning-log** → run its own `learning-log/install.sh`.
 
+## Working on this repo
+
+Skills here are tuned in the field, inside real workspaces — which is how private paths
+and employer names end up in them, and how a hand-exported copy silently falls months
+behind the version actually in use. Two things keep that in check:
+
+```bash
+git config core.hooksPath .githooks   # run once per clone — it is local, not versioned
+```
+
+- **`.githooks/pre-commit`** blocks personal content (workspace paths, absolute home
+  paths, employer/product names) in **added** lines. Pre-existing matches don't block
+  unrelated work. Deliberate exception: `git commit --no-verify`.
+- **`install.sh --link`** (packages that support it) installs a skill as a symlink into
+  this working tree instead of a copy, so field edits land here and show up in
+  `git status` the same day. Project-specific rules belong in that project's
+  `.claude/rules/`, never in the skill itself.
+
 ## License
 
 MIT.
