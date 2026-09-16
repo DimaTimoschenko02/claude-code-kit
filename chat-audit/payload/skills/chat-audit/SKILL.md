@@ -52,11 +52,16 @@ node .claude/skills/chat-audit/lib/discover.mjs sessions  --project <dir> [--day
 node .claude/skills/chat-audit/lib/extract.mjs   --sessions a.jsonl,b.jsonl --out slice.json   # per-session slice, with user turns
 node .claude/skills/chat-audit/lib/analyze.mjs   --project <dir> [--days N] [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
 node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir> [--all]     # anchors in memory that no longer resolve
+node .claude/skills/chat-audit/lib/tokens.mjs    [--project <dir>|--all] [--since YYYY-MM-DD] [--top N]  # what the tokens are spent ON
 ```
 
 `extract.mjs` answers *what happened in these sessions* (turns, corrections, errors, anchors).
 `analyze.mjs` answers *what happens repeatedly across many sessions* (frequencies, retries, hand-written code,
 guardrail blocks). Use both — they see different things.
+`tokens.mjs` answers *what the spend consists of*: every call re-reads the whole context, so it attributes
+each call's context growth to what was appended (tool result by tool and command, hook output, thinking,
+compaction residue, startup overhead) and weights it by how many later calls re-read it. Use it when the
+question is cost or limits, not friction.
 
 Everything they emit is redacted through `.claude/skills/chat-audit/lib/scrub.mjs` first: transcripts are full of live credentials and
 audit reports get committed.

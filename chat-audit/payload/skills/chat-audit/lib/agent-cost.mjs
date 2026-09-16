@@ -23,10 +23,16 @@ const ZERO = () => ({ calls: 0, msgs: 0, out: 0, in: 0, cacheCreate: 0, cacheRea
 function usageOf(file) {
   const u = { msgs: 0, out: 0, in: 0, cacheCreate: 0, cacheRead: 0, models: new Set() };
   let raw; try { raw = fs.readFileSync(file, 'utf8'); } catch { return u; }
+  // One API response is written as one line per content block, each repeating the same
+  // usage; summing lines inflated every figure by the block count (2026-09-16).
+  const seen = new Set();
   for (const line of raw.split('\n')) {
     if (!line) continue;
     let o; try { o = JSON.parse(line); } catch { continue; }
     if (o.type !== 'assistant' || !o.message?.usage) continue;
+    const id = `${o.message.id}:${o.requestId}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
     const g = o.message.usage;
     u.msgs++; u.out += g.output_tokens || 0; u.in += g.input_tokens || 0;
     u.cacheCreate += g.cache_creation_input_tokens || 0; u.cacheRead += g.cache_read_input_tokens || 0;

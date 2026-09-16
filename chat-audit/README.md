@@ -3,7 +3,7 @@
 Audit your own Claude Code sessions to find how the work could go better — friction, repeated manual work,
 knowledge that never got written down, rules that exist but never fire.
 
-Tier-2 package: a skill (router + 7 modes), five dependency-free Node extractors, and one advisory hook.
+Tier-2 package: a skill (router + 7 modes), six dependency-free Node extractors, and one advisory hook.
 
 ## The problem it solves
 
@@ -76,6 +76,7 @@ lib/extract.mjs  --sessions a.jsonl,b.jsonl --out slice.json --summary [--pairs 
 lib/analyze.mjs  --project <dir> --days 21 [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
 lib/memory-drift.mjs --project <dir> [--all]        # anchors: file.ts#symbol (preferred), file.ts:NN, `sha`
 lib/agent-cost.mjs   --sessions a.jsonl,b.jsonl [--per-session] [--json]
+lib/tokens.mjs       [--project <dir>|--all|--dirs d1,d2] [--since YYYY-MM-DD] [--until ...] [--top N] [--json out.json]
 ```
 
 `--pairs N` attaches the agent's reply that preceded each user turn (head + tail, N chars total). A user
@@ -86,6 +87,16 @@ roughly doubles the slice.
 `agent-cost.mjs` joins `<session>/subagents/agent-*.jsonl` with their `.meta.json` and reports token spend per
 subagent type (calls, output, cache read/create, median and max per call) with the main thread as baseline —
 the number behind "review agents on a one-line change".
+
+`tokens.mjs` answers "where do the tokens go". On a long-context model almost all tokens are cache reads, so
+spend is context size × number of calls, and a chunk costs its size × the calls that re-read it before the next
+compaction. The script splits each call's context growth across what was appended since the previous call —
+the previous output with exact counts (thinking stays in context), everything else by characters — and
+reports that weighted cost by class: tool results per tool, Bash per command, Read per directory, hook output
+per hook, startup overhead, post-compaction residue. Also: spend by project, origin (main / subagent type),
+model and context-size bucket, cache rebuilds by cause (idle past TTL vs. a changed prefix), and the costliest
+sessions. Dollars are API list prices — a weight, not a bill, on a subscription. It prints only class names,
+command names and session titles, never transcript text.
 
 `discover` finds things rather than assuming them: `CLAUDE_CONFIG_DIR` and sibling configs (dual-account
 setups), `projects/` symlinked between accounts, and memory living in `.claude/memory/`, a symlink into a
@@ -126,6 +137,8 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.3.0** (2026-09-16) — `tokens.mjs`: token spend attributed to content classes. `agent-cost`: usage is
+  counted once per API response (it was summed per content-block line, inflating every figure).
 - **1.2.0** (2026-09-06) — `discover`: `--days` filters by session START (mtime is only a pre-filter), `userTurns`
   counts human turns only (tool_result records excluded; the old number was ~10× inflated), `--exclude` accepts
   id prefixes. `extract`: `corrections` → `correctionHints` (regex recall measured at 43%). `memory-drift`:
