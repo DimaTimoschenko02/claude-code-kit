@@ -125,11 +125,23 @@ function isHumanTurn(o) {
   return c.some((b) => b && b.type === 'text' && String(b.text || '').trim().length > 0);
 }
 
+function humanText(o) {
+  const c = o.message && o.message.content;
+  if (typeof c === 'string') return c;
+  if (!Array.isArray(c)) return '';
+  return c.filter((b) => b && b.type === 'text').map((b) => String(b.text || '')).join('\n');
+}
+
+// The Claude Code security-review hook opens its own session with one of these two prompts as the
+// very first (non-sidechain) user turn. Measured on one project: 166 of 202 sessions, 2026-09-23 — none
+// of them a chat a human had, so they are noise for an audit that reads "the last chats".
+const AUTO_SESSION_PROMPT = /^(Review this change for security vulnerabilities|You previously flagged these candidate vulnerabilities)/;
+
 /** Cheap per-session metadata: title, span, size, turn count, branch. */
 export function sessionMeta(file) {
   const st = fs.statSync(file);
   let title = null, agentName = null, branch = null, cwd = null, version = null;
-  let first = null, last = null, userTurns = 0, sidechains = 0;
+  let first = null, last = null, userTurns = 0, sidechains = 0, firstPrompt = null;
   const raw = fs.readFileSync(file, 'utf8');
   for (const line of raw.split('\n')) {
     if (!line || line.length < 20) continue;
@@ -147,7 +159,10 @@ export function sessionMeta(file) {
     if (o.version && !version) version = o.version;
     // A `user` record is a HUMAN turn only when its content is text; tool_result records share the
     // type and outnumber real turns ~10:1 (5058 vs 248 in one audit, 2026-09-06).
-    if (o.type === 'user' && !o.isMeta && isHumanTurn(o)) { if (o.isSidechain) sidechains++; else userTurns++; }
+    if (o.type === 'user' && !o.isMeta && isHumanTurn(o)) {
+      if (o.isSidechain) sidechains++;
+      else { userTurns++; if (firstPrompt === null) firstPrompt = humanText(o); }
+    }
   }
   return {
     session: path.basename(file, '.jsonl'),
@@ -156,11 +171,12 @@ export function sessionMeta(file) {
     started: first, ended: last,
     bytes: st.size, mtime: st.mtime.toISOString(),
     userTurns, sidechainTurns: sidechains,
+    auto: AUTO_SESSION_PROMPT.test((firstPrompt || '').trimStart()),
   };
 }
 
 export function listSessions(projectDir, opts = {}) {
-  const { scope = 'subtree', days = null, limit = null, grep = null, exclude = [] } = opts;
+  const { scope = 'subtree', days = null, limit = null, grep = null, exclude = [], includeAuto = false } = opts;
   const excluded = exclude.filter(Boolean);   // full ids or prefixes (a short id must exclude too)
   const cutoff = days ? Date.now() - days * 86400000 : null;
   const rows = [];
@@ -181,12 +197,16 @@ export function listSessions(projectDir, opts = {}) {
   // mtime above is only a cheap pre-filter: a session resumed today but STARTED months ago is not
   // "the last N days" (two such sessions slipped into a 14-day audit, 2026-09-06).
   if (cutoff) metas = metas.filter((m) => !m.started || Date.parse(m.started) >= cutoff);
+  const autoExcluded = metas.filter((m) => m.auto).length;
+  if (!includeAuto) metas = metas.filter((m) => !m.auto);
   if (grep) {
     const re = new RegExp(grep, 'i');
     metas = metas.filter((m) => re.test(`${m.title || ''} ${m.branch || ''} ${m.agentName || ''}`));
   }
   metas.sort((a, b) => ((a.started || a.mtime) < (b.started || b.mtime) ? 1 : -1));   // same metric as the filter
-  return limit ? metas.slice(0, limit) : metas;
+  const out = limit ? metas.slice(0, limit) : metas;
+  out.autoExcluded = autoExcluded;   // automatic security-review sessions dropped by default; see --include-auto
+  return out;
 }
 
 // --------------------------------------------------------- memory + infra
@@ -303,11 +323,16 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
       // The session running the audit is still being written and contains the
       // skill's own instructions — auditing it finds "problems" in the audit.
       exclude: (arg('exclude', '') || '').split(',').map((s) => s.trim()),
+      // The security-review hook opens a session per diff; it is not a chat a human had
+      // (166 of 202 in one project, 2026-09-23) — excluded by default, not a session to audit.
+      includeAuto: process.argv.includes('--include-auto'),
     });
     if (process.argv.includes('--json')) { console.log(JSON.stringify(metas, null, 2)); }
     else {
       const mb = (b) => (b / 1048576).toFixed(1) + 'M';
-      console.log(`sessions: ${metas.length}  total: ${mb(metas.reduce((a, m) => a + m.bytes, 0))}\n`);
+      const autoNote = !process.argv.includes('--include-auto') && metas.autoExcluded
+        ? `  (+${metas.autoExcluded} automatic security-review sessions excluded — pass --include-auto)` : '';
+      console.log(`sessions: ${metas.length}  total: ${mb(metas.reduce((a, m) => a + m.bytes, 0))}${autoNote}\n`);
       for (const m of metas) {
         console.log(`${(m.started || '').slice(0, 16).replace('T', ' ')}  ${mb(m.bytes).padStart(6)}  ` +
           `turns=${String(m.userTurns).padStart(3)}  ${m.session.slice(0, 8)}  ${m.title || '(no title)'}` +
@@ -315,7 +340,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
       }
     }
   } else {
-    console.error('sessions [--exclude <sessionId>] · usage: discover.mjs config|sessions [--project dir] [--scope exact|subtree|all] [--days N] [--limit N] [--grep re] [--json]');
+    console.error('sessions [--exclude <sessionId>] [--include-auto] · usage: discover.mjs config|sessions [--project dir] [--scope exact|subtree|all] [--days N] [--limit N] [--grep re] [--json]');
     process.exit(1);
   }
 }

@@ -18,6 +18,13 @@ const RULES = [
   [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{12,}/gi, '$1 [REDACTED]'],
   // Credentials inside URLs: scheme://user:pass@host
   [/([a-z][a-z0-9+.-]*:\/\/)([^\s:@/]+):([^\s@/]+)@/gi, '$1$2:[REDACTED]@'],
+  // DB-style "user `name` / `password`" notation: a slash, then a mixed-case
+  // alphanumeric 12+ char token. Requires a SPACE right after the slash — a
+  // filesystem path never has one there (`/home/...`), so paths are untouched.
+  [
+    /(\/\s+)(`?)(?=[A-Za-z0-9]*[a-z])(?=[A-Za-z0-9]*[A-Z])(?=[A-Za-z0-9]*\d)([A-Za-z0-9]{12,})(`?)/g,
+    '$1$2[REDACTED]$4',
+  ],
   // key=value / key: value assignments for secret-ish names.
   [
     /\b((?:[A-Za-z_]*(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|auth)[A-Za-z_]*))(\s*[:=]\s*)(["']?)([^\s"',;)]{4,})\3/gi,

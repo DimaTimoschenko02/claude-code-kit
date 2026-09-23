@@ -5,11 +5,14 @@ Choose which sessions get read, and agree the cost before spending it.
 ## Run
 
 ```bash
-node .claude/skills/chat-audit/lib/discover.mjs sessions --project <dir> [--days N] [--grep <regex>] [--scope exact|subtree|all]
+node .claude/skills/chat-audit/lib/discover.mjs sessions --project <dir> [--days N] [--grep <regex>] [--scope exact|subtree|all] [--include-auto]
 ```
 
 One line per session: start time, size, user-turn count, short id, auto-title, branch. Sorted newest first.
-Sessions under 2 KB are dropped as aborted.
+Sessions under 2 KB are dropped as aborted. Automatic security-review sessions (the review hook's own diff
+prompt as the first user turn — 166 of 202 measured on one project, 2026-09-23) are dropped too, with the
+excluded count printed; they are not chats a human had, so pull them back with `--include-auto` only when one
+is actually the subject.
 
 Scope matters when a project has worktrees or sub-repos: `exact` is the directory itself, `subtree` (default)
 includes everything under it, `all` is every session on the machine.

@@ -14,13 +14,14 @@
 //
 // Usage:
 //   node memory-drift.mjs [--project <dir>] [--memory <dir>] [--file X.md] [--quiet] [--json]
+//                         [--fail-on high|medium]
 import fs from 'node:fs';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-import { findMemory } from './discover.mjs';
+import { findMemory, configDirs } from './discover.mjs';
 
 const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|sql|sh)$/;
 // Symbols also live in config, schema and migration files — index those too, or
@@ -36,6 +37,27 @@ const ANCHOR_FSYM = /`?([\w./-]+\.(?:ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|s
 // A commit hash must actually look like one: hex WITH letters. Bare digit runs
 // are IDs (user, bonus, order) and reporting them as dead commits is noise.
 const ANCHOR_COMMIT = /`([0-9a-f]{7,40})`/g;
+// Two more false-hash shapes, both real (2026-09-23 audit, `missing-commit` on
+// a project memory): a session's short id (`a1368df1`, this codebase's own
+// convention — every script slices session ids to 8 hex chars) and a file's
+// magic-number signature quoted while documenting a format, neither a commit.
+const KNOWN_FILE_SIGNATURES = new Set(['d0cf11e0', '504b0304', '25504446', '89504e47']);
+function knownSessionPrefixes() {
+  const prefixes = new Set();
+  for (const { projectsDir } of configDirs()) {
+    let dirs;
+    try { dirs = fs.readdirSync(projectsDir); } catch { continue; }
+    for (const d of dirs) {
+      let entries;
+      try { entries = fs.readdirSync(path.join(projectsDir, d)); } catch { continue; }
+      for (const e of entries) {
+        const m = /^([0-9a-f]{8})[0-9a-f-]*\.jsonl$/i.exec(e);
+        if (m) prefixes.add(m[1].toLowerCase());
+      }
+    }
+  }
+  return prefixes;
+}
 const ANCHOR_SYMBOL = /`([A-Za-z_][A-Za-z0-9_]{5,60})\(?\)?`/g;
 // Documentation placeholders, not real anchors.
 const PLACEHOLDER = /^(file|path|foo|bar|example|some)[\w.]*\.(ts|js|py|sql|sh)$/i;
@@ -197,6 +219,7 @@ export function checkMemory({ projectDir, memoryDir = null, onlyFile = null,
     ? [{ realPath: memoryDir, kind: 'explicit' }]
     : findMemory(projectDir).filter((m) => includeEphemeral || m.kind !== 'remember-plugin');
   const fileIdx = buildFileIndex(repos, [path.join(projectDir, '.claude')]);
+  const sessionPrefixes = knownSessionPrefixes();
   const findings = [];
   let filesChecked = 0, anchors = 0;
 
@@ -235,9 +258,11 @@ export function checkMemory({ projectDir, memoryDir = null, onlyFile = null,
         pending.push({ type: 'fsym', file: md, line: i + 1, ref: m[1], sym: m[2] });
       }
       for (const m of line.matchAll(ANCHOR_COMMIT)) {
-        const sha = m[1];
+        const sha = m[1].toLowerCase();
         if (!/^[0-9a-f]{7,40}$/.test(sha)) continue;
         if (!/[a-f]/.test(sha)) continue;   // all digits -> an ID, not a hash
+        if (KNOWN_FILE_SIGNATURES.has(sha)) continue;               // file magic number, not a commit
+        if (sha.length === 8 && sessionPrefixes.has(sha)) continue; // a session's short id, not a commit
         anchors++;
         commits.add(sha);
         pending.push({ type: 'commit', file: md, line: i + 1, sha });
@@ -319,26 +344,40 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     onlyFile: arg("file"),
     includeEphemeral: process.argv.includes("--include-ephemeral"),
   });
-  if (process.argv.includes('--json')) { console.log(JSON.stringify(res, null, 2)); process.exit(0); }
-  if (res.skippedSymbols) console.log('note: symbol check skipped — code index too large');
-  console.log(`repos: ${res.repos.length} · memory dirs: ${res.memoryDirs.length} · files: ${res.filesChecked} · anchors: ${res.anchors}`);
-  // Symbol misses are a weak heuristic (external APIs, DB objects, prose all
-  // trip it). Show the precise classes by default; --all opens the firehose.
-  const showAll = process.argv.includes('--all');
-  const shown = res.findings.filter((f) => showAll || f.severity !== 'low');
-  const counts = res.findings.reduce((a, f) => ({ ...a, [f.severity]: (a[f.severity] || 0) + 1 }), {});
-  console.log(`findings: high=${counts.high || 0} medium=${counts.medium || 0} low=${counts.low || 0}` +
-              (showAll ? '' : '   (low hidden — pass --all)'));
-  if (!process.argv.includes('--quiet')) {
-    const byFile = new Map();
-    for (const f of shown) {
-      if (!byFile.has(f.file)) byFile.set(f.file, []);
-      byFile.get(f.file).push(f);
-    }
-    for (const [file, fs_] of byFile) {
-      console.log(`\n${file}`);
-      for (const f of fs_) console.log(`  L${f.line} [${f.severity}] ${f.kind}: ${f.anchor} — ${f.note}`);
-    }
+  const failOn = arg('fail-on');           // 'high' | 'medium' — exit 1 when a finding meets or exceeds it
+  const SEVERITY_RANK = { low: 0, medium: 1, high: 2 };
+  let exitCode = 0;
+  if (failOn) {
+    if (!(failOn in SEVERITY_RANK)) { console.error(`--fail-on must be high or medium, got: ${failOn}`); process.exit(2); }
+    if (res.findings.some((f) => SEVERITY_RANK[f.severity] >= SEVERITY_RANK[failOn])) exitCode = 1;
   }
-  console.log(`\nstale anchors: ${shown.length} shown / ${res.findings.length} total`);
+  // exitCode, never exit(): exit() drops stdout still queued in a pipe — the JSON of a big memory came out
+  // cut at exactly 64 KB and the CI wrapper failed on invalid JSON (2026-09-23).
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(res, null, 2));
+  } else {
+    if (res.skippedSymbols) console.log('note: symbol check skipped — code index too large');
+    console.log(`repos: ${res.repos.length} · memory dirs: ${res.memoryDirs.length} · files: ${res.filesChecked} · anchors: ${res.anchors}`);
+    // Symbol misses are a weak heuristic (external APIs, DB objects, prose all
+    // trip it). Show the precise classes by default; --all opens the firehose.
+    const showAll = process.argv.includes('--all');
+    const shown = res.findings.filter((f) => showAll || f.severity !== 'low');
+    const counts = res.findings.reduce((a, f) => ({ ...a, [f.severity]: (a[f.severity] || 0) + 1 }), {});
+    console.log(`findings: high=${counts.high || 0} medium=${counts.medium || 0} low=${counts.low || 0}` +
+                (showAll ? '' : '   (low hidden — pass --all)'));
+    if (!process.argv.includes('--quiet')) {
+      const byFile = new Map();
+      for (const f of shown) {
+        if (!byFile.has(f.file)) byFile.set(f.file, []);
+        byFile.get(f.file).push(f);
+      }
+      for (const [file, fs_] of byFile) {
+        console.log(`\n${file}`);
+        for (const f of fs_) console.log(`  L${f.line} [${f.severity}] ${f.kind}: ${f.anchor} — ${f.note}`);
+      }
+    }
+    console.log(`\nstale anchors: ${shown.length} shown / ${res.findings.length} total`);
+    if (failOn) console.log(`--fail-on ${failOn}: exit ${exitCode}`);
+  }
+  process.exitCode = exitCode;
 }

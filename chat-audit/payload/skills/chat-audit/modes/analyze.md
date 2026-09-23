@@ -10,13 +10,49 @@ the orchestrator and does not do the reading.
 
 Each agent gets, in its prompt:
 
-1. **The slice** — path to `slice.json` and `freq.json`, plus which sections matter for its lens.
+1. **The slice** — path to `slice.json` and `freq.json`, plus which sections matter for its lens, plus any
+   extra source the lens named (see "a lens names its own sources" below).
 2. **The recon inventory** — skills, hooks, rules, memory location, claimed CLAUDE.md headings. Without this it
    reports things that already exist.
 3. **The goal and destination** from intake — a finding aimed at a hook must name a deterministic trigger; one
    aimed at memory must state a durable fact. Tell the agent what shape its output has to take.
 4. **The ledger** — findings already reported in past runs (`.claude/state/chat-audit/ledger.jsonl`), so it
    does not resurface them.
+
+## Free reader
+
+Dispatched alongside the lens agents by default, one per shard, no lens at all. Its job isn't findings — it's
+naming lenses nobody defined yet. Same slice and recon inventory, no goal/destination framing. Required output
+per candidate:
+
+```
+name:      <short lens name>
+catches:   <what kind of problem this would surface>
+anchors:   <2+ from the slice showing the pattern actually occurs>
+count:     <how many times, in this shard>
+sources:   <what a real lens using this would need beyond slice.json/freq.json>
+```
+
+Accepted 2026-09-23. A candidate goes through the same verification as a finding — an anchor that doesn't
+resolve kills the candidate too.
+
+## A lens names its own sources
+
+Most lenses read only `slice.json` + `freq.json`. A lens that needs more says so in its own dispatch, and the
+orchestrator supplies it before sending the agent — never after, as a follow-up round-trip:
+
+| Extra need | Source |
+|---|---|
+| what a spawned agent actually did (not just its description + duration) | `agents.mjs` → `agents.json` |
+| the full reply a user turn reacted to, not just the turn | `extract.mjs --pairs` |
+| what shipped, not just what was discussed | `git log` in the project repo(s) |
+| what the day was supposed to be | `memory/plans/YYYY-MM-DD.md` (or this project's equivalent) |
+
+`agents` lens: source is `agents.json`, not the slice — the main thread's transcript never shows what happened
+inside a `Task` call, only its description and duration. Looks for agents that stalled (`maxGapSec`, watchdog
+events), hit one tool-error class repeatedly, or ran `inherited: true` — no explicit model, burning whatever
+the main session happened to be running on. Anchor is `parent session (8 chars) + agentId`, plus `gapAt` or an
+event timestamp where relevant — not a user-turn uuid; say so, or `land.md` will look for one and find none.
 
 Agents return **text**, in the shape below, and nothing else. Never ask an agent to write a file: a
 subagent's Write is refused by the harness ("subagents return text"), and the orchestrator then re-types

@@ -3,7 +3,7 @@
 Audit your own Claude Code sessions to find how the work could go better — friction, repeated manual work,
 knowledge that never got written down, rules that exist but never fire.
 
-Tier-2 package: a skill (router + 7 modes), six dependency-free Node extractors, and one advisory hook.
+Tier-2 package: a skill (router + 7 modes), seven dependency-free Node extractors, and one advisory hook.
 
 ## The problem it solves
 
@@ -137,6 +137,15 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.4.0** (2026-09-23) — `agents.mjs`: new step reading subagent transcripts (`<session>/subagents/**/*.jsonl` +
+  `.meta.json`) — duration, tool errors by class, silent gaps, watchdog stalls, interruptions; run by default in
+  `extract.md`, sourced by an `agents` lens in `analyze.md`. `analyze.md`: free reader (one agent per shard, no
+  lens, proposes candidate lenses) dispatched by default; "a lens names its own sources" rule. `discover.mjs`:
+  automatic security-review sessions (the review hook's own prompt) marked `auto` and excluded by default
+  (`--include-auto` to include, excluded count printed). `memory-drift.mjs`: `--fail-on high|medium` sets the
+  exit code; two `missing-commit` false positives dropped (a session's own short id, a file's magic-number
+  signature). `scrub.mjs`: redacts a `user \`x\` / \`password\`` style DB credential (mixed-case alphanumeric
+  12+ token after a slash+space) without touching filesystem paths.
 - **1.3.0** (2026-09-16) — `tokens.mjs`: token spend attributed to content classes. `agent-cost`: usage is
   counted once per API response (it was summed per content-block line, inflating every figure).
 - **1.2.0** (2026-09-06) — `discover`: `--days` filters by session START (mtime is only a pre-filter), `userTurns`

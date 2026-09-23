@@ -2,14 +2,20 @@
 
 Turn the selected sessions into a slice small enough for agents to read whole.
 
-## Run both
+## Run all three
 
 ```bash
 node .claude/skills/chat-audit/lib/extract.mjs --sessions <f1,f2,...> --out .claude/state/chat-audit/slice.json --summary
 node .claude/skills/chat-audit/lib/analyze.mjs --project <dir> [--days N] --json > .claude/state/chat-audit/freq.json
+node .claude/skills/chat-audit/lib/agents.mjs  --sessions <f1,f2,...> --json > .claude/state/chat-audit/agents.json
 ```
 
-They see different things and you need both:
+`agents.mjs` runs by default alongside the other two — it is cheap (pure Node, no agents dispatched) and the
+main thread cannot see this material any other way: a `Task` call in the slice shows a description and a
+duration, nothing about what happened inside. Skip it only when the selected sessions spawned no subagents
+(check `agents` in `freq.json` first — zero agent calls means nothing under `subagents/` either).
+
+They see different things and you need all three:
 
 - **`extract.mjs`** — per session: user turns with timestamps and uuids (the anchors), turns flagged as
   corrections, interruptions, compactions, tool errors, agent spawns, skill invocations, hook firings,
@@ -17,6 +23,10 @@ They see different things and you need both:
 - **`analyze.mjs`** — across all sessions: tool and binary frequencies, commands repeated 3+ times, retries
   (same command within 3 steps), code written inline from scratch, failures, files re-read across sessions,
   guardrail blocks and classifier denials.
+- **`agents.mjs`** — inside every subagent the selected sessions spawned: duration, tool calls, tool errors by
+  class (hook block, permission, timeout, not found, read-before-edit, exit code, other), the longest silent
+  gap and where it fell, watchdog stalls, and user interruptions. Totals include agent-hours, error rate, hook
+  blocks per hook, and agents that ran on the main session's model because none was set explicitly.
 
 ## What each signal means
 
@@ -33,6 +43,9 @@ Read the slice for these before dispatching agents — several findings fall out
 | hook blocks on legitimate work | a guardrail that is too broad |
 | `skillsActive` vs recon inventory | skills that exist and never fire |
 | long turns + compactions | where context ran out; often where quality dropped |
+| agent `errClasses` dominated by one class | a systemic gap (e.g. mostly `hook block`) rather than one-off flakiness |
+| agent `maxGapSec` in the minutes | the agent stalled or waited on something silently — check `gapAt` against the tool call before it |
+| agent `inherited: true` at volume | agents dispatched without an explicit model, burning the main session's model unnecessarily |
 
 ## Anchors
 
@@ -42,7 +55,7 @@ real turn does not survive `land.md`.
 
 ## Redaction
 
-Both scripts route their output through `.claude/skills/chat-audit/lib/scrub.mjs`. It removes private keys, provider tokens, JWTs, auth
+All three scripts route their output through `.claude/skills/chat-audit/lib/scrub.mjs`. It removes private keys, provider tokens, JWTs, auth
 headers, credentials in URLs, secret-shaped assignments, one-time codes and long opaque blobs. Do not disable
 it and do not paste raw transcript text around it — the report gets written into memory and committed.
 
@@ -51,4 +64,4 @@ quoting it.
 
 ## Output of this mode
 
-`slice.json` + `freq.json` on disk, and the counts stated in one line. Then go to `analyze.md`.
+`slice.json` + `freq.json` + `agents.json` on disk, and the counts stated in one line. Then go to `analyze.md`.

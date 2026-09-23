@@ -48,16 +48,21 @@ All under `.claude/skills/chat-audit/lib/`, all pure Node (no deps), all safe to
 
 ```bash
 node .claude/skills/chat-audit/lib/discover.mjs config    --project <dir>       # config dirs, memory, infra inventory
-node .claude/skills/chat-audit/lib/discover.mjs sessions  --project <dir> [--days N] [--grep RE] [--exclude ID] [--scope exact|subtree|all]
+node .claude/skills/chat-audit/lib/discover.mjs sessions  --project <dir> [--days N] [--grep RE] [--exclude ID] [--scope exact|subtree|all] [--include-auto]
 node .claude/skills/chat-audit/lib/extract.mjs   --sessions a.jsonl,b.jsonl --out slice.json   # per-session slice, with user turns
 node .claude/skills/chat-audit/lib/analyze.mjs   --project <dir> [--days N] [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
-node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir> [--all]     # anchors in memory that no longer resolve
+node .claude/skills/chat-audit/lib/agents.mjs    --project <dir> [--days N] | --sessions a.jsonl,b.jsonl [--json]  # subagent transcripts: duration, tool errors by class, gaps, stalls
+node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir> [--memory <dir>] [--fail-on high|medium] [--all]  # anchors in memory that no longer resolve
 node .claude/skills/chat-audit/lib/tokens.mjs    [--project <dir>|--all] [--since YYYY-MM-DD] [--top N]  # what the tokens are spent ON
 ```
 
 `extract.mjs` answers *what happened in these sessions* (turns, corrections, errors, anchors).
 `analyze.mjs` answers *what happens repeatedly across many sessions* (frequencies, retries, hand-written code,
 guardrail blocks). Use both — they see different things.
+`agents.mjs` answers *what happened inside the agents the main thread spawned* — a `Task` call in the main
+transcript shows only a description and a duration; the subagent's own transcript
+(`<session-dir>/subagents/**/*.jsonl` + sibling `.meta.json`) is where the tool errors, silent gaps and
+watchdog stalls actually live. Cheap and agent-free, so `extract.md` runs it by default.
 `tokens.mjs` answers *what the spend consists of*: every call re-reads the whole context, so it attributes
 each call's context growth to what was appended (tool result by tool and command, hook output, thinking,
 compaction residue, startup overhead) and weights it by how many later calls re-read it. Use it when the

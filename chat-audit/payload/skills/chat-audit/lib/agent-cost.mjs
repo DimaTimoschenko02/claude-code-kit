@@ -87,18 +87,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   const list = arg('sessions');
   if (!list) { console.error('usage: agent-cost.mjs --sessions a.jsonl,b.jsonl [--json] [--per-session]'); process.exit(1); }
   const r = agentCost(list.split(',').map((x) => x.trim()).filter(Boolean));
-  if (process.argv.includes('--json')) { console.log(JSON.stringify(r, null, 2)); process.exit(0); }
-  console.log(`sessions=${r.sessions}  agent calls=${r.totals.agents.calls}`);
-  console.log(`output tokens: main=${k(r.totals.main.out)}  agents=${k(r.totals.agents.out)}  (agents ${(100 * r.totals.agents.out / (r.totals.main.out + r.totals.agents.out)).toFixed(0)}%)`);
-  console.log(`cache read:    main=${k(r.totals.main.cacheRead)}  agents=${k(r.totals.agents.cacheRead)}`);
-  console.log('\ntype                          calls   msgs     out   med/call  max/call  cache_create  cache_read');
-  for (const t of r.types) {
-    console.log(`${t.type.padEnd(30)}${String(t.calls).padStart(5)}${String(t.msgs).padStart(7)}${k(t.out).padStart(8)}${k(t.medianOutPerCall).padStart(10)}${k(t.maxOutPerCall).padStart(10)}${k(t.cacheCreate).padStart(14)}${k(t.cacheRead).padStart(12)}`);
-  }
-  if (process.argv.includes('--per-session')) {
-    console.log('\nsession   main_out  agents  agent_out  agent_cache_read  types');
-    for (const s of r.perSession.sort((a, b) => b.agentOut - a.agentOut)) {
-      console.log(`${s.session}  ${k(s.mainOut).padStart(8)}  ${String(s.agentCalls).padStart(6)}  ${k(s.agentOut).padStart(9)}  ${k(s.agentCacheRead).padStart(16)}  ${Object.entries(s.types).map(([t, n]) => `${t}×${n}`).join(' ')}`);
+  // no exit() after a big write to a pipe: it drops the unflushed tail (memory-drift, 2026-09-23)
+  if (process.argv.includes('--json')) {
+    console.log(JSON.stringify(r, null, 2));
+  } else {
+    console.log(`sessions=${r.sessions}  agent calls=${r.totals.agents.calls}`);
+    console.log(`output tokens: main=${k(r.totals.main.out)}  agents=${k(r.totals.agents.out)}  (agents ${(100 * r.totals.agents.out / (r.totals.main.out + r.totals.agents.out)).toFixed(0)}%)`);
+    console.log(`cache read:    main=${k(r.totals.main.cacheRead)}  agents=${k(r.totals.agents.cacheRead)}`);
+    console.log('\ntype                          calls   msgs     out   med/call  max/call  cache_create  cache_read');
+    for (const t of r.types) {
+      console.log(`${t.type.padEnd(30)}${String(t.calls).padStart(5)}${String(t.msgs).padStart(7)}${k(t.out).padStart(8)}${k(t.medianOutPerCall).padStart(10)}${k(t.maxOutPerCall).padStart(10)}${k(t.cacheCreate).padStart(14)}${k(t.cacheRead).padStart(12)}`);
+    }
+    if (process.argv.includes('--per-session')) {
+      console.log('\nsession   main_out  agents  agent_out  agent_cache_read  types');
+      for (const s of r.perSession.sort((a, b) => b.agentOut - a.agentOut)) {
+        console.log(`${s.session}  ${k(s.mainOut).padStart(8)}  ${String(s.agentCalls).padStart(6)}  ${k(s.agentOut).padStart(9)}  ${k(s.agentCacheRead).padStart(16)}  ${Object.entries(s.types).map(([t, n]) => `${t}×${n}`).join(' ')}`);
+      }
     }
   }
 }
