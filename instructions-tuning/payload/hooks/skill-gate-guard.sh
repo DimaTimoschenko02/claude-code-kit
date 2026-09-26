@@ -76,7 +76,12 @@ fi
 
 # Most recent invocation ts of the required skill (ISO8601 UTC -> lexicographic compare valid).
 # Directory-scoped skills are logged with a scope prefix ("pricehub:vault-write"), so accept "<scope>:<skill>" too.
-invoked=$(jq -r --arg s "$req" 'select(.skill==$s or (.skill|endswith(":"+$s)))|.ts' "$LOG" 2>/dev/null | tail -1)
+# Only this session's invocations count: parallel sessions share the log, and another window's /skill must not open
+# this one's gate. A record without session_id (logged before the field existed) still counts — fail-open, as above.
+sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+invoked=$(jq -r --arg s "$req" --arg sid "$sid" \
+  'select(.skill==$s or (.skill|endswith(":"+$s))) | select($sid == "" or (.session_id // "") == "" or .session_id == $sid) | .ts' \
+  "$LOG" 2>/dev/null | tail -1)
 
 if [ -n "$invoked" ] && { [[ "$invoked" > "$boundary" ]] || [ "$invoked" = "$boundary" ]; }; then
   exit 0
