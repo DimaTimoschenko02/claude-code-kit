@@ -75,7 +75,8 @@ fi
 [ -z "$boundary" ] && exit 0   # can't locate boundary -> fail-open
 
 # Most recent invocation ts of the required skill (ISO8601 UTC -> lexicographic compare valid).
-invoked=$(jq -r --arg s "$req" 'select(.skill==$s)|.ts' "$LOG" 2>/dev/null | tail -1)
+# Directory-scoped skills are logged with a scope prefix ("pricehub:vault-write"), so accept "<scope>:<skill>" too.
+invoked=$(jq -r --arg s "$req" 'select(.skill==$s or (.skill|endswith(":"+$s)))|.ts' "$LOG" 2>/dev/null | tail -1)
 
 if [ -n "$invoked" ] && { [[ "$invoked" > "$boundary" ]] || [ "$invoked" = "$boundary" ]; }; then
   exit 0
