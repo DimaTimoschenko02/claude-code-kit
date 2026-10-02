@@ -72,6 +72,27 @@ the next audit cheerfully proposes the same thing again and the user loses trust
 Check the ledger at the start of `analyze.md`, write it at the end of this mode. Never rewrite past lines; a
 finding that comes back after being rejected is new information, appended, not an edit of the old verdict.
 
+**A change line per applied change.** Every accepted finding that changes a hook, skill, rule, memory note, agent,
+tool or setting also gets a `type:"change"` line — the same line `instructions-tuning` writes on its own edits —
+so a later `effect.mjs` run can say whether it worked:
+
+```json
+{"type":"change","id":"C-<n+1>","ts":"<iso>","session":"<id8>","kind":"hook-guard|hook-injector|skill|rule|memory|agent|tool|settings",
+ "paths":["…"],"commit":"<sha>|null","scope":"project|global","class":"<the failure class, one sentence>","trigger":"<session/ts of the complaint>",
+ "supersedes":"C-<k>|null","co_changes":["C-<m>"],
+ "signal":{"src":"assistant|user|tool:<Name>[.field]|skill|deny:<hook>|hooklog:<hook>","re":"<regex>","want":"down|zero|up|present"}|null,
+ "occasion":{"src":"…","re":"…"}|null,"baseline":null,"verdict":null}
+```
+
+`signal` names a line, a tool parameter, a skill load or a hook decision the change should move; sources and
+their default occasions are in the header of `lib/effect.mjs`. `signal:null` is allowed and is reported as
+`unmeasurable` at every audit. Then freeze the baseline — transcripts older than ~30 days are deleted:
+`node .claude/skills/chat-audit/lib/effect.mjs record --id C-<n>`. `record` rewrites only that line.
+
+The ledger is under `.claude/state/`, which installs ignore. To keep its history in git, make the state ignores
+`.claude/state/**` (a directory pattern cannot be re-included) and put these two lines last in `.gitignore`:
+`!.claude/state/**/` and `!.claude/state/chat-audit/ledger.jsonl`.
+
 ## Do not
 
 - Do not apply anything the user did not accept, including "obvious" ones.

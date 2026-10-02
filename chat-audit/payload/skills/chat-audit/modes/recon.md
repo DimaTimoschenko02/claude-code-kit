@@ -5,6 +5,17 @@ things that were solved months ago, and — worse — cannot tell a missing rule
 
 ## Run
 
+First, whether what already exists works — the inventory below says what is there, not whether it does:
+
+```bash
+node .claude/skills/chat-audit/lib/effect.mjs --project <dir>
+```
+
+One row per recorded change (`type:"change"` ledger lines, see `land.md`). Carry the rows into the inventory:
+`dead`, `no-effect` and `harmful` are findings before any session is read; `untested` is never cited as working;
+`unmeasurable` rows are listed so the user can add a signal or accept them on faith. No ledger lines → say so
+and go on.
+
 ```bash
 node .claude/skills/chat-audit/lib/discover.mjs config --project <dir>
 ```
@@ -42,6 +53,7 @@ hooks:    <names + events>
 agents:   <names>
 rules:    <names>
 memory:   <path> (<n> files) | none found
+effect:   <n> changes — works <n> · dead <ids> · no-effect <ids> · harmful <ids> · untested <ids> · unmeasurable <n>
 claimed:  <headings of CLAUDE.md / AGENTS.md>
 ```
 

@@ -137,6 +137,13 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.5.0** (2026-10-02) — `effect.mjs`: did a change to the agent's own infrastructure work. Reads
+  `type:"change"` ledger lines (new record type, written by `instructions-tuning` and by `land.md` for applied
+  findings), counts each line's signal 7 days before vs since over main and subagent transcripts plus the hook log
+  (`.claude/state/hooks/*.jsonl`), and prints a verdict per change; `record` freezes the baseline into the line.
+  Dedup by tool_use id / tool_use_id / message id; a deny must be the tool result itself (quotes in reports are
+  not), hook test harness calls and the ±2 h authoring window are dropped from action signals, heredoc bodies are
+  data. `recon.md` runs it first.
 - **1.4.0** (2026-09-23) — `agents.mjs`: new step reading subagent transcripts (`<session>/subagents/**/*.jsonl` +
   `.meta.json`) — duration, tool errors by class, silent gaps, watchdog stalls, interruptions; run by default in
   `extract.md`, sourced by an `agents` lens in `analyze.md`. `analyze.md`: free reader (one agent per shard, no
