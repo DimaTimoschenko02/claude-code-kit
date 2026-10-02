@@ -31,7 +31,7 @@ const RULES = [
     '$1$2$3[REDACTED]$3',
   ],
   // One-time codes stated next to the word.
-  [/\b(otp|одноразов\w*|код подтверждения|verification code|2fa)\b([^\n]{0,20}?)\b\d{4,8}\b/gi, '$1$2 [OTP]'],
+  [/(?<!\p{L})(otp|одноразов\p{L}*|код подтверждения|verification code|2fa)(?!\p{L})([^\n]{0,20}?)\b\d{4,8}\b/giu, '$1$2 [OTP]'],
   // Long opaque hex blobs. Threshold is 48, not 40, so 40-char git SHA-1s
   // survive — commit hashes are load-bearing evidence in an audit, and a hash
   // is not a credential.

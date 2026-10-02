@@ -30,16 +30,18 @@ import { listSessions } from './discover.mjs';
 // These are the highest-signal lines in any transcript — but this regex is a HINT, not a
 // count: measured recall 36 of 83 hand-labelled correctionHints (43%, 2026-09-06). Hence the
 // field is `correctionHints`; the real count comes from an agent reading `--pairs`.
+// JS `\b` is ASCII-only: `опять\b` never matched «опять» (2026-10-02) — a Cyrillic word ends with END.
+const END = '(?![\\p{L}\\p{N}])';
 const CORRECTION = new RegExp(
   [
-    'я (?:же )?(?:говорил|сказал|просил)', 'не (?:то|так|это)\\b', 'имел ввиду', 'мав на увазі',
-    'опять\\b', 'знову\\b', 'снова то же', 'зачем ты', 'нахуя', 'какого хуя', 'че за',
-    'стоп\\b', 'стій\\b', 'погоди', 'подожди', 'отставить', 'не нужно было', 'не надо было',
+    'я (?:же )?(?:говорил|сказал|просил)', 'не (?:то|так|это)' + END, 'имел ввиду', 'мав на увазі',
+    'опять' + END, 'знову' + END, 'снова то же', 'зачем ты', 'нахуя', 'какого хуя', 'че за',
+    'стоп' + END, 'стій' + END, 'погоди', 'подожди', 'отставить', 'не нужно было', 'не надо было',
     'ты (?:не|же не)\\s', 'ошиб(?:ка|ся|аешься)', 'неверно', 'неправильно', 'невірно',
     'перечитай', 'ещё раз', 'еще раз', 'я тебя перебью',
     "that's not", 'not what i', 'i said', 'wrong\\b', 'no,? i meant', 'stop\\b', 'undo\\b',
   ].join('|'),
-  'i',
+  'iu',
 );
 
 const NOISE_PREFIX = /^(?:This session is being continued|Caveat: The messages below|<local-command|<command-name|<system-reminder>|<task-notification>|Review this change for security|You analyze a conversation between|\[Request interrupted)/;
