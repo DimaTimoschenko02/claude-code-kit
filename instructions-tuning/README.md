@@ -4,11 +4,14 @@ A skill for editing the files an agent reads to decide how to behave — plus a
 **determinism hook (skill-gate)** that makes the agent actually invoke that skill
 before touching those files.
 
-- **Skill:** `instructions-tuning` — diagnoses *why* an instruction fails and picks
-  the right form (prohibition / positive recipe / structural slot / predicate /
-  hook) under a conciseness + altitude budget. Also covers **fixing holes in your own
-  tooling** (when to fix without asking; fix the *class*, not the instance) and a
-  **bash-hook checklist** — eight rules derived from real hook misfires.
+- **Skill:** `instructions-tuning` — tuned for current (Claude 5 generation) models,
+  which fail from too much instruction more often than too little. Diagnoses *why* an
+  instruction fails — conflict between layers, stale old-model crutch, bloat, or one of
+  seven failure types — and picks the form that fixes it, judgement-in-prose first,
+  hook last. A folder, not one file: `skill-files.md` (descriptions as triggers,
+  splitting by situation, gotchas), `audit.md` (whole-surface sweep built on
+  `/doctor prompt-audit`), `tool-holes.md` (fix the *class*, not the instance) and
+  `bash-hooks.md` (nine rules derived from real hook misfires).
 - **Gate:** `skill-gate-guard.sh` (PreToolUse Write|Edit) — blocks an edit to a
   *governed* path until its owner skill was invoked **this context window**. Pure
   prose is advisory; the gate is the deterministic backstop for "must invoke first".
@@ -89,7 +92,7 @@ left is to commit. Trade-offs worth knowing:
 
 ```
 <project>/.claude/
-├── skills/instructions-tuning/SKILL.md   # the skill (package-managed)
+├── skills/instructions-tuning/          # the skill folder (package-managed): SKILL.md + situation files
 ├── hooks/
 │   ├── skill-gate-guard.sh               # PreToolUse[Write|Edit] — the gate
 │   └── skill-invocation-log.sh           # PostToolUse[Skill] — records invocations

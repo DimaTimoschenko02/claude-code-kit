@@ -1,162 +1,109 @@
 ---
 name: instructions-tuning
-description: "Use whenever creating OR editing any instruction/meta file an agent reads — CLAUDE.md, AGENTS.md, SKILL.md, agent definitions, system prompts, hooks, or .claude/rules. Trigger on any request to write, tune, fix, tighten, reword, or improve a rule/instruction for an agent; when an instruction keeps getting ignored; or when the user says 'инструкции', 'правило', 'правь CLAUDE.md', 'поправь скилл', 'мета-файл'. Diagnoses WHY an instruction fails and picks the right FORM (prohibition / positive recipe / structural slot / predicate-conditional / hook) under a conciseness + altitude budget. Also covers fixing a HOLE found in our own tooling — a hook, script, tool or agent that misfires, stays silent when it should fire, or lacks the tools its own instructions require: when to fix without asking, and how to fix the class instead of the instance."
+description: "Use when creating, editing, splitting or auditing any file an agent reads to decide how to behave — CLAUDE.md, AGENTS.md, SKILL.md, agent definitions, .claude/rules, text a hook injects, system prompts — or when an instruction keeps getting ignored, misapplied, or contradicts another one. Also when one of our own hooks, scripts or agent tools misfires or stays silent when it should fire. Trigger words: 'инструкции', 'правило', 'правь CLAUDE.md', 'поправь скилл', 'мета-файл', 'хук не сработал'. Diagnoses why an instruction fails, picks the form that fixes it, and keeps the surface lean for current Claude models."
 ---
 
 # Instructions Tuning
 
-Editing the files an agent reads to decide how to behave. The job is not "write a rule" — it is **match the form of the instruction to the way it fails.** A rule that keeps getting ignored is usually the wrong *form*, not the wrong *content*. Empirically (and per Anthropic's own docs) a clear instruction plus one canonical example beats either alone; a bare prohibition beats a vague one; and anything that *must* happen every time beats every wording by being a hook instead of prose.
+Editing the files an agent reads to decide how to behave. Two facts frame every edit.
+
+**Current Claude models follow instructions closely and literally, and have good judgement.** Most failures now come from too much instruction, not too little: a rule applied exactly where it is wrong, rituals that make the model write more and repeat tool calls, two layers saying opposite things. Anthropic removed over 80% of Claude Code's own system prompt for the Claude 5 generation with no loss on their evals. So the first fix to consider is a deletion, or rewriting a rule into the principle behind it; adding text comes second.
+
+**A rule that keeps failing usually has the wrong form, not the wrong words.** Match the form to the way it fails.
+
+## Where to look
+
+| Situation | Read |
+|---|---|
+| Fixing or writing one instruction — a CLAUDE.md line, a rule, a skill section | this file |
+| Writing a skill, restructuring or splitting one, fixing its `description` | `skill-files.md` |
+| Auditing a whole surface — a project's CLAUDE.md, rules, skills — for dated patterns | `audit.md` |
+| One of our own hooks, scripts or tools misfires or stays silent | `tool-holes.md` |
+| Writing or fixing a bash hook | `bash-hooks.md` |
 
 ## Process
 
-Work in this order. Skip the heavy steps for a one-line tweak — but never skip step 1 (diagnose) or step 4 (budget).
+Diagnose → pick the form → write → budget-check → apply and record. For a one-line tweak go straight to writing, but never skip diagnosis and the budget check.
 
-1. **Diagnose** — what file, and what *kind* of failure are we fixing?
-2. **Pick the form** — run the failure type through the matrix below.
-3. **Write it** — in the chosen form, dogfooding the matrix on your own wording.
-4. **Budget-check** — cut anything the agent already knows; verify length/altitude limits.
-5. **Apply** — show the diff + one line of *why*, get a light OK. No spec, no gate.
+### 1. Diagnose
 
-## Step 1 — Diagnose
+First look for the three causes whose fix is a deletion, not new text:
 
-Two questions before touching anything:
+- **Conflict** — another layer decides the same thing differently: global CLAUDE.md, project CLAUDE.md, a skill, text a hook injects, the user's request. The model spends thinking reconciling them and lands inconsistently. Grep the other layers for the same topic before writing anything.
+- **Stale crutch** — the line was written for an older model: emphasis, rituals, step scripts, gold examples (see Write).
+- **Bloat** — the file is long enough that rules get lost in it. Suspect length before rewording a rule that keeps being violated.
 
-**Which file?** Each has hard limits (see Budget). CLAUDE.md ≤200 lines. SKILL.md body <500 lines. `description` ≤1024 chars. A hook is code, not prose.
+Then name the failure; the name selects the form:
 
-**Which failure?** Name it precisely — the name selects the form:
-- The agent *knows* the rule but breaks it under pressure / when inconvenient → **pressure failure**
-- The agent produces output of the *wrong shape* (wrong structure, tone, verbosity) → **shape failure**
-- The agent *omits a required element* (forgets a step/field) → **omission failure**
-- The behavior should *depend on a condition* the agent misjudges → **conditional failure**
-- The action *must happen every single time, zero exceptions* → **determinism failure**
-- The rule needs *judgment on cases the author didn't foresee* → **judgment gap**
+- needs judgement on cases nobody foresaw → **judgement** (the default)
+- follows a rule exactly where the rule is wrong, or performs ritual work → **over-constraint**
+- knows the rule but breaks it when it is inconvenient → **pressure**
+- produces output of the wrong shape → **shape**
+- forgets a required element → **omission**
+- behavior should depend on a condition the agent misjudges → **conditional**
+- must happen every time, zero exceptions → **determinism**
 
-## Step 2 — Match the form to the failure (the core)
+### 2. Pick the form
 
-| Failure | Right form | Why this form |
+| Failure | Form | Why |
 |---|---|---|
-| **Pressure** | Prohibition + a short *rationalization table* (the excuses the agent will tell itself → the rebuttal) + red-flag phrases | Naming the loophole closes it. "Violating the letter is violating the spirit." |
-| **Shape** | A **positive recipe / contract** — the exact target shape. NOT a prohibition. | Prohibitions backfire on shaping problems: "don't be verbose" leaves infinite valid outputs. A recipe leaves nothing to negotiate. |
-| **Omission** | A **structural REQUIRED slot** in a template — make the missing element a labeled field the agent fills | Structure carries the rule; a forgotten field is visibly empty. |
-| **Conditional** | A conditional **keyed to an observable predicate** ("if the file is under `X/` …"), not a fuzzy judgment | The agent can check a predicate; it can't reliably check a vibe. |
-| **Determinism** | **Stop writing prose — make it a hook** (PreToolUse) and delegate to the hookify skill | CLAUDE.md/SKILL.md are *advisory* — "no guarantee of strict compliance." Hooks are deterministic. |
-| **Judgment gap** | State the **rationale / the story of what broke** — the reasoning becomes the rubric for unforeseen cases | "Use constructor injection — field injection breaks testability" generalizes; "NEVER use field injection" doesn't. |
+| Judgement | The goal and the reasoning, in prose: what we want and why. "Write code that reads like the surrounding code: match its comment density, naming, and idiom" replaced a paragraph of comment rules in Claude Code's own prompt. | The model generalizes from a reason to cases the author never saw; a rule covers only the cases it names. |
+| Over-constraint | Delete it, or rewrite the absolute into the principle behind it. | An absolute that "might not always be true" gets applied exactly where it is wrong. |
+| Pressure | The rule once, plainly, with the concrete cost of breaking it. If transcripts show the specific excuse the agent uses, name that excuse in the same sentence. Still broken → determinism. | The cost is what holds under pressure. Lists of hypothetical excuses and red-flag phrases are repetition, and repetition makes the model reconcile wordings instead of acting. |
+| Shape | A positive contract of the target shape: a template with named fields, or an example labeled illustrative when the output is genuinely format-sensitive. | "Don't be verbose" leaves infinite valid outputs; a contract leaves nothing to negotiate. |
+| Omission | A required, labeled slot in the template. | A forgotten field is visibly empty. |
+| Conditional | A condition keyed to something the agent can check: "if the file is under `X/`". | The agent can check a predicate; it can't check a vibe. |
+| Determinism | Stop writing prose: a hook (hand off to the hookify skill), or a permission rule for a hard block. | Instruction files are advisory. A hook guard is a safety net, not a permission system — a hard block belongs in permission rules. |
 
-Two cross-cutting levers:
-- **Escalation ladder:** soft rule → emphasized rule (`IMPORTANT` / `YOU MUST`) → hook. Reach for emphasis only after a plain instruction is observably ignored; reach for a hook when emphasis isn't enough and it must be guaranteed.
-- **The "why" is conditional, not universal.** Attach a rationale ONLY for judgment gaps where the reasoning isn't obvious. For a mechanical convention ("links via `[[wiki]]`"), state it bare — a "why" the agent already knows is wasted tokens.
+Emphasis — caps, `IMPORTANT`, `MUST` — is a tested fix for one instruction that a plain sentence observably failed to move, never a first-draft register. When several lines are marked critical the markers carry no information, and an anxious file produces a hedging agent.
 
-## Step 3 — Write it
+### 3. Write it
 
-- **Imperative, verb-first.** "Filter X before Y", not "X should be filtered".
-- **One canonical example beats a description** for shape/quality rules. Input→output pair. Not five edge cases.
-- **One default + an escape hatch**, never a menu of options the agent must choose between.
-- **Reference a capability as a call to *use* it, not as passive availability.** A skill / tool / memory / hook the agent should reach for → imperative: "route via X", "verify with the DB before asserting", "log it to memory". Passive "X exists" / "for this there's X" gets ignored — the agent won't reach for what's merely mentioned. *Exception:* a detail/spec doc needed only sometimes → a plain pointer is fine ("full rules — [[X]]"); there the call-to-action is the inline rule, not "re-read this every time".
-- **Consistent terminology** — pick one term and keep it (always "field", never field/box/element).
-- **No nuance clauses.** Exemption clauses ("usually", "unless it makes sense") don't scope — they dissolve the rule. If there's a real exception, make it a predicate (conditional form).
+**Explain how to think, not what to copy.** A concrete example is the strongest signal in a prompt: the model matches its length, tone and structure and stays inside it. Give the principle instead. Use an example only when copying is the goal — an output format, a file template — or when it carries a fact the model lacks, such as the current API shape versus the one it was trained on, or a data quirk. If you give several, make them deliberately different.
 
-## Step 4 — Budget-check (Anthropic constraints, always)
+**Goal, constraints and how to verify — not a step script.** The model's own plan usually beats a hand-written one. Keep numbered steps only where the order itself is the point: a deploy, a destructive sequence, an auth flow.
 
-- **Pruning test** — for each line: *"would removing this make the agent make a mistake?"* No → cut it. "The context window is a public good."
-- **Right altitude** — not brittle-hardcoded logic, not vague generality. Specific enough to guide, flexible enough to be a heuristic.
-- **Concise ≠ short** — minimize *low-signal* tokens (things the agent already knows), keep high-signal ones even if long.
-- **Bloat is the #1 failure** — "bloated files cause the agent to ignore your actual instructions; important rules get lost in the noise." If a rule keeps being violated, suspect the file is too long *before* rewording the rule.
-- **Limits:** CLAUDE.md ≤200 lines · SKILL.md body <500 lines · `description` ≤1024 chars, third-person, states *what* + *when* · references one level deep (ToC if >100 lines) · forward-slash paths · no time-sensitive prose ("before Aug 2025…") — use a collapsed "old patterns" section.
-- **Imports don't save context.** `@path` loads at launch regardless. Only `.claude/rules/` with `paths:` frontmatter defers loading until matching files are touched.
+**Keep the reason, drop the history.** "The gate reads a shared file, so a parallel session resets it" is a reason; the date, the session id and who said it are archaeology. A rule's authority is the behavior it prescribes, not the incident that produced it.
 
-## Step 5 — Apply
+**No old-model rituals.** "Think carefully", "think step by step", mandatory N-step procedures, "verify twice", "do not be lazy", scratchpads, "summarize every N tool calls", "hold all findings until the end", "never use bullets". Current models think before every reply and plan unprompted; to change how much they think, change effort.
 
-Show the diff, one line of *why*, get a light OK. For a CLAUDE.md/SKILL.md edit, after applying, sanity-check that behavior actually shifts — one observation, not a test suite. (Full eval loops / TDD are deliberately out of scope here.)
+**A requirement is stated without hedges.** "Try to" or "if possible" on a real requirement reads as permission to skip it. If the line is not a requirement, it is a principle — write it as one, or delete it.
 
-**Last step — record the change** (when the project has `.claude/skills/chat-audit/lib/effect.mjs`). Append one
+**Reference a capability as a call to use it** — "route via X", "verify against the DB before asserting". A passive "X exists" gets ignored. A detail doc needed only sometimes takes a plain pointer.
+
+Imperative, verb-first. One term per concept. One default plus an escape hatch, never a menu of options. Prose for behavior, because bullets sever a rule from its reason; tables for reference data.
+
+### 4. Budget-check
+
+For each line: *would removing it make the agent make a mistake?* If not, cut it. Keep what only the author knows — the product, the environment, gotchas, the reasons behind constraints; that context is never cruft. Cut what the model already knows or can see in the repo. Cruft is not length: never justify a cut by character count alone.
+
+**Recency trap.** One session's stumble encoded as a permanent rule makes every later session step around a pothole that isn't there. Before keeping a rule, ask whether it would have helped most recent sessions or only the one that wrote it.
+
+**Progressive disclosure over one big file.** CLAUDE.md stays lean and points to skills and files that load when needed. `@path` imports load at launch regardless; only `.claude/rules/` with `paths:` frontmatter defers until matching files are touched.
+
+**One place per fact.** Two files that agree are fine; two that disagree are a conflict (step 1).
+
+Limits: CLAUDE.md under 200 lines — every line is resent on every turn. SKILL.md body under 500 lines, and split by situation well before that (`skill-files.md`). `description` at most 1024 characters.
+
+### 5. Apply and record
+
+Show the diff with one line of why, get a light OK, apply. Then check that behavior actually shifts — one observation, not a test suite.
+
+A removal is a hypothesis. If what the rule guarded against comes back, re-add it in its smallest form; don't restore the original.
+
+**Record the change** (when the project has `.claude/skills/chat-audit/lib/effect.mjs`). Append one
 `type:"change"` line to `.claude/state/chat-audit/ledger.jsonl` — format in chat-audit `modes/land.md`. Required:
-`class` = the failure class from Step 1, one sentence; `signal` = the line, tool parameter, skill load or hook decision
+`class` = the failure class from step 1, one sentence; `signal` = the line, tool parameter, skill load or hook decision
 this edit should move (`src`, `re`, `want`); `occasion` = when it applies (`null` → the source's default). Then
 `node .claude/skills/chat-audit/lib/effect.mjs record --id C-<n>` freezes the 7-day baseline.
 No observable signal → `signal:null` is allowed, but the change is reported as `unmeasurable` at every audit.
 
-## Дыры в инструментах — чинить самому
+## What this skill does not do
 
-Область: **свои** инструменты — хуки, скрипты и либы в `.claude/`, тулзы в `bin/`, набор
-инструментов у агента, формат его отчёта. Продуктовый код, чужие репозитории, CI, прод — не сюда,
-там по-прежнему спрашиваем.
-
-### Спрашивать или чинить — по тому, ЧТО меняется
-
-| Меняется | Решение |
-|---|---|
-| механика, обслуживающая меня: ошибка в коде хука, сломанный вызов, агенту не выдан инструмент, агент не вернул отчёт в ожидаемой форме | **чиню молча.** Цель инструмента прежняя, чинится способ, которым он её достигает |
-| назначение или поведение — моё либо агента: у агента другая цель, скилл не покрывает часть работы, правило начинает требовать другого | **обсуждаю.** Это уже решение о том, как мы работаем, а не починка |
-
-Тест на границу: *«после правки инструмент делает то же, что и раньше, просто теперь работает?»*
-Да → чиню. Нет, он начнёт делать что-то ещё → спрашиваю.
-
-**Дыра = инструмент даёт неверный результат** — ложно сработал, молча не сработал, потерял данные.
-«Неудобно» и «я бы сделал иначе» дырой не являются: без этого признака починка расползётся во вкусовщину.
-
-### Когда
-
-**После того как сдан текущий deliverable**, не посреди задачи. Заметил в процессе — одна строка
-в ответе о находке, правка следующим шагом. Переключение посреди работы дороже самой дыры.
-
-### Как — сначала класс, потом файл
-
-🔴 Главная ошибка: починить тот экземпляр, об который споткнулся, и уйти. Перед правкой:
-
-> *Этот инструмент единственный такой, или он экземпляр паттерна?* Ответ ищи не в файле, а в
-> назначении: **зачем** инструмент существует, **когда** срабатывает, **на чьё состояние** опирается.
-
-Образец (2026-08-10): один хук читал общий файл сброса, из-за чего чужая сессия обнуляла гейт.
-Вопрос «на чьё состояние опирается» превратил один баг в класс — 8 мест с общим состоянием при
-5-7 параллельных сессиях, из них 3 кусались ежедневно. Точечная починка оставила бы семь.
-
-Дефект класса ищется в обе стороны:
-- **тот же механизм у соседей** — кто ещё читает тот же файл, зовёт ту же либу, повторяет ту же строку;
-- **обратное направление** — гейт может не только срабатывать вхолостую, но и молчать, когда должен
-  сработать. Второе незаметно, поэтому проверяется специально.
-- **внутри одного файла** — *если в файле СФОРМУЛИРОВАН принцип, проверь все места, где тот же
-  вопрос решается второй раз.* Половины файла пишутся в разное время под разную боль, и правило не
-  едет за границу своей секции само. Образец (2026-08-16): хук приёмки карты засчитывал ПРИЁМКУ по
-  эффекту, с явным комментарием «намерение — не результат», а двадцатью строками выше писал
-  АВТОРСТВО по намерению — по одному `tool_input`, не глядя, упал ли инструмент. Чинить надо не
-  логику, а её недостающую половину.
-
-После правки — проверить оба конца: и что дыра закрыта, и что штатный сценарий не сломался
-(в образце: чужой `SessionStart` больше не сбрасывает гейт **и** свой `/compact` по-прежнему сбрасывает).
-
-## Пишешь bash-хук — чеклист
-
-Диагноз сказал «это детерминизм → хук». Дальше класс дефектов смещается: правило верное,
-ломается реализация. Разбор learning-log 2026-08-13 дал 13 таких записей за 12 дней — больше,
-чем любой содержательный класс. Все восемь пунктов ниже выведены из конкретных срабатываний,
-это не гигиена вообще.
-
-1. **stdin парсить только `jq`.** Жадный `sed` по JSON захватил хвост с `session_id`, и проверка
-   темы срабатывала всегда, независимо от текста промпта.
-2. **Отсечь системные события.** `<task-notification>` и `[SYSTEM NOTIFICATION]` приезжают тем же
-   каналом, что промпт пользователя: хук выстрелил по собственному выводу агента.
-   `case "$prompt" in *'<task-notification>'*) exit 0 ;; esac`
-3. **Состояние — per-session файл, не общий.** Параллельные окна тут норма: чужой SessionStart
-   затирал общий маркер и сбрасывал гейт посреди работы — четыре раза за сессию.
-4. **Свежесть контекста меряется reset-файлом, не wall-clock TTL.** Окно «2 часа» истекало
-   в середине использования; `/clear` и `/compact` выносят текст из контекста, а `resume` — нет,
-   и время об этом ничего не знает. Читай reset-маркер, а не часы.
-5. **Вывод человеку ≤3 строк.** 25 строк инструкций, положенные в `reason`, уехали человеку в чат.
-   Детали — в файл рядом, в сообщении ссылка.
-6. **Regex: границы слов + исключить тела heredoc.** Хук трижды подряд принял примеры команд
-   внутри heredoc за исполняемые команды.
-7. **Не писать состояние внутрь рабочего репо.** `gitflow-check` клал файлы в `.claude/state/`
-   репозитория и ломал собственную проверку чистоты дерева. Стейт — в `<workspace>/.claude/state/`.
-8. **Тест обязателен в ОБЕ стороны, до подключения:** срабатывает на целевом случае И молчит на
-   соседнем. Половина списка выше — «сработало, когда не должно», и ловится только вторым тестом.
-   Проверять и сам факт подключения: `settings.json` валиден, хук в нужном событии.
-
-## What this skill does NOT do
-
-- No TDD / failing-test-first gate, no eval-viewer, no description-optimizer loops — too heavy for routine tuning.
-- Deterministic "must happen every time" rules → hand off to the **hookify** skill (this skill only *diagnoses* that a hook is the right answer).
-- It edits instruction *prose and structure*; it does not invent project content.
+- Measured tuning against an eval is a separate job: `/claude-api build-eval`, then `/claude-api hillclimb`.
+- "Must happen every time" rules go to the hookify skill; this skill only diagnoses that a hook is the answer.
+- It edits instruction prose and structure; it does not invent project content.
 
 ## Project deltas
 
-This skill is the universal engine. Project-specific conventions attach via the project's own `.claude/rules/` (path-scoped) or project CLAUDE.md — they are NOT carried here. Example: in the `mind` vault, editing files under `99 meta/**` also obeys the vault's wiki-link / `description`-frontmatter / single-source-of-truth conventions, supplied by `mind/.claude/rules/meta-99.md` and loaded only when those files are touched.
+This skill is the universal engine. Project-specific conventions attach via the project's own `.claude/rules/` (path-scoped) or project CLAUDE.md — they are not carried here. Example: in the `mind` vault, editing files under `99 meta/**` also obeys the vault's wiki-link / `description`-frontmatter / single-source-of-truth conventions, supplied by `mind/.claude/rules/meta-99.md` and loaded only when those files are touched.
