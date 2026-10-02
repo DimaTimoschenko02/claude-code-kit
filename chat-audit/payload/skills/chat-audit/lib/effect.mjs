@@ -243,12 +243,15 @@ function count(hits, occ, perSession, from, to) {
 
 const rate = (w) => (w && w.occasions ? w.hits / w.occasions : 0);
 
-export function verdict(change, before, after, hookLogStart) {
+export function verdict(change, before, after, hookLogStart, now = Date.now()) {
   const sig = change.signal;
   if (!sig) return 'unmeasurable';
   const src = String(sig.src || '');
-  if (src.startsWith('hooklog:') && (hookLogStart === null || hookLogStart > Date.parse(change.ts)) && !after.occasions) return 'unclear-window';
-  if (src.startsWith('hooklog:') && !after.occasions) return 'dead';
+  // A hook with no log line for a full window is not running (or never triggered); before that, too early to say.
+  if (src.startsWith('hooklog:') && !after.occasions) {
+    const ts = Date.parse(change.ts);
+    return hookLogStart !== null && hookLogStart <= ts && now - ts >= WINDOW ? 'dead' : 'unclear-window';
+  }
   if (after.occasions < MIN_AFTER) return 'unclear-window';
   const rb = rate(before), ra = rate(after), want = sig.want || 'down';
   if (src.startsWith('deny:')) return after.hits ? 'works' : 'untested';
@@ -308,7 +311,7 @@ export function measure({ project, ledger, ids = null, now = Date.now() }) {
       before = { hits: b.hits, occasions: b.occasions };
       after = count(sp.hits, sp.occs, sp.perSession, ts, now + 1);
     }
-    const v = sp ? verdict(ch, before, after, hookLogStart) : 'unmeasurable';
+    const v = sp ? verdict(ch, before, after, hookLogStart, now) : 'unmeasurable';
     return { id: ch.id, kind: ch.kind, class: ch.class, signal: ch.signal ? ch.signal.src : null, before, after, verdict: v, recorded: ch.verdict || null, action: ACTION[v] };
   });
 }
