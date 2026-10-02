@@ -145,11 +145,18 @@ SKILLLOG='bash "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-invocation-log.sh"'
 JQ_MERGE='
   def base(c): (c | capture("(?<f>[^/\\\\\"]+\\.sh)").f) // c;
   def present(arr; c): any((arr // [])[]?.hooks[]?; ((.command // "") | (capture("(?<f>[^/\\\\\"]+\\.sh)").f // .)) == base(c));
+  def gate: (.command // "") | test("skill-gate-guard.sh");
+  def has_bash: (.matcher // "") | test("(^|[|])Bash($|[|])");
+  def gate_only: ((.hooks // []) | length) == 1 and any(.hooks[]?; gate);
   .hooks = (.hooks // {})
+  # Upgrade from Write|Edit: Bash already gated somewhere -> leave it. Otherwise widen the matcher only when the
+  # gate sits alone in its group; a shared group would drag its other hooks into Bash, so add a Bash group instead.
   | .hooks.PreToolUse = ((.hooks.PreToolUse // []) as $g
       | if present($g; $guard)
-        then $g | map(if (.matcher == "Write|Edit") and any(.hooks[]?; ((.command // "") | test("skill-gate-guard.sh")))
-                      then .matcher = "Write|Edit|Bash" else . end)
+        then (if any($g[]; has_bash and any(.hooks[]?; gate)) then $g
+              elif any($g[]; .matcher == "Write|Edit" and gate_only)
+              then $g | map(if .matcher == "Write|Edit" and gate_only then .matcher = "Write|Edit|Bash" else . end)
+              else $g + [ {matcher:"Bash", hooks:[{type:"command", command:$guard, "_cc_it":true}]} ] end)
         else $g + [ {matcher:"Write|Edit|Bash", hooks:[{type:"command", command:$guard, "_cc_it":true}]} ] end)
   | .hooks.PostToolUse = ((.hooks.PostToolUse // []) as $g
       | if present($g; $skilllog) then $g
