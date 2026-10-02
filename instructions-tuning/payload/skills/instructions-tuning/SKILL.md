@@ -91,11 +91,12 @@ Show the diff with one line of why, get a light OK, apply. Then check that behav
 
 A removal is a hypothesis. If what the rule guarded against comes back, re-add it in its smallest form; don't restore the original.
 
-**Record the change** (when the project has `.claude/skills/chat-audit/lib/effect.mjs`). Append one
+**Record the change** (when chat-audit is installed — in the project, `.claude/skills/chat-audit/`, or globally,
+`~/.claude/skills/chat-audit/`; the ledger lives in the project either way). Append one
 `type:"change"` line to `.claude/state/chat-audit/ledger.jsonl` — format in chat-audit `modes/land.md`. Required:
 `class` = the failure class from step 1, one sentence; `signal` = the line, tool parameter, skill load or hook decision
 this edit should move (`src`, `re`, `want`); `occasion` = when it applies (`null` → the source's default). Then
-`node .claude/skills/chat-audit/lib/effect.mjs record --id C-<n>` freezes the 7-day baseline.
+`node <chat-audit dir>/lib/effect.mjs record --id C-<n> --project <dir>` freezes the 7-day baseline.
 No observable signal → `signal:null` is allowed, but the change is reported as `unmeasurable` at every audit.
 
 ## What this skill does not do

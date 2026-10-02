@@ -44,7 +44,10 @@ Steps 1–2 may swap order when the user already named the sessions. Nothing els
 
 ## Tools
 
-All under `.claude/skills/chat-audit/lib/`, all pure Node (no deps), all safe to run repeatedly:
+All in `lib/` next to this SKILL.md (the skill's base directory), pure Node (no deps), safe to run repeatedly.
+The commands below and in the mode files spell it `.claude/skills/chat-audit/lib/` — a project install. With
+the global install (`~/.claude/skills/chat-audit/`) the project has no copy: run the same commands from
+`~/.claude/skills/chat-audit/lib/`. State (`.claude/state/chat-audit/`) stays in the project either way.
 
 ```bash
 node .claude/skills/chat-audit/lib/discover.mjs config    --project <dir>       # config dirs, memory, infra inventory
@@ -78,9 +81,11 @@ audit reports get committed.
 
 ## Configuration
 
-`.claude/chat-audit.config.json`, seeded on install. Read it in intake; it sets the agent model, default
-horizon, session-size ceiling and where reports land. Never hardcode paths — memory location differs per
-project and is discovered by `discover.mjs`.
+`.claude/chat-audit.config.json` in the project, seeded by a project install. Read it in intake; it sets the
+agent model, default horizon, session-size ceiling and where reports land. No config in the project (a global
+install seeds none) → use the kit defaults (`agent_model: sonnet`, 14 days, 20 sessions, lenses friction +
+repetition) and say so in the intake block. Never hardcode paths — memory location differs per project and
+is discovered by `discover.mjs`.
 
 ## Cost
 

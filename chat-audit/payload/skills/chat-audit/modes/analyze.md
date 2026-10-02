@@ -33,8 +33,8 @@ count:     <how many times, in this shard>
 sources:   <what a real lens using this would need beyond slice.json/freq.json>
 ```
 
-Accepted 2026-09-23. A candidate goes through the same verification as a finding — an anchor that doesn't
-resolve kills the candidate too.
+A candidate goes through the same verification as a finding — an anchor that doesn't resolve kills the
+candidate too.
 
 ## A lens names its own sources
 
@@ -54,10 +54,9 @@ events), hit one tool-error class repeatedly, or ran `inherited: true` — no ex
 the main session happened to be running on. Anchor is `parent session (8 chars) + agentId`, plus `gapAt` or an
 event timestamp where relevant — not a user-turn uuid; say so, or `land.md` will look for one and find none.
 
-Agents return **text**, in the shape below, and nothing else. Never ask an agent to write a file: a
-subagent's Write is refused by the harness ("subagents return text"), and the orchestrator then re-types
-the report by hand — ~30k tokens of context for four agents (2026-09-06). Files are written once, in
-`land.md`, by the orchestrator.
+Agents return **text**, in the shape below, and nothing else — the harness tells subagents to return
+reports as text rather than files, and a report an agent writes anyway has to be re-read into the
+orchestrator's context. Files are written once, in `land.md`, by the orchestrator.
 
 ## Required output shape
 

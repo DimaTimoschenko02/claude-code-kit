@@ -70,6 +70,9 @@ mkdir -p "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/skills"
 
 # skill-gate-guard.sh is the engine -> always overwrite (carries upgrades).
 cp "$PKG_DIR/payload/hooks/skill-gate-guard.sh" "$CLAUDE_DIR/hooks/"
+# Its Bash path finder (which files a Bash command writes) — engine too, always overwrite.
+mkdir -p "$CLAUDE_DIR/hooks/_lib"
+cp "$PKG_DIR/payload/hooks/_lib/bash-write-targets.py" "$PKG_DIR/payload/hooks/_lib/shell_text.py" "$CLAUDE_DIR/hooks/_lib/"
 # skill-invocation-log.sh is shared with cc-learning-log -> keep an existing copy
 # (both emit identical jsonl; learning-log's may be the richer _lib-based one).
 dest_log="$CLAUDE_DIR/hooks/skill-invocation-log.sh"
@@ -128,8 +131,10 @@ JQ_MERGE='
   def present(arr; c): any((arr // [])[]?.hooks[]?; ((.command // "") | (capture("(?<f>[^/\\\\\"]+\\.sh)").f // .)) == base(c));
   .hooks = (.hooks // {})
   | .hooks.PreToolUse = ((.hooks.PreToolUse // []) as $g
-      | if present($g; $guard) then $g
-        else $g + [ {matcher:"Write|Edit", hooks:[{type:"command", command:$guard, "_cc_it":true}]} ] end)
+      | if present($g; $guard)
+        then $g | map(if (.matcher == "Write|Edit") and any(.hooks[]?; ((.command // "") | test("skill-gate-guard.sh")))
+                      then .matcher = "Write|Edit|Bash" else . end)
+        else $g + [ {matcher:"Write|Edit|Bash", hooks:[{type:"command", command:$guard, "_cc_it":true}]} ] end)
   | .hooks.PostToolUse = ((.hooks.PostToolUse // []) as $g
       | if present($g; $skilllog) then $g
         else $g + [ {matcher:"Skill", hooks:[{type:"command", command:$skilllog, "_cc_it":true}]} ] end)
@@ -149,7 +154,7 @@ if [ "$MERGE" = 1 ]; then
   done
 else
   echo "Manual step — add to $SETTINGS:" >&2
-  echo "  PreToolUse  matcher 'Write|Edit' -> command: $GUARD" >&2
+  echo "  PreToolUse  matcher 'Write|Edit|Bash' -> command: $GUARD" >&2
   echo "  PostToolUse matcher 'Skill'      -> command: $SKILLLOG" >&2
 fi
 
@@ -171,12 +176,12 @@ cat >&2 <<SUMMARY
 instructions-tuning v$PKG_VERSION installed into: $CLAUDE_DIR
   skill:   skills/instructions-tuning/SKILL.md   (trigger: editing any instruction/meta file)
            $( [ "$LINK" = 1 ] && echo "^ symlinked into this clone — edits there ARE edits to the repo" || echo "^ a copy; re-run with --link to edit the package in place instead" )
-  hooks:   skill-gate-guard.sh   (PreToolUse Write|Edit — blocks edits to governed paths
+  hooks:   skill-gate-guard.sh   (PreToolUse Write|Edit|Bash — blocks edits to governed paths
                                    until the owner skill was invoked this context window)
            skill-invocation-log.sh (PostToolUse Skill — records invocations; shared w/ cc-learning-log)
   gates:   skill-gate.config.json   <-- EDIT THIS: map this project's paths -> required skill
   state:   .claude/state/skill-invocations.jsonl   (per-machine, gitignored)
-  requires: jq
+  requires: jq; python3 for Bash writes (without it they pass ungated)
 
 NEXT: open .claude/skill-gate.config.json and add your project's gates, e.g.
   { "path_prefix": "docs/specs/", "skill": "instructions-tuning" }

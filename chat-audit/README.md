@@ -137,6 +137,10 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.7.0** (2026-10-02) — works from the global install (`~/.claude/skills/chat-audit/`): the lib path and the
+  no-config defaults are spelled out. `scrub.mjs` grows into a detector set with value checks (placeholders, env
+  names, paths and code refs are not secrets) and `findSecrets()` for a strict commit gate; `facts.mjs` +
+  `extract.mjs --facts` give a memory harvester its slice. Dates out of the mode files, reasons kept.
 - **1.6.0** (2026-10-02) — `effect.mjs` verdict `decaying`: a `works` whose gain is gone in the last third of the
   after-window (back at the baseline rate or worse; ≥5 occasions in that third, change ≥3 days old, not for deny
   signals). The window sum hid it. Text signals with a Cyrillic word boundary now match (`extract.mjs`, `scrub.mjs`).

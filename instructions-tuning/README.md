@@ -12,7 +12,7 @@ before touching those files.
   splitting by situation, gotchas), `audit.md` (whole-surface sweep built on
   `/doctor prompt-audit`), `tool-holes.md` (fix the *class*, not the instance) and
   `bash-hooks.md` (nine rules derived from real hook misfires).
-- **Gate:** `skill-gate-guard.sh` (PreToolUse Write|Edit) — blocks an edit to a
+- **Gate:** `skill-gate-guard.sh` (PreToolUse Write|Edit|Bash) — blocks an edit to a
   *governed* path until its owner skill was invoked **this context window**. Pure
   prose is advisory; the gate is the deterministic backstop for "must invoke first".
 - **Config-driven:** which paths require which skill is a per-project JSON map. The
@@ -94,7 +94,7 @@ left is to commit. Trade-offs worth knowing:
 <project>/.claude/
 ├── skills/instructions-tuning/          # the skill folder (package-managed): SKILL.md + situation files
 ├── hooks/
-│   ├── skill-gate-guard.sh               # PreToolUse[Write|Edit] — the gate
+│   ├── skill-gate-guard.sh               # PreToolUse[Write|Edit|Bash] — the gate (Bash: _lib/bash-write-targets.py)
 │   └── skill-invocation-log.sh           # PostToolUse[Skill] — records invocations
 ├── skill-gate.config.json                # YOUR path->skill gates (commit this; edit it)
 └── state/skill-invocations.jsonl         # per-machine, gitignored

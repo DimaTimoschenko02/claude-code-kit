@@ -13,6 +13,9 @@
 //   node extract.mjs --project <dir> [--days N] [--limit N]
 //   ... [--max-turn-chars 1200] [--top 40] [--summary]
 //   ... [--pairs 1200]   attach the agent's reply that preceded each user turn
+//   node extract.mjs --facts --sessions <f.jsonl> [--after-uuid U] [--result-cap 4096] [--max-kb 160] [--out f]
+//         harvest slice (facts.mjs): full assistant text, user turns, successful Bash/Read/Grep output,
+//         subagent transcripts + Agent reports. The audit modes above are unchanged.
 //
 // --pairs: a user turn is a reaction to something. Without the reply it answers,
 // a lens like "the answer was better but still not what I wanted" or "I write X
@@ -25,6 +28,7 @@ import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { scrub } from './scrub.mjs';
 import { listSessions } from './discover.mjs';
+import { extractFacts } from './facts.mjs';
 
 // A user turn that LOOKS like the user pushing back on what the agent just did.
 // These are the highest-signal lines in any transcript — but this regex is a HINT, not a
@@ -254,6 +258,20 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     }).map((m) => m.file);
   }
   if (!files.length) { console.error('no sessions matched'); process.exit(1); }
+
+  if (process.argv.includes('--facts')) {
+    const fopts = { afterUuid: arg('after-uuid'), resultCap: Number(arg('result-cap', 4096)),
+                    maxKb: Number(arg('max-kb', 160)) };
+    const slices = [];
+    for (const f of files) {
+      try { slices.push(extractFacts(f, fopts)); } catch (e) { console.error(`skip ${f}: ${e.message}`); }
+    }
+    const payload = JSON.stringify({ generated: new Date().toISOString(), mode: 'facts', sessions: slices.length, slices }, null, 1);
+    const fout = arg('out');
+    if (fout) { fs.writeFileSync(fout, payload); console.error(`wrote ${fout} (${(payload.length / 1024).toFixed(0)} KB)`); }
+    else process.stdout.write(payload + '\n');
+    process.exit(0);
+  }
 
   const opts = { maxTurnChars: Number(arg('max-turn-chars', 1200)), top: Number(arg('top', 40)),
                  pairChars: Number(arg('pairs', 0)) };

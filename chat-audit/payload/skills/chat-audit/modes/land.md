@@ -46,8 +46,8 @@ Two rules when applying:
   the ledger's earlier lines for the same `class`/claim, and the project's own recurrence registry if it
   keeps one (a learning-log with `Recur` counts, a resolutions file). Seen twice or more → the destination
   is an observable predicate or a hook, never prose; prose is reserved for a judgment gap with no
-  predicate. Record the count as `recur` in the ledger line. Data behind the rule (2026-09-06): every
-  class that recurred ≥2 under a prose fix was eventually closed by a hook; the prose rounds were waste.
+  predicate. Record the count as `recur` in the ledger line. Why: every class that recurred under a
+  prose fix ended up closed by a hook anyway; the prose rounds in between were waste.
 
 ## Write the report
 

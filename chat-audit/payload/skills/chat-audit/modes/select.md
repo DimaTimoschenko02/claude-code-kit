@@ -10,7 +10,7 @@ node .claude/skills/chat-audit/lib/discover.mjs sessions --project <dir> [--days
 
 One line per session: start time, size, user-turn count, short id, auto-title, branch. Sorted newest first.
 Sessions under 2 KB are dropped as aborted. Automatic security-review sessions (the review hook's own diff
-prompt as the first user turn — 166 of 202 measured on one project, 2026-09-23) are dropped too, with the
+prompt as the first user turn — on a project with that hook, most of its sessions) are dropped too, with the
 excluded count printed; they are not chats a human had, so pull them back with `--include-auto` only when one
 is actually the subject.
 
