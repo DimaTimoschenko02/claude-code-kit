@@ -89,6 +89,17 @@ their default occasions are in the header of `lib/effect.mjs`. `signal:null` is 
 `unmeasurable` at every audit. Then freeze the baseline — transcripts older than ~30 days are deleted:
 `node .claude/skills/chat-audit/lib/effect.mjs record --id C-<n>`. `record` rewrites only that line.
 
+What a verdict asks for (`effect.mjs`, column `action`):
+
+| verdict | next step |
+|---|---|
+| works | nothing |
+| decaying | worked, but the last third of the window is back at the baseline: check the rule is still loaded and not superseded; it recurs after that → make it a hook |
+| no-effect | reshape: an observable predicate, or a hook |
+| dead | delete it or fold it into what fires |
+| harmful | fix or revert the same day |
+| untested · unclear-window · unmeasurable | never cite as working; re-check next run, or add a signal |
+
 The ledger is under `.claude/state/`, which installs ignore. To keep its history in git, make the state ignores
 `.claude/state/**` (a directory pattern cannot be re-included) and put these two lines last in `.gitignore`:
 `!.claude/state/**/` and `!.claude/state/chat-audit/ledger.jsonl`.

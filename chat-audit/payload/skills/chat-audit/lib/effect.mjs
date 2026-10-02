@@ -43,6 +43,7 @@ const ACTION = {
   works: '—', 'no-effect': 'reshape: predicate or hook', dead: 'delete or fold into what fires',
   untested: 'never cite as works', leaking: 'widen the scope', harmful: 'fix or revert today',
   'unclear-window': 're-check next run', unmeasurable: 'add a signal or accept as faith',
+  decaying: 'check the rule is still loaded and not superseded; recurs after that → hook',
 };
 
 // ------------------------------------------------------------------ ledger
@@ -243,7 +244,21 @@ function count(hits, occ, perSession, from, to) {
 
 const rate = (w) => (w && w.occasions ? w.hits / w.occasions : 0);
 
+// A change can work for three days and then fade: the sum over the window still says `works` (C-4, the Ideas tail:
+// 6.2% → 4.1% → 3.8% of replies by thirds, 2026-10-02). So a `works` whose gain is gone in the last third of the
+// window — back to the baseline rate or worse — is `decaying`. Not for deny: there a fire is the success itself.
+// A third shorter than a day is a topic change, not a trend (C-107 read «decaying» 5 h after its change).
 export function verdict(change, before, after, hookLogStart, now = Date.now()) {
+  const v = baseVerdict(change, before, after, hookLogStart, now);
+  const last = after && after.last, want = change.signal && (change.signal.want || 'down');
+  if (v !== 'works' || !last || last.occasions < MIN_AFTER || now - Date.parse(change.ts) < 3 * DAY
+    || String(change.signal.src).startsWith('deny:')) return v;
+  const rb = rate(before), ra = rate(after), rl = rate(last);
+  const down = want === 'down' || want === 'zero';
+  return (down ? ra < rb && rl >= rb : ra > rb && rl <= rb) ? 'decaying' : v;
+}
+
+function baseVerdict(change, before, after, hookLogStart, now) {
   const sig = change.signal;
   if (!sig) return 'unmeasurable';
   const src = String(sig.src || '');
@@ -310,6 +325,7 @@ export function measure({ project, ledger, ids = null, now = Date.now() }) {
       const b = ch.baseline && Number.isFinite(ch.baseline.hits) ? ch.baseline : count(sp.hits, sp.occs, sp.perSession, ts - WINDOW, ts);
       before = { hits: b.hits, occasions: b.occasions };
       after = count(sp.hits, sp.occs, sp.perSession, ts, now + 1);
+      after.last = count(sp.hits, sp.occs, sp.perSession, ts + (2 * (now - ts)) / 3, now + 1);   // last third, for decaying
     }
     const v = sp ? verdict(ch, before, after, hookLogStart, now) : 'unmeasurable';
     return { id: ch.id, kind: ch.kind, class: ch.class, signal: ch.signal ? ch.signal.src : null, before, after, verdict: v, recorded: ch.verdict || null, action: ACTION[v] };
@@ -348,7 +364,8 @@ function main() {
   if (process.argv.includes('--json')) { console.log(JSON.stringify(res, null, 2)); return; }
   const measured = res.filter((r) => r.signal), rest = res.filter((r) => !r.signal);
   const head = ['id', 'kind', 'class', 'before', 'after', 'verdict', 'recorded', 'action'];
-  const rows = measured.map((r) => [r.id, r.kind || '', String(r.class || '').slice(0, 48), fmt(r.before), fmt(r.after), r.verdict, r.recorded || '', r.action]);
+  const aft = (r) => fmt(r.after) + (r.verdict === 'decaying' ? ` (last ⅓ ${fmt(r.after.last)})` : '');
+  const rows = measured.map((r) => [r.id, r.kind || '', String(r.class || '').slice(0, 48), fmt(r.before), aft(r), r.verdict, r.recorded || '', r.action]);
   const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
   const line = (r) => r.map((c, i) => String(c).padEnd(w[i])).join('  ').trimEnd();
   console.log(line(head));

@@ -137,6 +137,9 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.6.0** (2026-10-02) — `effect.mjs` verdict `decaying`: a `works` whose gain is gone in the last third of the
+  after-window (back at the baseline rate or worse; ≥5 occasions in that third, change ≥3 days old, not for deny
+  signals). The window sum hid it. Text signals with a Cyrillic word boundary now match (`extract.mjs`, `scrub.mjs`).
 - **1.5.0** (2026-10-02) — `effect.mjs`: did a change to the agent's own infrastructure work. Reads
   `type:"change"` ledger lines (new record type, written by `instructions-tuning` and by `land.md` for applied
   findings), counts each line's signal 7 days before vs since over main and subagent transcripts plus the hook log

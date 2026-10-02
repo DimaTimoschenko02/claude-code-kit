@@ -67,7 +67,7 @@ transcript shows only a description and a duration; the subagent's own transcrip
 watchdog stalls actually live. Cheap and agent-free, so `extract.md` runs it by default.
 `effect.mjs` answers *did our own changes work*: for every `type:"change"` ledger line (a hook, skill, rule, memory
 note, agent, tool or setting the project changed) it counts the line's signal 7 days before vs since and gives a
-verdict (works · no-effect · dead · untested · harmful · unclear-window · unmeasurable). `recon.md` runs it first.
+verdict (works · decaying · no-effect · dead · untested · harmful · unclear-window · unmeasurable). `recon.md` runs it first.
 `tokens.mjs` answers *what the spend consists of*: every call re-reads the whole context, so it attributes
 each call's context growth to what was appended (tool result by tool and command, hook output, thinking,
 compaction residue, startup overhead) and weights it by how many later calls re-read it. Use it when the
