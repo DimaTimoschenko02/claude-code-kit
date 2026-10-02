@@ -110,8 +110,9 @@ elif [ -L "$SKILL_DST" ]; then
   # package. Leave the link alone — dropping it needs an explicit re-install.
   echo "kept existing symlink -> $(readlink "$SKILL_DST") (re-run without --link after removing it to switch back to a copy)" >&2
 else
+  # The whole folder: SKILL.md points at its situation files, a lone SKILL.md would point at nothing.
   mkdir -p "$SKILL_DST"
-  cp "$SKILL_SRC/SKILL.md" "$SKILL_DST/SKILL.md"
+  cp -R "$SKILL_SRC/." "$SKILL_DST/"
 fi
 
 # Seed gates config only if absent (preserve your path->skill map on re-install).
