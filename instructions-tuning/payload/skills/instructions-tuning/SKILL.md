@@ -68,6 +68,13 @@ Two cross-cutting levers:
 
 Show the diff, one line of *why*, get a light OK. For a CLAUDE.md/SKILL.md edit, after applying, sanity-check that behavior actually shifts — one observation, not a test suite. (Full eval loops / TDD are deliberately out of scope here.)
 
+**Last step — record the change** (when the project has `.claude/skills/chat-audit/lib/effect.mjs`). Append one
+`type:"change"` line to `.claude/state/chat-audit/ledger.jsonl` — format in chat-audit `modes/land.md`. Required:
+`class` = the failure class from Step 1, one sentence; `signal` = the line, tool parameter, skill load or hook decision
+this edit should move (`src`, `re`, `want`); `occasion` = when it applies (`null` → the source's default). Then
+`node .claude/skills/chat-audit/lib/effect.mjs record --id C-<n>` freezes the 7-day baseline.
+No observable signal → `signal:null` is allowed, but the change is reported as `unmeasurable` at every audit.
+
 ## Дыры в инструментах — чинить самому
 
 Область: **свои** инструменты — хуки, скрипты и либы в `.claude/`, тулзы в `bin/`, набор
