@@ -137,6 +137,10 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.8.0** (2026-10-02) — the skill starts only on an explicit request to run a chat audit: its description no
+  longer claims general questions about past sessions, which pulled a one-command question into the full route.
+  `install.sh --link` symlinks the skill into this clone (gitignored), so `git pull` updates every linked project.
+  The nudge hook writes its decision to the project's hook log when the project has one.
 - **1.7.0** (2026-10-02) — works from the global install (`~/.claude/skills/chat-audit/`): the lib path and the
   no-config defaults are spelled out. `scrub.mjs` grows into a detector set with value checks (placeholders, env
   names, paths and code refs are not secrets) and `findSecrets()` for a strict commit gate; `facts.mjs` +

@@ -12,10 +12,10 @@
 #   ./install.sh --link [target]   # symlink the skill to this clone instead of copying
 #
 # --link is for machines that keep this repo checked out: the installed skill
-# becomes a symlink into payload/, so editing the skill in the field edits the
-# repo and `git status` shows it the same day. Without it the skill is copied and
-# drifts from the package until someone re-exports it by hand. Hooks are always
-# copied — their package and in-project variants differ on purpose.
+# becomes a gitignored symlink into payload/ and the gate a tracked shim that runs
+# payload/hooks/skill-gate-guard.sh, so `git pull` in the clone updates every linked
+# project and a field edit to the skill is an edit to the repo. Without it the skill
+# and the gate are copied and drift from the package until the next re-install.
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,11 +68,26 @@ fi
 # --- Step 1: copy payload ---
 mkdir -p "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/skills"
 
-# skill-gate-guard.sh is the engine -> always overwrite (carries upgrades).
-cp "$PKG_DIR/payload/hooks/skill-gate-guard.sh" "$CLAUDE_DIR/hooks/"
-# Its Bash path finder (which files a Bash command writes) — engine too, always overwrite.
-mkdir -p "$CLAUDE_DIR/hooks/_lib"
-cp "$PKG_DIR/payload/hooks/_lib/bash-write-targets.py" "$PKG_DIR/payload/hooks/_lib/shell_text.py" "$CLAUDE_DIR/hooks/_lib/"
+if [ "$LINK" = 1 ]; then
+  # --link: the project keeps a tracked shim and the gate runs from this clone, so `git pull` here updates every
+  # linked project. A clone of the project on a machine without the kit gets no gate instead of a broken hook.
+  cat > "$CLAUDE_DIR/hooks/skill-gate-guard.sh" <<SHIM
+#!/usr/bin/env bash
+# skill-gate shim (instructions-tuning install.sh --link): the gate runs from the claude-code-kit clone, so
+# \`git pull\` there updates it here. No clone on this machine -> no gate, fail-open like the gate itself.
+GATE="$PKG_DIR/payload/hooks/skill-gate-guard.sh"
+[ -f "\$GATE" ] || exit 0
+log="\$(dirname "\${BASH_SOURCE[0]}")/_lib/hook-log.sh"
+[ -f "\$log" ] && export SKILL_GATE_LOG="\$log"
+exec bash "\$GATE"
+SHIM
+else
+  # skill-gate-guard.sh is the engine -> always overwrite (carries upgrades).
+  cp "$PKG_DIR/payload/hooks/skill-gate-guard.sh" "$CLAUDE_DIR/hooks/"
+  # Its Bash path finder (which files a Bash command writes) — engine too, always overwrite.
+  mkdir -p "$CLAUDE_DIR/hooks/_lib"
+  cp "$PKG_DIR/payload/hooks/_lib/bash-write-targets.py" "$PKG_DIR/payload/hooks/_lib/shell_text.py" "$CLAUDE_DIR/hooks/_lib/"
+fi
 # skill-invocation-log.sh is shared with cc-learning-log -> keep an existing copy
 # (both emit identical jsonl; learning-log's may be the richer _lib-based one).
 dest_log="$CLAUDE_DIR/hooks/skill-invocation-log.sh"
@@ -164,6 +179,11 @@ GI="$TARGET/.gitignore"; START="# >>> instructions-tuning >>>"; END="# <<< instr
 if [ ! -f "$GI" ] || ! grep -qF "$START" "$GI"; then
   printf '\n%s\n.claude/state/\n%s\n' "$START" "$END" >> "$GI"
 fi
+# --link: the skill is a symlink into this machine's clone, so it never goes into the project's git.
+LSTART="# >>> instructions-tuning --link >>>"
+if [ "$LINK" = 1 ] && ! grep -qF "$LSTART" "$GI"; then
+  printf '\n%s\n.claude/skills/instructions-tuning\n%s\n' "$LSTART" "# <<< instructions-tuning --link <<<" >> "$GI"
+fi
 
 # --- Step 4: version stamp ---
 if [ "$MERGE" = 1 ]; then
@@ -176,7 +196,7 @@ cat >&2 <<SUMMARY
 
 instructions-tuning v$PKG_VERSION installed into: $CLAUDE_DIR
   skill:   skills/instructions-tuning/SKILL.md   (trigger: editing any instruction/meta file)
-           $( [ "$LINK" = 1 ] && echo "^ symlinked into this clone — edits there ARE edits to the repo" || echo "^ a copy; re-run with --link to edit the package in place instead" )
+           $( [ "$LINK" = 1 ] && echo "^ symlinked into this clone (gitignored), the gate runs through a shim — git pull here updates both" || echo "^ a copy; re-run with --link to follow this clone instead" )
   hooks:   skill-gate-guard.sh   (PreToolUse Write|Edit|Bash — blocks edits to governed paths
                                    until the owner skill was invoked this context window)
            skill-invocation-log.sh (PostToolUse Skill — records invocations; shared w/ cc-learning-log)

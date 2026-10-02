@@ -1,6 +1,6 @@
 ---
 name: chat-audit
-description: Audit past Claude Code sessions to find how the work itself could go better — friction, gaps, repeated manual work, unrecorded knowledge, rules that exist but do not fire. Use when the user asks to look back over chats, sessions, transcripts or history ("re-read the last chats", "where could this have been faster", "what did I have to repeat", "перечитай последние чаты", "пройдись по чатам", "де можна було швидше"), asks what to automate or turn into a skill/hook/tool, asks why the same mistake keeps happening, or asks to review how they and the agent work together. Also use before writing a skill/hook meant to fix a recurring problem — the audit supplies the evidence for it.
+description: Audit past Claude Code sessions to find how the work itself could go better — friction, gaps, repeated manual work, unrecorded knowledge, rules that exist but do not fire. Use only when the user explicitly asks to run a chat audit ("run chat-audit", "запусти чат-аудит", "проведём chat-audit"); a full audit is a deliberate, budgeted run, so it never starts on its own from a general question about past sessions.
 ---
 
 # Chat audit

@@ -26,7 +26,10 @@
 # Input (stdin JSON): { tool_name, tool_input: { file_path | command }, transcript_path, cwd }
 
 set -u
-. "$(dirname "${BASH_SOURCE[0]}")/_lib/hook-log.sh" 2>/dev/null || hook_log() { :; }
+# The parsers are part of the gate and live in _lib next to this file. The decision log belongs to the project:
+# a project that runs the gate through the --link shim passes its own hook-log.sh in SKILL_GATE_LOG.
+LIB="$(dirname "${BASH_SOURCE[0]}")/_lib"
+. "${SKILL_GATE_LOG:-$LIB/hook-log.sh}" 2>/dev/null || hook_log() { :; }
 
 # Recursion guard: a forked `claude -p` (e.g. a background classifier) is exempt.
 [ -n "${CCLL_INACTIVE:-}" ] && exit 0
@@ -47,7 +50,7 @@ CONFIG="$ROOT/.claude/skill-gate.config.json"
 
 if [ "$tool" = "Bash" ]; then
   targets=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null \
-    | python3 -B "$(dirname "$0")/_lib/bash-write-targets.py" "${cwd:-$ROOT}" 2>/dev/null)
+    | python3 -B "$LIB/bash-write-targets.py" "${cwd:-$ROOT}" 2>/dev/null)
 else
   targets=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
 fi

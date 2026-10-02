@@ -8,13 +8,26 @@
 # Usage:
 #   ./install.sh [target]          # install into <target> (default: current dir)
 #   ./install.sh --check [target]  # report installed vs package version
+#   ./install.sh --link [target]   # symlink the skill to this clone instead of copying
+#
+# --link is for machines that keep this repo checked out: the skill becomes a gitignored symlink into payload/,
+# so `git pull` in the clone updates every linked project. A copied skill drifts until the next re-install.
 set -euo pipefail
 
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_VERSION="$(cat "$PKG_DIR/VERSION")"
 
-MODE="install"
-if [ "${1:-}" = "--check" ]; then MODE="check"; shift; fi
+MODE="install"; LINK=0; FORCE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) MODE="check"; shift ;;
+    --link)  LINK=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --) shift; break ;;
+    -*) echo "unknown flag: $1" >&2; exit 1 ;;
+    *) break ;;
+  esac
+done
 TARGET="$(cd "${1:-$PWD}" 2>/dev/null && pwd)" || { echo "target dir not found: ${1:-$PWD}" >&2; exit 1; }
 CLAUDE_DIR="$TARGET/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
@@ -48,12 +61,34 @@ if [ "$MERGE" = 1 ] && [ -f "$SETTINGS" ] && ! jq empty "$SETTINGS" 2>/dev/null;
 fi
 
 # --- Step 1: copy payload ---
-mkdir -p "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/skills/chat-audit/modes" "$CLAUDE_DIR/skills/chat-audit/lib"
+mkdir -p "$CLAUDE_DIR/hooks" "$CLAUDE_DIR/skills"
+SKILL_SRC="$PKG_DIR/payload/skills/chat-audit"
+SKILL_DST="$CLAUDE_DIR/skills/chat-audit"
 
-# Skill + modes + lib are package-managed -> overwrite (customize via config, not by editing).
-cp "$PKG_DIR/payload/skills/chat-audit/SKILL.md"   "$CLAUDE_DIR/skills/chat-audit/SKILL.md"
-cp "$PKG_DIR/payload/skills/chat-audit/modes/"*.md "$CLAUDE_DIR/skills/chat-audit/modes/"
-cp "$PKG_DIR/payload/skills/chat-audit/lib/"*.mjs  "$CLAUDE_DIR/skills/chat-audit/lib/"
+if [ "$LINK" = 1 ]; then
+  # Replacing a real directory would silently drop edits made in place. Refuse unless it matches the package.
+  if [ -L "$SKILL_DST" ]; then
+    rm -f "$SKILL_DST"
+  elif [ -d "$SKILL_DST" ]; then
+    if [ "$FORCE" = 1 ] || diff -rq "$SKILL_DST" "$SKILL_SRC" >/dev/null 2>&1; then
+      rm -rf "$SKILL_DST"
+    else
+      echo "ERROR: $SKILL_DST differs from the package — linking would discard those edits." >&2
+      echo "       Port them into $SKILL_SRC first (then re-run), or pass --force to drop them." >&2
+      exit 1
+    fi
+  fi
+  ln -s "$SKILL_SRC" "$SKILL_DST"
+elif [ -L "$SKILL_DST" ]; then
+  # Already linked: copying would write straight through the symlink into the package.
+  echo "kept existing symlink -> $(readlink "$SKILL_DST")" >&2
+else
+  # Skill + modes + lib are package-managed -> overwrite (customize via config, not by editing).
+  mkdir -p "$SKILL_DST/modes" "$SKILL_DST/lib"
+  cp "$SKILL_SRC/SKILL.md"   "$SKILL_DST/SKILL.md"
+  cp "$SKILL_SRC/modes/"*.md "$SKILL_DST/modes/"
+  cp "$SKILL_SRC/lib/"*.mjs  "$SKILL_DST/lib/"
+fi
 cp "$PKG_DIR/payload/hooks/chat-audit-nudge.sh"    "$CLAUDE_DIR/hooks/"
 chmod +x "$CLAUDE_DIR/hooks/chat-audit-nudge.sh"
 
@@ -95,6 +130,11 @@ fi
 GI="$TARGET/.gitignore"; START="# >>> chat-audit >>>"; END="# <<< chat-audit <<<"
 if [ ! -f "$GI" ] || ! grep -qF "$START" "$GI"; then
   printf '\n%s\n.claude/state/chat-audit/\n%s\n' "$START" "$END" >> "$GI"
+fi
+# --link: the skill is a symlink into this machine's clone, so it never goes into the project's git.
+LSTART="# >>> chat-audit --link >>>"
+if [ "$LINK" = 1 ] && ! grep -qF "$LSTART" "$GI"; then
+  printf '\n%s\n.claude/skills/chat-audit\n%s\n' "$LSTART" "# <<< chat-audit --link <<<" >> "$GI"
 fi
 
 # --- Step 4: version stamp ---

@@ -64,8 +64,13 @@ someone last exported by hand, and months later the two have to be merged. If yo
 keep this repo checked out, install with `--link` instead:
 
 ```bash
-./install.sh --link /path/to/project   # the skill becomes a symlink into payload/
+./install.sh --link /path/to/project   # the skill becomes a symlink into payload/, the gate a shim
 ```
+
+The symlink is added to the project's `.gitignore`, and `.claude/hooks/skill-gate-guard.sh` becomes a small
+tracked shim that runs `payload/hooks/skill-gate-guard.sh` from this clone, passing the project's own
+`_lib/hook-log.sh` (if it has one) in `SKILL_GATE_LOG`. So `git pull` here updates the skill and the gate in every
+linked project, and a clone of a shared repo on a machine without the kit gets no gate rather than a broken hook.
 
 For the **global** skill, link it directly — don't point the installer at `~`, or it
 will also register hooks in your global `settings.json`:
@@ -84,9 +89,8 @@ left is to commit. Trade-offs worth knowing:
 - Linking over a skill that already differs from the package is **refused**, so
   in-place edits can't be silently discarded — port them into `payload/` first, or
   pass `--force` to drop them deliberately.
-- Hooks are always copied, never linked: the package ships a standalone
-  `skill-invocation-log.sh` while cc-learning-log ships an `_lib`-based one, and
-  that difference is intentional.
+- `skill-invocation-log.sh` is still copied, and an existing one is kept: the package ships a standalone
+  logger while cc-learning-log ships an `_lib`-based one, and that difference is intentional.
 
 ## What gets installed
 

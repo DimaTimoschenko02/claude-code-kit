@@ -10,6 +10,8 @@
 # Advisory only: it injects context, never blocks. Fires once per session unless
 # the skill was already invoked.
 set -uo pipefail
+# Optional decision log (a project's _lib/hook-log.sh); a no-op where the project has none.
+. "$(dirname "${BASH_SOURCE[0]}")/_lib/hook-log.sh" 2>/dev/null || hook_log() { :; }
 
 STATE_DIR="${CLAUDE_PROJECT_DIR:-$PWD}/.claude/state/chat-audit"
 CONFIG="${CLAUDE_PROJECT_DIR:-$PWD}/.claude/chat-audit.config.json"
@@ -42,6 +44,7 @@ marker="$STATE_DIR/nudged-$session"
 # Best-effort cleanup of markers older than a week.
 find "$STATE_DIR" -name 'nudged-*' -type f -mtime +7 -delete 2>/dev/null
 
+hook_log inject
 cat <<'MSG'
 <system-reminder>
 This is a request to look back over past sessions. Invoke the `chat-audit` skill before answering.
