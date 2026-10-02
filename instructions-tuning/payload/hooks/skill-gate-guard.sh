@@ -47,7 +47,7 @@ CONFIG="$ROOT/.claude/skill-gate.config.json"
 
 if [ "$tool" = "Bash" ]; then
   targets=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null \
-    | python3 "$(dirname "$0")/_lib/bash-write-targets.py" "${cwd:-$ROOT}" 2>/dev/null)
+    | python3 -B "$(dirname "$0")/_lib/bash-write-targets.py" "${cwd:-$ROOT}" 2>/dev/null)
 else
   targets=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
 fi
