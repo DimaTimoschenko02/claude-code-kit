@@ -102,12 +102,16 @@ fi
 # Directory-scoped skills are logged with a scope prefix ("myrepo:vault-write"), so accept "<scope>:<skill>" too.
 # Only this session's invocations count: parallel sessions share the log, and another window's /skill must not open
 # this one's gate. A record without session_id (logged before the field existed) still counts — fail-open, as above.
+# Same for agents: a subagent shares the parent's session_id but not the parent's context, so the parent's
+# invocation must not open a subagent's gate, nor the reverse. No agent_id = the main thread.
 sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+aid=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
 req="" rel=""
 while IFS=$'\t' read -r s r; do
   [ -z "$s" ] && continue
-  invoked=$(jq -r --arg s "$s" --arg sid "$sid" \
-    'select(.skill==$s or (.skill|endswith(":"+$s))) | select($sid == "" or (.session_id // "") == "" or .session_id == $sid) | .ts' \
+  invoked=$(jq -r --arg s "$s" --arg sid "$sid" --arg aid "$aid" \
+    'select(.skill==$s or (.skill|endswith(":"+$s))) | select($sid == "" or (.session_id // "") == "" or .session_id == $sid)
+     | select((.agent_id // "") == $aid) | .ts' \
     "$LOG" 2>/dev/null | tail -1)
   if [ -n "$invoked" ] && { [[ "$invoked" > "$boundary" ]] || [ "$invoked" = "$boundary" ]; }; then
     continue

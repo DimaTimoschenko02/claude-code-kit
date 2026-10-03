@@ -36,8 +36,11 @@ turn=""
   turn=$(jq -r 'select(.uuid)|.uuid' "$transcript" 2>/dev/null | tail -1)
 
 # session_id lets skill-gate-guard.sh scope the gate to THIS session (parallel sessions share this log).
+# agent_id (present only inside a subagent) scopes it further: a subagent shares its parent's session_id, but the
+# parent's skill text is not in the subagent's context.
 session=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
-jq -nc --arg ts "$ts" --arg turn "$turn" --arg skill "$skill" --arg session "$session" \
-  '{ts:$ts, turn_uuid:$turn, skill:$skill, session_id:$session}' >> "$STATE_DIR/skill-invocations.jsonl" 2>/dev/null
+agent=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
+jq -nc --arg ts "$ts" --arg turn "$turn" --arg skill "$skill" --arg session "$session" --arg agent "$agent" \
+  '{ts:$ts, turn_uuid:$turn, skill:$skill, session_id:$session, agent_id:$agent}' >> "$STATE_DIR/skill-invocations.jsonl" 2>/dev/null
 
 exit 0
