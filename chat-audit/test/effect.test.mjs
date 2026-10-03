@@ -1,6 +1,6 @@
 // effect.mjs — change rows from git. Cases are the ones the first real run got wrong (2026-10-03):
 // the first snapshot of ~/.claude read as a change of every file; hooks that keep their own log read as dead;
-// a skill symlinked into the project came twice; a retired hook was still listed; a recorder hook read as untested. Run: node --test chat-audit/test/*.test.mjs
+// a skill symlinked into the project came twice; a retired hook was still listed; a recorder hook read as untested; a commit touching two linked skills counted for one. Run: node --test chat-audit/test/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -33,12 +33,15 @@ commit(home, 'auto: hooks');
 
 // The kit: a skill linked from ~/.claude and from the project.
 put(`${kit}/skills/linked/SKILL.md`, 'v1\n');
+put(`${kit}/skills/second/SKILL.md`, 'v1\n');
 git(kit, 'init', '-q', '-b', 'main');
 commit(kit, 'init');
 put(`${kit}/skills/linked/SKILL.md`, 'v2\n');
-commit(kit, 'linked: v2');
+put(`${kit}/skills/second/SKILL.md`, 'v2\n');
+const both = commit(kit, 'one commit, two linked skills');
 fs.mkdirSync(`${home}/skills`, { recursive: true });
 fs.symlinkSync(`${kit}/skills/linked`, `${home}/skills/linked`);
+fs.symlinkSync(`${kit}/skills/second`, `${home}/skills/second`);
 
 // The project: a covered hook, an uncovered one, a retired one, the same linked skill.
 put(`${proj}/README.md`, 'p\n');
@@ -77,11 +80,16 @@ test('a skill linked from ~/.claude and the project is one global row, from the 
   assert.equal(byId['G:linked'], undefined);
 });
 
+test('one commit touching two linked skills of one repo counts for both', () => {
+  assert.equal(byId['G:~/linked'].commit, both.slice(0, 8));
+  assert.equal(byId['G:~/second'].commit, both.slice(0, 8));
+});
+
 test('a ledger line for the commit replaces the row; a retired hook has none', () => {
   assert.equal(byId['G:live'], undefined);
   assert.equal(byId['G:retired'], undefined);
   assert.equal(byId['G:other'].kind, 'hook');
-  assert.deepEqual(Object.keys(byId).sort(), ['G:.claude/settings.json', 'G:other', 'G:~/gate', 'G:~/guard', 'G:~/linked']);
+  assert.deepEqual(Object.keys(byId).sort(), ['G:.claude/settings.json', 'G:other', 'G:~/gate', 'G:~/guard', 'G:~/linked', 'G:~/second']);
 });
 
 test('artifactOf: what counts as agent config', () => {

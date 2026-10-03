@@ -426,7 +426,9 @@ function liveness(a, file) {
 export function gitChanges(project, hand, since) {
   const roots = configRoots(project);
   const wired = { global: wiredHooks([path.join(os.homedir(), '.claude')]), project: wiredHooks(roots.filter((r) => r.scope === 'project' && !r.skill).map((r) => r.dir)) };
-  const byArtifact = new Map(), seenSha = new Set();
+  // Seen by commit AND file: a second clone of the same repo repeats both; two linked skills of one repo share a
+  // commit but not a file — keyed by commit alone, the second skill lost every commit the first one had.
+  const byArtifact = new Map(), seen = new Set();
   for (const root of roots) {
     const paths = root.skill || !root.rel ? [root.rel || '.'] : [`${root.rel}/`, path.join(path.dirname(root.rel), 'CLAUDE.md')];
     const out = git(root.top, ['log', `--since=${new Date(since).toISOString()}`, '--no-merges', '--name-only',
@@ -434,10 +436,11 @@ export function gitChanges(project, hand, since) {
     if (!out) continue;
     for (const rec of out.split('\x1e').slice(1)) {
       const [sha, parents, iso, subject, body, files = ''] = rec.split('\x1f');
-      if (seenSha.has(sha) || !parents.trim()) continue;   // a second clone of the same repo; a root commit
-      seenSha.add(sha);
+      if (!parents.trim()) continue;   // a root commit: the first snapshot, not a change
       const session = /^Session:\s*(\S+)/m.exec(body)?.[1] || null;
       for (const f of files.split('\n').map((s) => s.trim()).filter(Boolean)) {
+        if (seen.has(`${sha}|${f}`)) continue;
+        seen.add(`${sha}|${f}`);
         const r = root.rel && f.startsWith(`${root.rel}/`) ? f.slice(root.rel.length + 1) : f;
         const a = root.skill ? { kind: 'skill', name: root.skill } : artifactOf(r, wired[root.scope]);
         if (!a || (a.kind === 'skill' && !root.skill && root.links.has(a.name))) continue;
