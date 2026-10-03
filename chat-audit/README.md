@@ -137,6 +137,12 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.9.0** (2026-10-03) — `effect.mjs` reads changes from git by itself: every commit touching agent config (the
+  project's `.claude/` and `CLAUDE.md`, `~/.claude` as a local repo, the repos behind symlinked skills) is a row,
+  one per artifact, checked for liveness — a hook decides (a recorder hook: passes), a skill, agent or tool is used;
+  verdict `alive`. A ledger line is now needed only for a behaviour signal. Global changes are measured on every
+  project's transcripts; transcripts not written since the window are skipped unread. Tests: `node --test
+  chat-audit/test/*.test.mjs`.
 - **1.8.0** (2026-10-02) — the skill starts only on an explicit request to run a chat audit: its description no
   longer claims general questions about past sessions, which pulled a one-command question into the full route.
   `install.sh --link` symlinks the skill into this clone (gitignored), so `git pull` updates every linked project.

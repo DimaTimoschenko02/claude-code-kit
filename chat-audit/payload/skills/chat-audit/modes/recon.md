@@ -11,10 +11,10 @@ First, whether what already exists works — the inventory below says what is th
 node .claude/skills/chat-audit/lib/effect.mjs --project <dir>
 ```
 
-One row per recorded change (`type:"change"` ledger lines, see `land.md`). Carry the rows into the inventory:
-`dead`, `no-effect`, `harmful` and `decaying` are findings before any session is read; `untested` is never cited as working;
-`unmeasurable` rows are listed so the user can add a signal or accept them on faith. No ledger lines → say so
-and go on.
+One row per ledger change (`type:"change"` lines, see `land.md`), then one per artifact changed in git without a
+line — liveness since its latest change. Carry the rows into the inventory: `dead`, `no-effect`, `harmful` and
+`decaying` are findings before any session is read; `untested` (a guard that never fired since) is never cited as
+working; `unmeasurable` rows are listed so the user can add a signal or accept them on faith.
 
 ```bash
 node .claude/skills/chat-audit/lib/discover.mjs config --project <dir>

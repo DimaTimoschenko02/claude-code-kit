@@ -72,9 +72,9 @@ the next audit cheerfully proposes the same thing again and the user loses trust
 Check the ledger at the start of `analyze.md`, write it at the end of this mode. Never rewrite past lines; a
 finding that comes back after being rejected is new information, appended, not an edit of the old verdict.
 
-**A change line per applied change.** Every accepted finding that changes a hook, skill, rule, memory note, agent,
-tool or setting also gets a `type:"change"` line — the same line `instructions-tuning` writes on its own edits —
-so a later `effect.mjs` run can say whether it worked:
+**A change line when the change should move a behaviour you can name.** The commit already records the change:
+`effect.mjs` reads config commits from git and checks the artifact is alive. A `type:"change"` line — the same line
+`instructions-tuning` writes on its own edits — adds what liveness cannot see, whether the behaviour moved:
 
 ```json
 {"type":"change","id":"C-<n+1>","ts":"<iso>","session":"<id8>","kind":"hook-guard|hook-injector|skill|rule|memory|agent|tool|settings",
@@ -85,8 +85,8 @@ so a later `effect.mjs` run can say whether it worked:
 ```
 
 `signal` names a line, a tool parameter, a skill load or a hook decision the change should move; sources and
-their default occasions are in the header of `lib/effect.mjs`. `signal:null` is allowed and is reported as
-`unmeasurable` at every audit. Then freeze the baseline — transcripts older than ~30 days are deleted:
+their default occasions are in the header of `lib/effect.mjs`. No signal to name → no line: the commit is the
+record. Then freeze the baseline — transcripts older than ~30 days are deleted:
 `node .claude/skills/chat-audit/lib/effect.mjs record --id C-<n>`. `record` rewrites only that line.
 
 What a verdict asks for (`effect.mjs`, column `action`):
@@ -94,6 +94,7 @@ What a verdict asks for (`effect.mjs`, column `action`):
 | verdict | next step |
 |---|---|
 | works | nothing |
+| alive (git rows) | runs; to know whether behaviour moved, add a ledger line with a signal |
 | decaying | worked, but the last third of the window is back at the baseline: check the rule is still loaded and not superseded; it recurs after that → make it a hook |
 | no-effect | reshape: an observable predicate, or a hook |
 | dead | delete it or fold it into what fires |

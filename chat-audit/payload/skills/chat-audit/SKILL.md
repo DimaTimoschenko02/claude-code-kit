@@ -68,9 +68,11 @@ guardrail blocks). Use both — they see different things.
 transcript shows only a description and a duration; the subagent's own transcript
 (`<session-dir>/subagents/**/*.jsonl` + sibling `.meta.json`) is where the tool errors, silent gaps and
 watchdog stalls actually live. Cheap and agent-free, so `extract.md` runs it by default.
-`effect.mjs` answers *did our own changes work*: for every `type:"change"` ledger line (a hook, skill, rule, memory
-note, agent, tool or setting the project changed) it counts the line's signal 7 days before vs since and gives a
-verdict (works · decaying · no-effect · dead · untested · harmful · unclear-window · unmeasurable). `recon.md` runs it first.
+`effect.mjs` answers *did our own changes work*. Every commit that touches agent config — the project's `.claude/`,
+`~/.claude` (a local repo), the repos behind symlinked skills — becomes a row by itself, checked for liveness: the hook
+runs and decides, the skill, agent or tool is used (alive · untested · dead). A `type:"change"` ledger line adds a
+behaviour signal, counted 7 days before vs since (works · decaying · no-effect · harmful · unclear-window ·
+unmeasurable). `recon.md` runs it first.
 `tokens.mjs` answers *what the spend consists of*: every call re-reads the whole context, so it attributes
 each call's context growth to what was appended (tool result by tool and command, hook output, thinking,
 compaction residue, startup overhead) and weights it by how many later calls re-read it. Use it when the

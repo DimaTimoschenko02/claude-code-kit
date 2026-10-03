@@ -4,12 +4,18 @@
 //
 // Why (2026-10-02): 107 such changes in 16 days on one project and no way to say which worked. A hand audit found
 // guards that never fired once, a skill loaded 2 times on 39 occasions, and an outage blamed on the nearest commit
-// while the cause was an unversioned global setting. Every change now gets a `type:"change"` line in the ledger
-// (written by instructions-tuning Step 5, format in modes/land.md); this tool measures each line's signal
-// 7 days before vs since, from transcripts and the hook log, and prints a verdict.
+// while the cause was an unversioned global setting. Two sources of changes:
+//   - git, by itself: every commit that touches agent config — the project's .claude/ and CLAUDE.md, ~/.claude (a local
+//     repo since 2026-10-03, committed by its own Stop hook), the repos behind symlinked skills. One row per artifact,
+//     its latest burst of commits, measured for liveness only: does the hook run and decide, is the skill / agent /
+//     tool used at all since. Rows `G:<name>`.
+//   - the ledger, by hand: a `type:"change"` line (instructions-tuning Step 5, format in modes/land.md) when a change has
+//     a behaviour signal to measure — 7 days before vs since. A line for the same commit or artifact replaces its git row.
+// Global artifacts are measured on every project's transcripts: one project's view called a skill used elsewhere dead.
 //
 // Usage:
-//   node effect.mjs [--project <dir>] [--ledger <file>] [--id C-1,C-2] [--now <iso>] [--json]   # verdict table
+//   node effect.mjs [--project <dir>] [--ledger <file>] [--id C-1,C-2] [--now <iso>] [--days 30] [--no-git]
+//                   [--all-rows] [--json]                                                     # verdict tables
 //   node effect.mjs record (--id C-n[,C-m] | --all) [--project <dir>] [--ledger <file>]
 //       freezes the 7-day baseline into the line: transcripts older than ~30 days are deleted by Claude Code.
 //
@@ -30,6 +36,7 @@
 // history; a raw grep counts denies ~2.4x).
 import fs from 'node:fs';
 import { realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
@@ -39,7 +46,9 @@ const DAY = 86400e3;
 const WINDOW = 7 * DAY;
 const MIN_AFTER = 5;
 const SMOKE = 2 * 3600e3;
+const GIT_DAYS = 30;   // Claude Code deletes transcripts after ~30 days: an older change has nothing to be measured on
 const ACTION = {
+  alive: 'runs; whether behaviour moved needs a ledger line with a signal',
   works: '—', 'no-effect': 'reshape: predicate or hook', dead: 'delete or fold into what fires',
   untested: 'never cite as works', leaking: 'widen the scope', harmful: 'fix or revert today',
   'unclear-window': 're-check next run', unmeasurable: 'add a signal or accept as faith',
@@ -93,14 +102,16 @@ function defaultOccasion(signal) {
 
 // ------------------------------------------------------------------ transcript pass
 
-function transcriptFiles(project) {
+/** `since`: a file last written before it holds no event of any window — skipped unread (all projects = 4.9 GB). */
+function transcriptFiles(project, scope = 'subtree', since = 0) {
   const out = [];
-  for (const { folder } of projectFolders(project, 'subtree')) {
+  const fresh = (p) => { try { return fs.statSync(p).mtimeMs >= since; } catch { return false; } };
+  for (const { folder } of projectFolders(project, scope)) {
     let entries;
     try { entries = fs.readdirSync(folder, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
       const p = path.join(folder, e.name);
-      if (e.isFile() && e.name.endsWith('.jsonl')) out.push({ file: p, session: e.name.slice(0, -6), main: true });
+      if (e.isFile() && e.name.endsWith('.jsonl')) { if (fresh(p)) out.push({ file: p, session: e.name.slice(0, -6), main: true }); }
       else if (e.isDirectory()) {
         const walk = (d) => {
           let xs;
@@ -108,7 +119,7 @@ function transcriptFiles(project) {
           for (const x of xs) {
             const q = path.join(d, x.name);
             if (x.isDirectory()) walk(q);
-            else if (x.name.endsWith('.jsonl')) out.push({ file: q, session: e.name, main: false });
+            else if (x.name.endsWith('.jsonl') && fresh(q)) out.push({ file: q, session: e.name, main: false });
           }
         };
         walk(path.join(p, 'subagents'));
@@ -129,10 +140,10 @@ const hookName = (cmd) => path.basename(String(cmd).trim().split(/\s+/).pop() ||
  * One pass over every transcript; calls emit(event) once per deduplicated event:
  *   {type:'reply'|'assistant'|'user'|'tool'|'skill'|'deny'|'session', t, s, ...}
  */
-export function scanTranscripts(project, emit) {
+export function scanTranscripts(project, emit, { scope = 'subtree', since = 0 } = {}) {
   const seenTool = new Set(), seenText = new Set(), seenReply = new Set(), seenUser = new Set(), seenDeny = new Set();
   const hookTests = new Set();   // tool_use ids of calls that feed a payload to a hook — their denies are tests
-  for (const { file, session, main } of transcriptFiles(project)) {
+  for (const { file, session, main } of transcriptFiles(project, scope, since)) {
     let raw;
     try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
     for (const line of raw.split('\n')) {
@@ -261,14 +272,22 @@ export function verdict(change, before, after, hookLogStart, now = Date.now()) {
 function baseVerdict(change, before, after, hookLogStart, now) {
   const sig = change.signal;
   if (!sig) return 'unmeasurable';
-  const src = String(sig.src || '');
-  // A hook with no log line for a full window is not running (or never triggered); before that, too early to say.
+  const src = String(sig.src || ''), want = sig.want || 'down';
+  // A hook with no log line for a full window of logging is not running (or never triggered); before that, too early.
+  // The window counts from the later of the change and the log's start: a hook changed before logging began and
+  // silent through a full window since is just as dead.
   if (src.startsWith('hooklog:') && !after.occasions) {
-    const ts = Date.parse(change.ts);
-    return hookLogStart !== null && hookLogStart <= ts && now - ts >= WINDOW ? 'dead' : 'unclear-window';
+    const from = Math.max(Date.parse(change.ts), hookLogStart ?? Infinity);
+    return now - from >= WINDOW ? 'dead' : 'unclear-window';
+  }
+  // Liveness (rows from git): it runs at all — a load, a call, a log line; `fires` also wants a decision.
+  if (want === 'alive' || want === 'fires') {
+    if (after.hits) return 'alive';
+    if (want === 'fires') return 'untested';   // has log lines, never denied, blocked, deferred or injected
+    return now - Date.parse(change.ts) >= WINDOW ? 'dead' : 'unclear-window';
   }
   if (after.occasions < MIN_AFTER) return 'unclear-window';
-  const rb = rate(before), ra = rate(after), want = sig.want || 'down';
+  const rb = rate(before), ra = rate(after);
   if (src.startsWith('deny:')) return after.hits ? 'works' : 'untested';
   if (src === 'skill') {
     if (after.hits <= 1 || ra < 0.1) return 'dead';
@@ -286,9 +305,197 @@ function baseVerdict(change, before, after, hookLogStart, now) {
   return 'no-effect';
 }
 
-/** Measure every ledger change that has a signal. Returns rows in ledger order. */
-export function measure({ project, ledger, ids = null, now = Date.now() }) {
-  const changes = readLedger(ledger).filter((r) => r && r.type === 'change' && (!ids || ids.includes(r.id)));
+// ------------------------------------------------------------------ changes from git
+
+const SCRIPT = /\.(sh|mjs|cjs|js|py)$/;
+
+function git(dir, args) {
+  try { return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 256e6 }); } catch { return null; }
+}
+
+/**
+ * A path relative to a config root (a .claude dir, ~/.claude) → {kind, name}, or null when it does not shape agent
+ * behaviour (tests, retired hooks, the claude.ai skills Claude Code syncs in). A script under hooks/ that no settings file
+ * wires is a library: `hook-support`, it has no log of its own. Rules, settings and memory are named by path.
+ */
+export function artifactOf(r, wired = null) {
+  const p = r.split('/'), base = p[p.length - 1], stem = base.replace(/\.[^.]+$/, '');
+  if (r === 'CLAUDE.md' || p[0] === 'rules') return { kind: 'rule', name: r };
+  if (p[0] === 'skills' && p.length > 2) return p[1] === 'synced' ? null : { kind: 'skill', name: p[1] };
+  if (p[0] === 'agents' && p.length === 2 && base.endsWith('.md')) return { kind: 'agent', name: stem };
+  if (p[0] === 'hooks') {
+    if (p.some((x) => x === '_retired' || x.startsWith('.')) || /^test|selftest/.test(stem)) return null;
+    if (SCRIPT.test(base) && !p.includes('_lib') && (!wired || wired.has(stem))) return { kind: 'hook', name: stem };
+    return { kind: 'hook-support', name: p.length > 2 ? p.slice(0, 2).join('/') : r };
+  }
+  if (p.length === 1 && /^settings(\.local)?\.json$|\.config\.json$/.test(base)) return { kind: 'settings', name: r };
+  if (p[0] === 'memory' && (base === 'MEMORY.md' || base.startsWith('feedback_'))) return { kind: 'memory', name: r };
+  if ((p[0] === 'bin' || p[0] === 'tools') && p.length === 2 && !base.startsWith('.')) return { kind: 'tool', name: stem };
+  return null;
+}
+
+/** Hook script names wired in these .claude dirs' settings — a hook logs under the same name (hook-log.sh). */
+function wiredHooks(dirs) {
+  const set = new Set();
+  for (const f of dirs.flatMap((d) => [path.join(d, 'settings.json'), path.join(d, 'settings.local.json')])) {
+    let o;
+    try { o = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { continue; }
+    for (const groups of Object.values(o.hooks || {})) for (const g of groups || []) for (const h of g.hooks || []) if (h.command) set.add(hookName(h.command));
+  }
+  return set;
+}
+
+/**
+ * Config roots to read: ~/.claude first (its rows are global), then the project's .claude dirs, and for each a skill
+ * symlinked from another repo (the kit, the vault) — its history lives in that repo. A target already taken stays
+ * with the first root: a skill linked both globally and from the project is global.
+ */
+function configRoots(project) {
+  const roots = [], seen = new Set();
+  const take = (dir, scope, skill = null) => {
+    let real;
+    try { real = realpathSync(dir); } catch { return null; }
+    const top = git(real, ['rev-parse', '--show-toplevel'])?.trim();
+    if (!top || seen.has(real)) return null;
+    seen.add(real);
+    const root = { top, rel: path.relative(top, real), scope, skill, dir: real, links: new Set() };
+    roots.push(root);
+    return root;
+  };
+  const claudeDirs = [[path.join(os.homedir(), '.claude'), 'global'], [path.join(project, '.claude'), 'project']];
+  try {
+    for (const e of fs.readdirSync(project, { withFileTypes: true })) if (e.isDirectory()) claudeDirs.push([path.join(project, e.name, '.claude'), 'project']);
+  } catch { /* no project dir */ }
+  for (const [dir, scope] of claudeDirs) {
+    const root = take(dir, scope);
+    if (!root) continue;
+    let skills = [];
+    try { skills = fs.readdirSync(path.join(dir, 'skills'), { withFileTypes: true }); } catch { /* none */ }
+    // A linked skill's content history is in its target's repo; here git sees only the link itself.
+    for (const s of skills) if (s.isSymbolicLink()) { root.links.add(s.name); take(path.join(dir, 'skills', s.name), scope, s.name); }
+  }
+  return roots;
+}
+
+/** Hand ledger line → the artifacts its paths name (repo-relative paths, kit payload paths). */
+function handArtifacts(row) {
+  return (row.paths || []).map((p) => {
+    const i = p.lastIndexOf('.claude/'), j = p.indexOf('/payload/');
+    const r = i > -1 ? p.slice(i + 8) : j > -1 ? p.slice(j + 9) : p;
+    return artifactOf(r.replace(/\/$/, '/x'));
+  }).filter(Boolean);
+}
+
+/** The hook's script text, plus its folder's other scripts when it lives in its own folder (a lib it sources). */
+function hookText(file) {
+  const dir = path.dirname(file);
+  const files = path.basename(dir) === 'hooks' ? [file]
+    : (() => { try { return fs.readdirSync(dir).filter((f) => SCRIPT.test(f)).map((f) => path.join(dir, f)); } catch { return [file]; } })();
+  return files.map((f) => { try { return fs.readFileSync(f, 'utf8'); } catch { return ''; } }).join('\n');
+}
+
+// A hook that can say no or speak: deny / block / defer by exit 2, inject by additionalContext or a marked decision.
+const DECIDES = /hook_log\s+(deny|block|inject|defer)\b|\bexit 2\b|process\.exit\(2\)|exitCode\s*=\s*2|decision\s*=\s*['"](deny|block|inject|defer)|permissionDecision|additionalContext/;
+
+/** The behaviour a row from git can be measured on without anyone picking a regex: liveness of its kind. */
+function liveness(a, file) {
+  const name = a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const sessions = { src: 'sessions', re: '.' };
+  switch (a.kind) {
+    case 'hook': {
+      // Measured on the shared hook log — a hook keeping its own log would read as dead. A guard or injector is alive
+      // when it decides; a recorder (snapshots, a skill-load log) decides nothing by design, and lives by its passes.
+      const text = hookText(file);
+      if (!/hook[-_]log|hookLog/.test(text)) return { signal: null, occasion: null, note: 'writes no shared hook log' };
+      return DECIDES.test(text)
+        ? { signal: { src: `hooklog:${a.name}`, re: '^(deny|block|defer|inject)', want: 'fires' }, occasion: null }
+        : { signal: { src: `hooklog:${a.name}`, re: '^pass', want: 'alive' }, occasion: null, note: 'recorder: lives by its passes' };
+    }
+    case 'skill': return { signal: { src: 'skill', re: `^([\\w-]+:)?${name}$`, want: 'alive' }, occasion: null };
+    case 'agent': return { signal: { src: 'tool:Agent.subagent_type', re: `^([\\w-]+:)?${name}$`, want: 'alive' }, occasion: sessions };
+    case 'tool': return { signal: { src: 'tool:Bash.command', re: `(^|[\\s/])${name}(?![\\w.-])`, want: 'alive' }, occasion: sessions };
+    default: return { signal: null, occasion: null };   // rule, memory, settings, hook-support: no mechanical signal
+  }
+}
+
+/**
+ * Change rows from git since `since`: one per artifact — its latest burst (commits less than SMOKE apart) — unless a
+ * hand ledger line covers that burst (same commit, or the same artifact within 6 h of it). Skipped: a root commit (the
+ * first snapshot of a repo, not a change) and an artifact whose files are gone (retired, moved).
+ */
+export function gitChanges(project, hand, since) {
+  const roots = configRoots(project);
+  const wired = { global: wiredHooks([path.join(os.homedir(), '.claude')]), project: wiredHooks(roots.filter((r) => r.scope === 'project' && !r.skill).map((r) => r.dir)) };
+  const byArtifact = new Map(), seenSha = new Set();
+  for (const root of roots) {
+    const paths = root.skill || !root.rel ? [root.rel || '.'] : [`${root.rel}/`, path.join(path.dirname(root.rel), 'CLAUDE.md')];
+    const out = git(root.top, ['log', `--since=${new Date(since).toISOString()}`, '--no-merges', '--name-only',
+      '--format=%x1e%H%x1f%P%x1f%cI%x1f%s%x1f%b%x1f', '--', ...paths]);
+    if (!out) continue;
+    for (const rec of out.split('\x1e').slice(1)) {
+      const [sha, parents, iso, subject, body, files = ''] = rec.split('\x1f');
+      if (seenSha.has(sha) || !parents.trim()) continue;   // a second clone of the same repo; a root commit
+      seenSha.add(sha);
+      const session = /^Session:\s*(\S+)/m.exec(body)?.[1] || null;
+      for (const f of files.split('\n').map((s) => s.trim()).filter(Boolean)) {
+        const r = root.rel && f.startsWith(`${root.rel}/`) ? f.slice(root.rel.length + 1) : f;
+        const a = root.skill ? { kind: 'skill', name: root.skill } : artifactOf(r, wired[root.scope]);
+        if (!a || (a.kind === 'skill' && !root.skill && root.links.has(a.name))) continue;
+        if (['rule', 'settings', 'memory'].includes(a.kind) && root.scope === 'project') a.name = f;
+        const key = `${root.scope}|${a.kind}|${a.name}`;
+        if (!byArtifact.has(key)) byArtifact.set(key, { a, scope: root.scope, top: root.top, commits: new Map() });
+        const c = byArtifact.get(key).commits;
+        if (!c.has(sha)) c.set(sha, { sha, t: Date.parse(iso), subject, session, files: [] });
+        c.get(sha).files.push(f);
+      }
+    }
+  }
+  const rows = [];
+  for (const { a, scope, top, commits } of byArtifact.values()) {
+    const cs = [...commits.values()].sort((x, y) => y.t - x.t);
+    const burst = [cs[0]];
+    for (const c of cs.slice(1)) { if (burst[burst.length - 1].t - c.t < SMOKE) burst.push(c); else break; }
+    const live = [...new Set(burst.flatMap((c) => c.files))].map((f) => path.join(top, f)).filter((f) => fs.existsSync(f));
+    if (!live.length) continue;
+    const start = burst[burst.length - 1].t, end = burst[0].t;
+    // A ledger line covers only the artifacts it names: a commit touching two hooks with a line for one leaves the
+    // other unmeasured otherwise. A line naming no path covers its whole commit.
+    const fam = (k) => (k.startsWith('hook') ? 'hook' : k);
+    const covered = hand.some((h) => {
+      const named = handArtifacts(h);
+      if (named.length && !named.some((x) => fam(x.kind) === fam(a.kind) && a.name.endsWith(x.name))) return false;
+      if (h.commit && burst.some((c) => c.sha.startsWith(h.commit))) return true;
+      const ht = Date.parse(h.ts);
+      return named.length > 0 && ht >= start - 3 * SMOKE && ht <= end + 3 * SMOKE;
+    });
+    if (covered) continue;
+    rows.push({
+      type: 'change', source: 'git', id: `G:${scope === 'global' ? '~/' : ''}${a.name}`, ts: new Date(start).toISOString(),
+      session: burst[burst.length - 1].session, kind: a.kind, scope, commit: burst[0].sha.slice(0, 8), commits: burst.length,
+      edits: cs.length, paths: [...new Set(burst.flatMap((c) => c.files))], class: burst[0].subject, ...liveness(a, live[0]),
+    });
+  }
+  return rows.sort((x, y) => Date.parse(x.ts) - Date.parse(y.ts));
+}
+
+// ------------------------------------------------------------------ measure
+
+/**
+ * Measure ledger changes (and, unless `ids` or `git:false`, the rows from git). A global change is measured on every
+ * project's transcripts, a project change on this project's. Returns ledger rows in ledger order, then git rows.
+ */
+export function measure({ project, ledger, ids = null, now = Date.now(), git: useGit = true, days = GIT_DAYS }) {
+  const hand = readLedger(ledger).filter((r) => r && r.type === 'change' && (!ids || ids.includes(r.id)));
+  const all = [...hand, ...(useGit && !ids ? gitChanges(project, readLedger(ledger).filter((r) => r && r.type === 'change'), now - days * DAY) : [])];
+  const res = new Map();
+  for (const scope of ['subtree', 'all']) {
+    const group = all.filter((ch) => (ch.scope === 'global') === (scope === 'all'));
+    measureGroup(project, group, now, scope).forEach((r, i) => res.set(group[i], r));
+  }
+  return all.map((ch) => res.get(ch));
+}
+
+function measureGroup(project, changes, now, scope) {
   const specs = [];
   for (const ch of changes) {
     if (!ch.signal) continue;
@@ -305,7 +512,8 @@ export function measure({ project, ledger, ids = null, now = Date.now() }) {
   };
   let hookLogStart = null;
   if (specs.length) {
-    scanTranscripts(project, feed);
+    const since = Math.min(...specs.map((sp) => Date.parse(sp.ch.ts))) - WINDOW;
+    scanTranscripts(project, feed, { scope, since });
     const log = readHookLog(project);
     log.forEach(feed);
     hookLogStart = log.reduce((m, e) => (m === null || e.t < m ? e.t : m), null);
@@ -328,7 +536,11 @@ export function measure({ project, ledger, ids = null, now = Date.now() }) {
       after.last = count(sp.hits, sp.occs, sp.perSession, ts + (2 * (now - ts)) / 3, now + 1);   // last third, for decaying
     }
     const v = sp ? verdict(ch, before, after, hookLogStart, now) : 'unmeasurable';
-    return { id: ch.id, kind: ch.kind, class: ch.class, signal: ch.signal ? ch.signal.src : null, before, after, verdict: v, recorded: ch.verdict || null, action: ACTION[v] };
+    return {
+      id: ch.id, source: ch.source || 'ledger', scope: ch.scope || null, ts: ch.ts, kind: ch.kind, class: ch.class,
+      signal: ch.signal ? ch.signal.src : null, before, after, verdict: v, recorded: ch.verdict || null, action: ACTION[v],
+      ...(ch.source === 'git' ? { commit: ch.commit, commits: ch.commits, edits: ch.edits, session: ch.session, paths: ch.paths, note: ch.note || null } : {}),
+    };
   });
 }
 
@@ -360,21 +572,42 @@ function main() {
     console.log(`baseline frozen for ${want.length} change line(s): ${want.map((r) => `${r.id} ${r.baseline.hits}/${r.baseline.occasions}`).join(', ')}`);
     return;
   }
-  const res = measure({ project, ledger, ids, now });
+  const days = Number(arg('days', GIT_DAYS));
+  const res = measure({ project, ledger, ids, now, git: !process.argv.includes('--no-git'), days });
   if (process.argv.includes('--json')) { console.log(JSON.stringify(res, null, 2)); return; }
-  const measured = res.filter((r) => r.signal), rest = res.filter((r) => !r.signal);
-  const head = ['id', 'kind', 'class', 'before', 'after', 'verdict', 'recorded', 'action'];
+  const table = (head, rows) => {
+    const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
+    const line = (r) => r.map((c, i) => String(c).padEnd(w[i])).join('  ').trimEnd();
+    console.log(line(head));
+    rows.forEach((r) => console.log(line(r)));
+  };
+  const tally = (rs) => {
+    const t = {};
+    rs.forEach((r) => { t[r.verdict] = (t[r.verdict] || 0) + 1; });
+    return Object.entries(t).map(([k, v]) => `${k} ${v}`).join(' · ');
+  };
+  const hand = res.filter((r) => r.source !== 'git'), auto = res.filter((r) => r.source === 'git');
+  const measured = hand.filter((r) => r.signal), rest = hand.filter((r) => !r.signal);
   const aft = (r) => fmt(r.after) + (r.verdict === 'decaying' ? ` (last ⅓ ${fmt(r.after.last)})` : '');
-  const rows = measured.map((r) => [r.id, r.kind || '', String(r.class || '').slice(0, 48), fmt(r.before), aft(r), r.verdict, r.recorded || '', r.action]);
-  const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
-  const line = (r) => r.map((c, i) => String(c).padEnd(w[i])).join('  ').trimEnd();
-  console.log(line(head));
-  rows.forEach((r) => console.log(line(r)));
-  const tally = {};
-  res.forEach((r) => { tally[r.verdict] = (tally[r.verdict] || 0) + 1; });
-  console.log(`\n${res.length} changes: ${Object.entries(tally).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
+  table(['id', 'kind', 'class', 'before', 'after', 'verdict', 'recorded', 'action'],
+    measured.map((r) => [r.id, r.kind || '', String(r.class || '').slice(0, 48), fmt(r.before), aft(r), r.verdict, r.recorded || '', r.action]));
+  console.log(`\n${hand.length} ledger changes: ${tally(hand)}`);
   if (rest.length) console.log(`unmeasurable (signal:null): ${rest.map((r) => r.id).join(' ')}`);
   console.log('before/after = hits/occasions (skill: sessions that loaded it / occasion sessions); before = frozen baseline when recorded.');
+  if (!auto.length) return;
+  // Rows from git: what needs a look first; `alive` and `unmeasurable` only as counts unless --all-rows.
+  const all = process.argv.includes('--all-rows');
+  const shown = auto.filter((r) => all || !['alive', 'unmeasurable'].includes(r.verdict));
+  console.log(`\nfrom git, last ${days} days — ${auto.length} artifacts changed without a ledger line, liveness since the latest change:`);
+  if (shown.length) {
+    table(['id', 'kind', 'scope', 'changed', 'edits', 'after', 'verdict', 'action'],
+      shown.map((r) => [r.id, r.kind, r.scope, r.ts.slice(0, 10), r.edits, fmt(r.after), r.verdict, r.note || r.action]));
+  }
+  console.log(`git rows: ${tally(auto)}`);
+  const kinds = {};
+  auto.filter((r) => r.verdict === 'unmeasurable').forEach((r) => { kinds[r.kind] = (kinds[r.kind] || 0) + 1; });
+  if (Object.keys(kinds).length) console.log(`unmeasurable by kind (no mechanical signal): ${Object.entries(kinds).map(([k, v]) => `${k} ${v}`).join(' · ')}`);
+  if (!all) console.log('--all-rows lists the alive and unmeasurable ones; hook: after = log lines with a decision / all its lines.');
 }
 
 // argv[1] is the path as typed; import.meta.url is resolved through symlinks.

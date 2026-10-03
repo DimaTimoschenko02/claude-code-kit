@@ -92,12 +92,14 @@ Show the diff with one line of why, get a light OK, apply. Then check that behav
 A removal is a hypothesis. If what the rule guarded against comes back, re-add it in its smallest form; don't restore the original.
 
 **Record the change** (when chat-audit is installed — in the project, `.claude/skills/chat-audit/`, or globally,
-`~/.claude/skills/chat-audit/`; the ledger lives in the project either way). Append one
-`type:"change"` line to `.claude/state/chat-audit/ledger.jsonl` — format in chat-audit `modes/land.md`. Required:
-`class` = the failure class from step 1, one sentence; `signal` = the line, tool parameter, skill load or hook decision
-this edit should move (`src`, `re`, `want`); `occasion` = when it applies (`null` → the source's default). Then
+`~/.claude/skills/chat-audit/`; the ledger lives in the project either way). Commit it: chat-audit `effect.mjs`
+reads config commits from git — the project, `~/.claude`, the repos behind linked skills — and checks the artifact
+is alive with no line from you. When the edit should move a behaviour you can name, also append one `type:"change"`
+line to `.claude/state/chat-audit/ledger.jsonl` — format in chat-audit `modes/land.md`: `class` = the failure class
+from step 1, one sentence; `signal` = the line, tool parameter, skill load or hook decision this edit should move
+(`src`, `re`, `want`); `occasion` = when it applies (`null` → the source's default). Then
 `node <chat-audit dir>/lib/effect.mjs record --id C-<n> --project <dir>` freezes the 7-day baseline.
-No observable signal → `signal:null` is allowed, but the change is reported as `unmeasurable` at every audit.
+No signal to name → no line; the commit is the record.
 
 ## What this skill does not do
 
