@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Every check a mod passes before it ships, in one call: validate, tests, types, and an optional live smoke run.
+# A failed step is appended to the mod-builder agent's memory inbox, so the lesson is recorded by this script
+# rather than by the agent remembering to — the agent turns inbox lines into lessons before it stops.
+#
+# usage: mod-check <mod dir> [--smoke "/command args"]
+set -uo pipefail
+
+dir=${1:?usage: mod-check <mod dir> [--smoke "/command args"]}
+dir=$(cd "$dir" && pwd) || exit 2
+shift
+smoke=''
+[[ ${1:-} == --smoke ]] && smoke=${2:-}
+
+name=$(basename "$dir")
+inbox=${MOD_BUILDER_INBOX:-$HOME/.claude/agent-memory/mod-builder/inbox.md}
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+failed=0
+
+record() { # step, log file
+  mkdir -p "$(dirname "$inbox")"
+  {
+    printf -- '- %s · %s · %s\n' "$(date '+%F %H:%M')" "$name" "$1"
+    grep -E 'error|refus|fail|✘|❯.*(not|no |cannot)' "$2" | grep -vE '^\s*\(pass\)|^ *0 fail' | head -5 | sed 's/^/    /'
+  } >>"$inbox"
+}
+
+step() { # name, log file, exit status
+  if [[ $3 -eq 0 ]]; then
+    echo "PASS $1"
+  else
+    echo "FAIL $1"
+    tail -25 "$2" | sed 's/^/  /'
+    record "$1" "$2"
+    failed=1
+  fi
+}
+
+claude plugin validate "$dir" >"$tmp/validate" 2>&1
+grep -q '✔ Validation passed' "$tmp/validate"
+step validate "$tmp/validate" $?
+
+if compgen -G "$dir/tests/*.test.ts*" >/dev/null || compgen -G "$dir/*.test.ts*" >/dev/null; then
+  perl -e 'alarm 240; exec @ARGV' claude plugin test "$dir" >"$tmp/test" 2>&1
+  status=$?
+  grep -qE '^ *[1-9][0-9]* fail' "$tmp/test" && status=1
+  step test "$tmp/test" $status
+else
+  echo "FAIL test: no *.test.ts — write one per behaviour asked for"
+  echo "no tests" >"$tmp/test"
+  record test "$tmp/test"
+  failed=1
+fi
+
+# A mod the engine has loaded carries its types and a tsconfig to extend; a new one is checked against the
+# declarations plugin-authoring wrote for this Claude Code version.
+if [[ -f "$dir/.claude-plugin/types/tsconfig.json" ]]; then
+  [[ -f "$dir/tsconfig.json" ]] || echo '{ "extends": "./.claude-plugin/types/tsconfig.json" }' >"$dir/tsconfig.json"
+  npx -y -p typescript@5.9.3 tsc -p "$dir" >"$tmp/tsc" 2>&1
+  step tsc "$tmp/tsc" $?
+else
+  version=$(claude --version | awk '{print $1}')
+  types=$(ls -t /private/tmp/claude-*/bundled-skills/"$version"/*/plugin-authoring/types/claude-code.d.ts /tmp/claude-*/bundled-skills/"$version"/*/plugin-authoring/types/claude-code.d.ts 2>/dev/null | head -1)
+  if [[ -z $types ]]; then
+    echo "SKIP tsc: the mod has not loaded yet and no plugin-authoring types for $version — invoke skill plugin-authoring, rerun"
+    failed=1
+  else
+    cat >"$tmp/tsconfig.json" <<EOF
+{
+  "compilerOptions": {
+    "target": "es2023", "lib": ["es2023"], "types": [],
+    "module": "esnext", "moduleResolution": "bundler",
+    "strict": true, "noUncheckedIndexedAccess": true, "noEmit": true, "skipLibCheck": true,
+    "allowImportingTsExtensions": true, "jsx": "react", "jsxFactory": "h", "jsxFragmentFactory": "Fragment"
+  },
+  "include": ["$types", "$dir/hooks", "$dir/tests", "$dir/types"]
+}
+EOF
+    npx -y -p typescript@5.9.3 tsc -p "$tmp" >"$tmp/tsc" 2>&1
+    step tsc "$tmp/tsc" $?
+  fi
+fi
+
+if [[ -n $smoke ]]; then
+  # A mod already in CLAUDE_CODE_PLUGIN_DIRS loads by itself; a new one rides --plugin-dir for this one run.
+  extra=()
+  case ":${CLAUDE_CODE_PLUGIN_DIRS:-}:" in *":$dir:"*) ;; *) extra=(--plugin-dir "$dir") ;; esac
+  perl -e 'alarm 150; exec @ARGV' claude ${extra[@]+"${extra[@]}"} -p "$smoke" </dev/null >"$tmp/smoke" 2>&1
+  status=$?
+  grep -q "^$name: \|($name)" "$tmp/smoke" || status=1
+  # An answer can come from another copy of the same name while this one never loaded: that is no pass.
+  grep -qE "^$name: .*(not loaded|refused|did not validate|failed)" "$tmp/smoke" && status=1
+  step "smoke $smoke" "$tmp/smoke" $status
+  sed 's/^/  | /' "$tmp/smoke" | head -15
+fi
+
+exit $failed

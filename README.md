@@ -40,7 +40,7 @@ instead of a shell command per event. Each has its own tests (`claude plugin tes
 
 | Agent | What it does |
 |---|---|
-| **mod-builder** | Creates and changes mods end to end — code, tests, validate, type-check, settings wiring, smoke run, commit — so a mod request made mid-task goes to a background agent instead of derailing the session. Carries the engine facts that cost a round when missed (validator rules, test-engine gaps, start-only loading, respawn by job id). Install: symlink into `~/.claude/agents/`. |
+| **mod-builder** | Creates and changes mods end to end — code, tests, checks, settings wiring, smoke run, commit — so a mod request made mid-task goes to a background agent instead of derailing the session. Learns from its own runs: `memory: user` keeps lessons in `~/.claude/agent-memory/mod-builder/` (its `MEMORY.md` is loaded at every start); `mods/bin/mod-check` (validate + tests + tsc + live smoke) appends every failed check to that memory's `inbox.md`, and the agent's Stop hook `mods/bin/mod-builder-stop` keeps it working until each failure became a lesson. `mods/bin/mod-wire` adds a mod to `CLAUDE_CODE_PLUGIN_DIRS`. Expects the kit at `~/claude-code-kit`; install: symlink into `~/.claude/agents/`. |
 
 ### instructions-tuning (`instructions-tuning/`)
 

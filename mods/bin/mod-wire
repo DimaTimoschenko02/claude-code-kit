@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Adds a mod folder to CLAUDE_CODE_PLUGIN_DIRS in ~/.claude/settings.json and, given JSON, sets its options.
+# Backs the file up first and writes only a result that parses. Sessions see the mod from their next start.
+#
+# usage: mod-wire <mod dir> ['{"option": value}']
+set -euo pipefail
+
+dir=$(cd "${1:?usage: mod-wire <mod dir> [options-json]}" && pwd)
+options=${2:-}
+settings="$HOME/.claude/settings.json"
+backup="$HOME/.claude/state/backups/settings.json.bak-modwire-$(date +%s)"
+mkdir -p "$(dirname "$backup")"
+cp "$settings" "$backup"
+
+python3 - "$settings" "$dir" "$options" <<'EOF'
+import json, os, sys
+path, mod, options = sys.argv[1], sys.argv[2], sys.argv[3]
+s = json.load(open(path))
+env = s.setdefault('env', {})
+dirs = [d for d in env.get('CLAUDE_CODE_PLUGIN_DIRS', '').split(':') if d]
+if mod not in dirs:
+    dirs.append(mod)
+env['CLAUDE_CODE_PLUGIN_DIRS'] = ':'.join(dirs)
+if options:
+    name = json.load(open(os.path.join(mod, '.claude-plugin', 'plugin.json')))['name']
+    s.setdefault('pluginConfigs', {}).setdefault(name, {})['options'] = json.loads(options)
+text = json.dumps(s, indent=2, ensure_ascii=False) + '\n'
+json.loads(text)
+open(path, 'w').write(text)
+print('\n'.join(dirs))
+EOF
+echo "backup: $backup"
