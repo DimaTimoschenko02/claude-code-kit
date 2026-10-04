@@ -159,3 +159,22 @@ test('the broad net still masks what only it caught: glued auth keys, numbers, p
   ];
   for (const [text, secret] of cases) assert.ok(!leaks(text, secret), text);
 });
+
+// A property over the whole grid, so a change that narrows any rule shows up here and not in a security review after
+// the push: every secret-looking value under every secret-holding key, with every separator and wrapping, is masked.
+test('every secret-looking value under every secret key is masked, in any separator and wrapping', () => {
+  const keys = ['password', 'passwd', 'DB_PASSWORD', 'db_pass', 'PASS', 'pwd', 'secret', 'client_secret', 'SECRET_KEY',
+    'token', 'API_TOKEN', 'auth', 'authkey', 'TS_AUTHKEY', 'api_key', 'apiKey', 'access_key', 'private_key', 'credentials',
+    'app_password', 'x_auth_token', 'AUTH', 'pin', 'PIN', 'secret_id', 'password_hash', 'refresh_token', 'GITHUB_TOKEN',
+    'basic_auth', 'Password'];
+  const seps = ['=', ': ', ' = ', '=>', ' => ', ':', '="', ": '", '":"', '": "', "='"];
+  const vals = [P, '84736251', 'knigomania', 's7pOW/GZkVNZ/imYPssVWYH', 'Ab3/x9.Kq', 'superSecretPassword', 'p@ss!W0rd',
+    'XoI)uu6bY7JR', 'Correct.Horse', 'kQ9x-Z2.aa_B'];
+  const wraps = [(l) => l, (l) => JSON.stringify({ c: l }), (l) => `see ${l} here`, (l) => JSON.stringify({ c: `x\n${l}` })];
+  const leaked = [];
+  for (const k of keys) for (const s of seps) for (const v of vals) for (const w of wraps) {
+    const text = w(`${k}${s}${v}${s.endsWith('"') ? '"' : s.endsWith("'") ? "'" : ''}`);
+    if (leaks(text, v)) leaked.push(text);
+  }
+  assert.deepEqual(leaked.slice(0, 5), [], `${leaked.length} leaks`);
+});

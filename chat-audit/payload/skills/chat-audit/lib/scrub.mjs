@@ -89,8 +89,9 @@ export function isRealValue(raw, { min = 4, rule = '', key = '' } = {}) {
   if (PLACEHOLDER.test(v)) return false;
   if (/^\[[A-Z_]+\]/.test(v)) return false;             // already scrubbed
   // A number is a secret only after an explicit password key: 6+ digits in prose (`пароль 84736251`; 2–5 digits there is
-  // a port or a year), 4+ under a password-named key (`DB_PASS=4821`).
-  if (NUMERIC.test(v) && !((PASSWORD_RULES.has(rule) && /^\d{6,}$/.test(v)) || (PASSWORD_KEY.test(key) && /^\d{4,}$/.test(v)))) return false;
+  // a port or a year), 4+ under a password-named key (`DB_PASS=4821`), 6+ under any secret key but an LLM token counter.
+  if (NUMERIC.test(v) && !((PASSWORD_RULES.has(rule) && /^\d{6,}$/.test(v)) || (PASSWORD_KEY.test(key) && /^\d{4,}$/.test(v)) ||
+    (key && !/tokens(?![a-z])/i.test(key) && /^\d{6,}$/.test(v)))) return false;
   if (ENV_NAME.test(v)) return false;
   if (PATHLIKE.test(v)) return false;
   if (CODE_REF.test(v)) return false;
@@ -104,7 +105,7 @@ export function isRealValue(raw, { min = 4, rule = '', key = '' } = {}) {
 const KEY_NAMES = [
   'passw(?:or)?d', 'passwort', 'passphrase', '(?<![A-Za-z])pass(?![A-Za-z])', 'pwd', 'pgpassword',
   'secret', 'token(?![a-rt-z])', 'api[_-]?key', 'apikey', 'access[_-]?key', 'private[_-]?key',
-  'client[_-]?secret', 'credentials?', 'app[_-]?password', '(?<![A-Za-z])auth(?!or)',
+  'client[_-]?secret', 'credentials?', 'app[_-]?password', '(?<![A-Za-z])auth(?!or)', '(?<![A-Za-z])pin(?![A-Za-z])',
 ].join('|');
 // Bounded on both sides: an unbounded run made every start position rescan a long word (quadratic on base64/hex).
 const SECRET_KEY = `[\\w.-]{0,64}?(?:${KEY_NAMES})[\\w.-]{0,64}`;
