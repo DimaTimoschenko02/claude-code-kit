@@ -1,0 +1,7 @@
+{
+  "name": "dictate",
+  "version": "0.1.0",
+  "description": "Voice dictation helpers: hold several prompts as one batch (/pack) and fix misheard project terms from ~/.claude/dictate-terms.json",
+  "author": { "name": "dimti" },
+  "types": "./types/index.d.ts"
+}
