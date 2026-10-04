@@ -238,6 +238,11 @@ class HeredocPathAsData(unittest.TestCase):
     def test_one_line_loop_whose_body_writes_its_variable(self):
         self.assertEqual(targets(py("for p in ['/v/a.md', '/v/b.md']: open(p, 'w').write('x')")), ["/v/a.md", "/v/b.md"])
 
+    def test_header_that_writes_itself_keeps_its_target(self):
+        self.assertEqual(targets(py("if (f := open('/v/x.sh', 'w')): f.write(s)")), ["/v/x.sh"])
+        self.assertEqual(targets(py("while open('/v/x.sh', 'a').write(s): break")), ["/v/x.sh"])
+        self.assertEqual(targets(py("for _ in [open('/v/x.sh', 'w')]: pass")), ["/v/x.sh"])
+
     def test_loop_over_lines_of_a_read_file(self):
         body = "for line in open('brain/list.txt'):\n    p = line.split('\\t')\n    open('/tmp/o/' + p[0], 'w').write(p[1])"
         self.assertEqual(targets(py(body)), ["/tmp/o"])
