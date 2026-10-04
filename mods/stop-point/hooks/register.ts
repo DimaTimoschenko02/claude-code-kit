@@ -37,6 +37,9 @@ import type { GateDecision, Limits } from './logic'
 
 const SESSION = atom({ plugin: 'stop-point', key: 'session' } as const, INITIAL)
 
+/** A point's file name: the session id, a UUID. Pruning touches nothing else in the folder. */
+const POINT_NAME = '????????-????-????-????-????????????.md'
+
 /** Tools whose call with the point's path writes the point. */
 const WRITES = new Set(['Write', 'Edit', 'MultiEdit'])
 
@@ -61,7 +64,8 @@ type Config = {
   triggerOverride: number | null
   growthOverride: number | null
   logPath: string
-  pointsDir: string
+  /** The points folder with every symbolic link followed; null while it does not exist. Pruned by its real path. */
+  pointsReal: string | null
 }
 
 let cached: Promise<Config> | null = null
@@ -88,15 +92,22 @@ async function load($: EngineInterface): Promise<Config> {
     $.env.get('STOP_POINT_GROWTH'),
   ])
   const home = homeEnv ?? ''
-  const projectTemplate = `${root}/.claude/hooks/_lib/stop-point-template.md`
   const resumeDir = `${root}/.claude/state/resume`
-  const [hasProjectTemplate, hasResumeDir, ownShell] = await Promise.all([
-    $.fs.exists(projectTemplate),
-    $.fs.exists(resumeDir),
+  const [rootStat, resumeStat, ownShell] = await Promise.all([
+    $.fs.stat(root, { resolve: true }).catch(() => null),
+    $.fs.stat(resumeDir, { resolve: true }).catch(() => null),
     $.fs.exists(`${root}/.claude/hooks/session-stop-point.sh`),
   ])
-  const pointsDir = hasProjectTemplate || hasResumeDir ? resumeDir : `${home}/.claude/state/stop-point/points`
-  const template = hasProjectTemplate ? projectTemplate : `${$.plugin.root}/template.md`
+  // A repo keeps its points in its own .claude/state/resume only where that folder really lies inside the repo: the
+  // folder is pruned with find -delete, and a repo cloned from anywhere could link it to any folder of the owner's.
+  // The template is always the mod's own — a repo's text inlined into the context would be a prompt from a stranger.
+  const isInsideRoot =
+    resumeStat?.kind === 'dir' &&
+    resumeStat.realPath !== undefined &&
+    rootStat?.realPath !== undefined &&
+    resumeStat.realPath.startsWith(`${rootStat.realPath}/`)
+  const pointsDir = isInsideRoot ? resumeDir : `${home}/.claude/state/stop-point/points`
+  const template = `${$.plugin.root}/template.md`
   const settings = (source?: SettingsSource): Promise<Settings> =>
     $.settings.read(source === undefined ? {} : { source }).catch((): Settings => ({}))
   const [templateText, merged, project, local, user, dir] = await Promise.all([
@@ -123,7 +134,7 @@ async function load($: EngineInterface): Promise<Config> {
     triggerOverride: toNumber(tokensEnv),
     growthOverride: toNumber(growthEnv),
     logPath: `${home}/.claude/state/stop-point/gate.log`,
-    pointsDir,
+    pointsReal: dir?.kind === 'dir' && dir.realPath !== undefined ? dir.realPath : null,
   }
 }
 
@@ -208,9 +219,12 @@ export const register: Register = on => {
         $.ui.log(`stop-point stands down: ${c.standDown}`, { to: 'debug' })
         return r
       }
-      await $.process
-        .run(['find', c.pointsDir, '-name', '*.md', '-type', 'f', '-mtime', '+7', '-delete'], { timeoutMs: 5000 })
-        .catch(() => null)
+      if (c.pointsReal !== null)
+        await $.process
+          .run(['find', c.pointsReal, '-maxdepth', '1', '-type', 'f', '-name', POINT_NAME, '-mtime', '+7', '-delete'], {
+            timeoutMs: 5000,
+          })
+          .catch(() => null)
       const [s, m] = await Promise.all([read($, SESSION), measure($, c)])
       showStatus($, s, m.tokens, m.lim)
     } catch {

@@ -15,6 +15,8 @@ type World = {
   tokens: number | null
   files: Map<string, File>
   dirs: Set<string>
+  /** A path that is a symbolic link → where it lands. */
+  links: Map<string, string>
   settings: { merged: Record<string, unknown>; project: Record<string, unknown>; local: Record<string, unknown>; user: Record<string, unknown> }
   status: (string | undefined)[]
   toasts: string[]
@@ -33,7 +35,8 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
   const w: World = {
     tokens: 100_000,
     files: new Map(),
-    dirs: new Set(opts.projectMode === false ? [] : [`${ROOT}/.claude/state/resume`]),
+    dirs: new Set(opts.projectMode === false ? [ROOT] : [ROOT, `${ROOT}/.claude/state/resume`]),
+    links: new Map(),
     settings: { merged: WINDOW, project: {}, local: {}, user: {}, ...opts.settings },
     status: [],
     toasts: [],
@@ -59,11 +62,11 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
   on('settings.read', (_$, e) => ({ value: w.settings[e.source === undefined ? 'merged' : (e.source as 'project')] ?? {} }))
   on('fs.exists', (_$, e) => ({ value: w.files.has(e.path) || w.dirs.has(e.path) }))
   on('fs.stat', (_$, e) => {
+    const isLink = w.links.has(e.path)
+    const real = e.resolve ? { realPath: w.links.get(e.path) ?? e.path } : {}
     const f = w.files.get(e.path)
-    if (f !== undefined) {
-      return { value: { kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false, ...(e.resolve ? { realPath: e.path } : {}) } }
-    }
-    if (w.dirs.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: START, isLink: false, ...(e.resolve ? { realPath: e.path } : {}) } }
+    if (f !== undefined) return { value: { kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink, ...real } }
+    if (w.dirs.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: START, isLink, ...real } }
     return { deny: `ENOENT ${e.path}` }
   })
   on('fs.read', (_$, e) => {
@@ -454,21 +457,40 @@ describe('setup', () => {
     expect(r.block).toMatch(/stop-point\/template\.md/)
   })
 
-  test('a project template wins and rides inline', async ($, on) => {
-    const w = world(on, { projectMode: false })
+  test('a repo\'s own template is never read: the mod\'s rides inline', async ($, on) => {
+    const w = world(on)
     w.files.set(`${ROOT}/.claude/hooks/_lib/stop-point-template.md`, { text: '# Title\n\nPROJECT FORMAT BODY', mtimeMs: START })
     await start($)
     w.tokens = 275_000
     const asked = ctx(await read($))
     expect(asked).toContain(`Write ${POINT}`)
-    expect(asked).toContain('PROJECT FORMAT BODY')
-    expect(asked).not.toContain('# Title')
+    expect(asked).toContain('MOD FORMAT BODY')
+    expect(asked).not.toContain('PROJECT FORMAT BODY')
   })
 
-  test('prunes points older than a week at session start', async ($, on) => {
+  test('prunes only week-old point files at the top of the folder, by its real path', async ($, on) => {
     const w = world(on)
     await start($)
-    expect(w.runs).toContainEqual(['find', `${ROOT}/.claude/state/resume`, '-name', '*.md', '-type', 'f', '-mtime', '+7', '-delete'])
+    expect(w.runs).toContainEqual([
+      'find', `${ROOT}/.claude/state/resume`, '-maxdepth', '1', '-type', 'f',
+      '-name', '????????-????-????-????-????????????.md', '-mtime', '+7', '-delete',
+    ])
+  })
+
+  test('a resume folder linked out of the repo is neither used nor pruned', async ($, on) => {
+    const w = world(on)
+    w.links.set(`${ROOT}/.claude/state/resume`, `${HOME}/Documents`)
+    await start($)
+    expect(w.runs.filter(a => a[0] === 'find')).toEqual([])
+    w.tokens = 275_000
+    expect((await stop($)).block).toContain(`Write ${HOME}/.claude/state/stop-point/points/${SID}.md по формату `)
+  })
+
+  test('a resume folder linked elsewhere inside the repo still serves', async ($, on) => {
+    const w = world(on)
+    w.links.set(`${ROOT}/.claude/state/resume`, `${ROOT}/app/.claude/state/resume`)
+    await start($)
+    expect(w.runs.find(a => a[0] === 'find')?.[1]).toBe(`${ROOT}/app/.claude/state/resume`)
   })
 
   test('stands down while the project shell copy is wired', async ($, on) => {
