@@ -1,7 +1,9 @@
 {
   "name": "secrets-redact",
   "version": "0.1.0",
-  "author": { "name": "Dima Timoschenko" },
+  "author": {
+    "name": "Dima Timoschenko"
+  },
   "description": "Hides secret values in everything the model reads (tool results, injected rows) instead of blocking reads; names and listings stay visible.",
   "userConfig": {
     "extraFiles": {
@@ -11,5 +13,10 @@
       "description": "Absolute paths of more files whose values count as known secrets: dotenv files, shell rc files, .json (MCP/settings), or .md access notes with backticked values.",
       "default": []
     }
-  }
+  },
+  "keywords": [
+    "секрет",
+    "‹secret",
+    "редакт"
+  ]
 }
