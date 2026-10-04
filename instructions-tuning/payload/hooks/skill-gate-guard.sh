@@ -122,9 +122,10 @@ done <<< "$gated"
 [ -z "$req" ] && exit 0   # every governed target's owner skill is loaded
 
 hook_log deny "$req"
+# The deny names the exact call and the bare name: agents reached for "<dir>:${req}", which the Skill tool rejects
+# as unknown until Claude Code has discovered that directory's skills, and then loaded the skill twice under both names.
 cat >&2 <<EOF
-🚧 skill-gate: editing "${rel}" requires the owner skill /${req}, but /${req} has
-not been invoked since the last context reset (session start or /compact).
-Invoke /${req} FIRST, then retry the edit.  (gates: .claude/skill-gate.config.json)
+🚧 skill-gate: "${rel}" belongs to skill ${req}, not loaded since the last context reset (session start or /compact).
+Next call: Skill with skill: "${req}" — exactly this bare name, no "<dir>:" prefix. Then repeat this same call unchanged.
 EOF
 exit 2
