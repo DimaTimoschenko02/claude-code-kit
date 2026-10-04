@@ -62,3 +62,9 @@ test('names and short ids that merely share a prefix stay', () => {
     assert.equal(scrub(s), s);
   }
 });
+
+test('a Telegram token inside its API URL is masked', () => {
+  const token = TOKENS.telegram;
+  const out = scrub(`curl https://api.telegram.org/bot${token}/sendMessage`);
+  assert.ok(!out.includes(token.split(':')[1]), out);
+});

@@ -86,8 +86,8 @@ export const DETECTORS = [
   // Notion (ntn_, legacy secret_), Stripe, npm, Hugging Face, Linear, Atlassian, Sentry, DigitalOcean, Slack app-level.
   { name: 'prefixed-token',
     re: /\b(?:ntn_[A-Za-z0-9]{40,}|secret_[A-Za-z0-9]{40,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|lin_api_[A-Za-z0-9]{32,}|ATATT[A-Za-z0-9_=-]{40,}|sntry[su]_[A-Za-z0-9_=+/-]{40,}|dop_v1_[a-f0-9]{64}|xapp-\d-[A-Za-z0-9-]{20,})/gd },
-  // Telegram bot token: <bot id>:AA<33 chars>.
-  { name: 'telegram-bot-token', re: /\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b/gd },
+  // Telegram bot token: <bot id>:AA<33 chars>, also inside its API URL (`/bot<token>/sendMessage`, a letter before it).
+  { name: 'telegram-bot-token', re: /(?<!\d)\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])/gd },
   { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/gd },
   { name: 'hex-blob', re: /\b[A-Fa-f0-9]{48,}\b/gd },
 
@@ -150,14 +150,15 @@ export const DETECTORS = [
 // fires; callers scrub serialized JSON and coloured output alike. The view blanks those sequences at the same length.
 const BEHIND_LETTER = /\x1b\[[0-9;?]*[A-Za-z]|\\u001b\[[0-9;?]*[A-Za-z]|\\u[0-9a-fA-F]{4}|\\[nrtbf]/g;
 
-/** Hits over the text and over its view, a view hit kept only where the text gave none: the text's own pass keeps a
- *  value that holds a literal "\t" whole, the view's pass adds what hid behind an escape. */
+/** Hits over the text and over its view: the text's own pass keeps a value that holds a literal "\t" whole, the view's
+ *  pass adds what hid behind an escape. A view hit is dropped only when a text hit covers it whole — a partial overlap
+ *  would leave the token's tail. */
 function* hits(text) {
   const view = text.replace(BEHIND_LETTER, (s) => ' '.repeat(s.length));
   const own = [...passHits(text)];
   yield* own;
   if (view === text) return;
-  for (const h of passHits(view)) if (!own.some((o) => h.start < o.end && o.start < h.end)) yield h;
+  for (const h of passHits(view)) if (!own.some((o) => o.start <= h.start && h.end <= o.end)) yield h;
 }
 
 function* passHits(view) {
