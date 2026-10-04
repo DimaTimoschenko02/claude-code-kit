@@ -692,12 +692,26 @@ const PGPASS_RE = new RegExp(
   String.raw`^(((?:(?:[^\s:]{1,300}:)?\d{1,7}[:-])?)((?![#])${PG_WORD}):(\d{1,5}|\*):${PG_FIELD}:${PG_FIELD}:)(?!‹secret:)(${PG_WORD})(?=[ \t\r]*$|:)(?=([^\n]*))`,
   'gm',
 )
-/** File names `grep -n` prints before a line number; a host never ends so. */
-const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|jsonl?|json5|md|mdx|ya?ml|toml|ini|conf|cfg|env|log|txt|csv|tsv|sql|sh|bash|zsh|py|rb|php|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|html?|css|scss|vue|svelte|xml|lock|tpl|twig|gradle|properties)$/i
+/** Extensions no domain ends with: a first field ending so is a file name `grep -n` printed. */
+const FILE_ONLY_EXT = /\.(?:[cm]?[jt]sx?|jsonl?|json5|mdx|ya?ml|toml|ini|conf|cfg|env|log|txt|csv|tsv|sql|bash|zsh|rb|php|go|java|kt|swift|c|h|cpp|hpp|html?|css|scss|vue|svelte|xml|lock|tpl|twig|gradle)$/i
+/** Extensions that are also top-level domains (.md Moldova, .sh, .py, .rs, .cc …): a domain host may end so. */
+const DOMAIN_EXT = /\.(?:md|sh|py|rs|cc|cs|properties)$/i
+
+/**
+ * Is the first field a file name a `grep -n` hit starts with? Only on evidence: an extension no domain has, a path, or
+ * a bare `name.md` before a line-number-sized port. A missed password is a leak and an extra mask a nuisance, so a
+ * multi-label host like `db.acme.rs` is always read as a host.
+ */
+function grepFile(host: string, port: string): boolean {
+  if (!/^\d+$/.test(port)) return false
+  if (FILE_ONLY_EXT.test(host)) return true
+  if (!DOMAIN_EXT.test(host)) return false
+  return host.includes('/') || (/^[^.]+\.[^.]+$/.test(host) && /^[1-9]\d{0,2}$/.test(port))
+}
 
 /** A line in the .pgpass shape that is something else: a grep -n hit, a clock time or MAC address, a JSON line. */
 function pgpassOverreach(line: string, prefix: string, host: string, port: string): boolean {
-  if (!prefix && SOURCE_FILE.test(host) && /^\d+$/.test(port)) return true // notes.md:3:a:b:c
+  if (!prefix && grepFile(host, port)) return true // notes.md:3:a:b:c, src/db.ts:12:…
   if (/(?:^|T)\d{1,2}$/.test(host) && /^\d{2}$/.test(port)) return true // 12:34:56:…, 2026-10-04T18:48:12Z, 00:11:22:…
   return /"[^"\s:]{1,80}"\s*:/.test(line) // a JSON key: `{"agent":"probe:…`
 }

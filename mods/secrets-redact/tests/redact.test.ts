@@ -795,6 +795,19 @@ describe('a line rule hides one field, never ordinary output', () => {
     expect(out).toBe('  password: ‹secret:password›","user":"acme","retries":3\n')
   })
 
+  test('a domain host ending like a file (.rs .sh .md .py) is a host: hidden and learned; a file name before a line number is not', async ($, on) => {
+    const w = world(on)
+    for (const [i, host] of ['db.example.rs', 'pg.acme.sh', 'x.y.md', 'db.acme.py', 'acme.sh'].entries()) {
+      const pw = `Kq7${i}vR2mZ8pLw4tNx`
+      const out = stdoutOf(await bash($, w, `${host}:5432:prod:app:${pw}\n`, 'cat ~/.pgpass'))
+      expect({ host, hidden: !out.includes(pw), kept: out.includes(`${host}:5432:prod:app:`) }).toEqual({ host, hidden: true, kept: true })
+      expect({ host, later: stdoutOf(await bash($, w, `${pw}\n`, 'echo')).includes(pw) }).toEqual({ host, later: false })
+    }
+    for (const text of ['scripts/deploy.sh:12:set:-e:true\n', 'README.md:40:Run:psql:-h-localhost\n', 'vite.config.ts:3:import:vite:defineConfig\n']) {
+      expect(stdoutOf(await bash($, w, text, 'grep -rn x .'))).toBe(text)
+    }
+  })
+
   test('a long pgpass password with any names is hidden and learned for later outputs', async ($, on) => {
     const w = world(on)
     const pw = 'Fk9pgpassLongValue42'
