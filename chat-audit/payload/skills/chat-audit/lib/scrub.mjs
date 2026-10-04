@@ -83,6 +83,11 @@ export const DETECTORS = [
   { name: 'aws-key', re: /\bAKIA[0-9A-Z]{16}\b/gd },
   { name: 'google-key', re: /\bAIza[0-9A-Za-z_-]{20,}/gd },
   { name: 'gitlab-token', re: /\bglpat-[A-Za-z0-9_-]{16,}/gd },
+  // Notion (ntn_, legacy secret_), Stripe, npm, Hugging Face, Linear, Atlassian, Sentry, DigitalOcean, Slack app-level.
+  { name: 'prefixed-token',
+    re: /\b(?:ntn_[A-Za-z0-9]{40,}|secret_[A-Za-z0-9]{40,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|npm_[A-Za-z0-9]{36}|hf_[A-Za-z0-9]{30,}|lin_api_[A-Za-z0-9]{32,}|ATATT[A-Za-z0-9_=-]{40,}|sntry[su]_[A-Za-z0-9_=+/-]{40,}|dop_v1_[a-f0-9]{64}|xapp-\d-[A-Za-z0-9-]{20,})/gd },
+  // Telegram bot token: <bot id>:AA<33 chars>.
+  { name: 'telegram-bot-token', re: /\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b/gd },
   { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/gd },
   { name: 'hex-blob', re: /\b[A-Fa-f0-9]{48,}\b/gd },
 
