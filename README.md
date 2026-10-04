@@ -32,6 +32,7 @@ instead of a shell command per event. Each has its own tests (`claude plugin tes
 | **secrets-redact** | Hides secret values in everything the model reads — tool results, injected rows, notifications — instead of blocking reads; names and listings stay visible, and a secret can still be used in a command. Known values come from env, rc files, `.env*` and `extraFiles`; shape rules catch the rest. A mod that fails to load is skipped silently, so two classic hooks in `guard/` watch it from outside the engine: `alive.sh` (PreToolUse `*`) denies every tool call of a session the mod left no heartbeat for, `canary.sh` (SessionStart) runs the mod's tests once per Claude Code version and warns when they fail. |
 | **stop-point** | Keeps a stop point (`.claude/state/resume/<session>.md`) in step with compaction: asks for it at the context threshold and on «точка останова», defers auto-compaction until it is fresh, puts it back after compaction. |
 | **dictate** | Voice dictation: `/pack` holds several prompts as one batch until a release word, and misheard project terms are fixed from `~/.claude/dictate-terms.json`. |
+| **mods-help** | `/mods` lists the slash commands the loaded mods serve in this session, read live from the engine, and the mods that work without one — so a new mod's command needs no announcing. |
 
 ### instructions-tuning (`instructions-tuning/`)
 

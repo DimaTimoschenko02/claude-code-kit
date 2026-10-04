@@ -1,0 +1,8 @@
+{
+  "name": "mods-help",
+  "version": "0.1.0",
+  "description": "/mods lists the slash commands the loaded mods serve, so their names need no remembering",
+  "author": {
+    "name": "Dima Timoschenko"
+  }
+}
