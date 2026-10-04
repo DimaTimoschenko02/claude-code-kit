@@ -74,7 +74,9 @@ These are building blocks, not a framework — copy what you want.
   under the matching event in `settings.json` (`PreToolUse` for the two guards, `SessionStart`
   with matcher `compact` for memory-checkpoint). Make them executable (`chmod +x`).
 - **Mods** → list the folders in `CLAUDE_CODE_PLUGIN_DIRS` (colon-separated) under `env` in `~/.claude/settings.json`;
-  it is read at session start, so restart sessions after a change. One-off: `claude --plugin-dir <folder>`.
+  it is read at process start, so restart sessions after a change: `/exit` → `claude -c` for a terminal session,
+  `claude respawn <id>|--all` for background ones (they live in the daemon, reopening the terminal leaves them be).
+  One-off: `claude --plugin-dir <folder>`.
 - **instructions-tuning** (skill + skill-gate hook) → run its own `instructions-tuning/install.sh`.
 - **chat-audit** (skill + extractors + nudge hook) → run its own `chat-audit/install.sh`.
 - **learning-log** → run its own `learning-log/install.sh`.
