@@ -20,6 +20,8 @@ import {
   toggle,
   view,
 } from './logic'
+import { runs, withLead } from './markup'
+import type { Run } from './markup'
 
 type Engine = EngineInterface
 
@@ -30,6 +32,8 @@ const KEY = 'panel:'
 const TTL_MS = 30 * 86_400_000
 /** Wide enough for a card title and its three buttons; the owner's drag or key resize wins and is kept. */
 const COLUMNS = 48
+/** The theme colour a reply's own `code` spans are drawn in; a surface that lacks the key draws the default colour. */
+const CODE_COLOR = 'permission'
 
 const panelAtom = atom({ plugin: 'session-panel', key: 'panel' } as const, emptyPanel(0))
 const editingAtom = atom({ plugin: 'session-panel', key: 'editing' } as const, null)
@@ -193,6 +197,18 @@ export const register: Register = (on, options) => {
     const editing = await read($, editingAtom)
     const v = view(panel, await read($, doneAtom))
 
+    // A line's markdown drawn as styled runs; inside a link item a run's own link is drawn as its label alone.
+    const inline = (list: Run[], id: string, linkable: boolean) =>
+      list.map((r, n) => {
+        const look = {
+          ...(r.bold === undefined ? {} : { bold: true }),
+          ...(r.italic === undefined ? {} : { italic: true }),
+          ...(r.code === undefined ? {} : { color: CODE_COLOR }),
+        }
+        const text = <Text key={`r-${id}-${n}`} {...look}>{r.text}</Text>
+        return r.href !== undefined && linkable ? <Link key={`l-${id}-${n}`} href={r.href}>{text}</Link> : text
+      })
+
     const row = (item: Item, indent = 0) => {
       if (editing === item.id && Input !== null) {
         return (
@@ -215,8 +231,8 @@ export const register: Register = (on, options) => {
           <Button key={`t-${item.id}`} plain label={item.checked ? '☑' : '☐'} onPress={() => change($, p => toggle(p, item.id))} />
           <Text key={`s-${item.id}`}> </Text>
           {item.href === undefined
-            ? <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap" dimColor={item.checked && item.kind !== 'done'}>{item.text}</Text></Box>
-            : <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap"><Link href={item.href} label={item.text} /></Text></Box>}
+            ? <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap" dimColor={item.checked && item.kind !== 'done'}>{inline(withLead(runs(item.text)), item.id, true)}</Text></Box>
+            : <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap"><Link href={item.href}>{inline(runs(item.text), item.id, false)}</Link></Text></Box>}
           <Text key={`g-${item.id}`}> </Text>
           {Input === null ? null : <Button key={`e-${item.id}`} plain dimColor label="✎" onPress={() => update($, editingAtom, () => item.id)} />}
           <Button key={`d-${item.id}`} plain dimColor label="✕" onPress={() => change($, p => remove(p, item.id))} />

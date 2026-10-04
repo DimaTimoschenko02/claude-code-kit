@@ -1,4 +1,5 @@
 import type { Item, Panel } from '../types'
+import { plain } from './markup'
 
 export const DEFAULT_TASK_PATTERN = '\\b[A-Z]{2,}-\\d+\\b'
 /** The store holds every session's panel in 4 MiB of JSON; a panel past this drops its oldest auto lines first. */
@@ -53,9 +54,12 @@ export function labelFor(href: string): string {
   return bare.length > 60 ? `${bare.slice(0, 28)}…${bare.slice(-28)}` : bare
 }
 
-/** Links and `result:` lines of one reply. Code spans are left out: a URL inside backticks is an example, not a place. */
+/**
+ * Links and `result:` lines of one reply. Code blocks and code spans holding an address are left out: a URL inside
+ * backticks is an example, not a place. Other code spans stay, so a link label keeps its `code` and draws it.
+ */
 export function capture(answer: string): Captured {
-  const text = answer.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, '')
+  const text = answer.replace(/```[\s\S]*?```/g, '').replace(/`[^`\n]*`/g, span => (span.includes('://') ? '' : span))
   const links: Captured['links'] = []
   const seen = new Set<string>()
   const add = (href: string, label: string) => {
@@ -63,13 +67,20 @@ export function capture(answer: string): Captured {
     seen.add(href)
     links.push({ href, label })
   }
-  for (const m of text.matchAll(MD_LINK)) add(m[2]!, m[1]!.replace(/[*_`]/g, '').trim())
+  for (const m of text.matchAll(MD_LINK)) add(m[2]!, m[1]!.trim())
   for (const m of text.replace(MD_LINK, ' ').matchAll(BARE_URL)) {
     const href = trimUrl(m[0])
     add(href, labelFor(href))
   }
-  const results = [...answer.matchAll(RESULT_LINE)].map(m => m[1]!.replace(/\*\*/g, '').trim()).filter(Boolean)
+  const results = [...answer.matchAll(RESULT_LINE)].map(m => unwrap(m[1]!)).filter(Boolean)
   return { links, results }
+}
+
+/** `**result: text**` leaves one `**` at the end once `result:` is cut off: that one goes, paired ones stay. */
+function unwrap(text: string): string {
+  const odd = ((text.match(/\*\*/g) ?? []).length) % 2 === 1
+  if (!odd) return text.trim()
+  return (/\*\*\s*$/.test(text) ? text.replace(/\s*\*\*\s*$/, '') : text.replace(/^\s*\*\*\s*/, '')).trim()
 }
 
 export function taskOf(text: string, pattern: RegExp): string | undefined {
@@ -115,10 +126,11 @@ export function merge(panel: Panel, got: Captured, pattern: RegExp, by: Item['by
     if (task !== undefined) item.task = task
     next = { ...next, seq, items: [...next.items, item] }
   }
-  const texts = new Set(panel.items.filter(i => i.kind === 'done').map(i => i.text))
+  // A result is one line whatever marks it carries: a reply that repeats it with `code` or **bold** adds nothing.
+  const texts = new Set(panel.items.filter(i => i.kind === 'done').map(i => plain(i.text)))
   for (const result of got.results) {
-    if (texts.has(result)) continue
-    texts.add(result)
+    if (texts.has(plain(result))) continue
+    texts.add(plain(result))
     const [id, seq] = nextId(next)
     const task = taskOf(result, pattern)
     const item: Item = { id, kind: 'done', text: result, checked: true, by }
