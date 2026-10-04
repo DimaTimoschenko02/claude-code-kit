@@ -2,6 +2,11 @@
 // of the session's own transcript every TTL − 10 minutes reads the cached prefix, which renews its lifetime. The window
 // runs from the reply; the owner's next message ends it. `/warm` picks the window and mode per session, kept in $.store
 // by session id, so a respawn or resume keeps them.
+//
+// The status line shows the cache's real end, warmed or not — the owner reads it to decide whether to come back before
+// the cache dies — and carries stop-point's part on the same line: `кэш до 20:15 · точка 19:42`. stop-point's own
+// `$.ui.status` calls pass through this module's `ui.status` hook, which takes their text and clears stop-point's own
+// row; without this mod loaded stop-point's row shows as it is.
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { SessionWarm } from '../types'
@@ -24,6 +29,8 @@ import {
 type Engine = EngineInterface
 
 export const COMMAND = 'warm'
+/** The plugin whose status shares this mod's line. */
+export const POINT_PLUGIN = 'stop-point'
 const SESSION = 'session:'
 const DEFAULT = 'default'
 const TTL_MS = 60 * 86_400_000
@@ -46,6 +53,17 @@ let nextAt: number | null = null
 let warms = 0
 /** The last fork of this window and what it read, the proof that the warm reached the cache. */
 let lastWarm: { at: number; cacheRead?: number; reason?: string } | null = null
+/** The last moment a request renewed the cache: a reply, a warm that read it, a turn that started. */
+let refreshedAt: number | null = null
+/** The end of the warmed window while warms are planned and none has failed; null otherwise. */
+let windowUntil: number | null = null
+/** Clears the cache part when the cache lapses; `lapseAt` is the moment it is armed for. */
+let lapseTimer: { cancel: () => void } | null = null
+let lapseAt: number | null = null
+/** stop-point's part of the line, as its last `$.ui.status` call gave it. */
+let pointText: string | undefined
+/** The line as last set, so an unchanged one is not set again. */
+let shown: string | undefined
 
 function isSessionWarm(v: unknown): v is SessionWarm {
   if (typeof v !== 'object' || v === null) return false
@@ -67,19 +85,63 @@ async function settings($: Engine) {
   return effective(await own($), await defaultHours($))
 }
 
-function disarm($: Engine): void {
+/** The cache's end as the line shows it, or null when nothing renewed it in this process. */
+function cacheUntil(): number | null {
+  if (refreshedAt === null) return null
+  const fromLast = refreshedAt + cfg.ttlMin * 60_000
+  return windowUntil !== null && windowUntil > fromLast ? windowUntil : fromLast
+}
+
+export function composeStatus(cache: string | undefined, point: string | undefined): string | undefined {
+  const parts = [cache, point].filter((p): p is string => p !== undefined && p !== '')
+  return parts.length === 0 ? undefined : parts.join(' · ')
+}
+
+/** Sets the line from the cache's end and stop-point's part, and arms the clear for the moment the cache lapses. */
+async function show($: Engine, force = false): Promise<void> {
+  const now = await $.clock.now()
+  const until = cacheUntil()
+  const isAlive = until !== null && until > now
+  const text = composeStatus(isAlive ? `кэш до ${hhmm(until, tzOffsetMin)}` : undefined, pointText)
+  if (text !== shown || force) {
+    shown = text
+    void $.ui.status(text)
+  }
+  if (!isAlive) {
+    lapseTimer?.cancel()
+    lapseTimer = null
+    lapseAt = null
+  } else if (lapseAt !== until) {
+    lapseTimer?.cancel()
+    lapseAt = until
+    lapseTimer = $.clock.after(until - now, () => void lapse($))
+  }
+}
+
+/** The cache's end came: a running turn keeps renewing it with its requests; otherwise the cache part goes. */
+async function lapse($: Engine): Promise<void> {
+  lapseTimer = null
+  lapseAt = null
+  if (isTurnRunning) refreshedAt = await $.clock.now()
+  await show($)
+}
+
+/** Ends the warm window: no more forks for it. The line keeps the cache's end that requests already bought. */
+function disarm(): void {
   timer?.cancel()
   timer = null
   nextAt = null
   replyAt = null
-  void $.ui.status(undefined)
+  windowUntil = null
 }
 
 /** Arms, re-plans or disarms from the last reply, the session's mode and window; every change ends here. */
 async function evaluate($: Engine): Promise<void> {
   const { mode } = await settings($)
-  if (isTurnRunning || lastReplyAt === null || stepMs(cfg.ttlMin) === null || !shouldWarm(mode, lastKind)) {
-    disarm($)
+  if (isTurnRunning) return
+  if (lastReplyAt === null || stepMs(cfg.ttlMin) === null || !shouldWarm(mode, lastKind)) {
+    disarm()
+    await show($)
     return
   }
   timer?.cancel()
@@ -92,28 +154,21 @@ async function evaluate($: Engine): Promise<void> {
   await plan($)
 }
 
-/** Sets the timer for the next warm, or leaves the status saying when the cache lapses. */
+/** Sets the timer for the next warm and the window's end the line shows. */
 async function plan($: Engine): Promise<void> {
   if (replyAt === null) return
   const { hours } = await settings($)
   const now = await $.clock.now()
-  const until = aliveUntil(replyAt, hours, cfg.ttlMin)
+  windowUntil = lastWarm?.reason === undefined ? aliveUntil(replyAt, hours, cfg.ttlMin) : null
   const at = nextWarm(replyAt, now, hours, cfg.ttlMin)
-  await $.ui.status(until > now ? `кэш до ${hhmm(until, tzOffsetMin)}` : undefined)
   const from = replyAt
   nextAt = at
-  if (at === null) {
-    // The window is covered: the status goes when the cache does, not with the owner's next look.
-    if (until > now) timer = $.clock.after(until - now, () => void lapse($, from))
-    return
+  if (at !== null) {
+    timer = $.clock.after(Math.max(0, at - now), () => {
+      void warm($, from)
+    })
   }
-  timer = $.clock.after(Math.max(0, at - now), () => {
-    void warm($, from)
-  })
-}
-
-function lapse($: Engine, from: number): void {
-  if (replyAt === from) disarm($)
+  await show($)
 }
 
 async function warm($: Engine, from: number): Promise<void> {
@@ -126,12 +181,14 @@ async function warm($: Engine, from: number): Promise<void> {
     if (r.isAnswered) {
       warms++
       lastWarm = { at, cacheRead: r.usage.cache_read_input_tokens }
+      refreshedAt = at
       await $.ui.log(`cache-warm: warm ${warms}, ${r.usage.cache_read_input_tokens} tokens read from cache`, { to: 'debug' })
     } else {
       lastWarm = { at, reason: r.reason }
       await $.ui.log(`cache-warm: warm failed (${r.reason})`, { to: 'debug' })
       if (r.reason === 'nothing-to-fork') {
-        disarm($)
+        disarm()
+        await show($)
         return
       }
     }
@@ -170,10 +227,12 @@ async function statusText($: Engine): Promise<string> {
     const now = await $.clock.now()
     const until = replyAt === null ? null : aliveUntil(replyAt, s.hours, cfg.ttlMin)
     if (until === null || until <= now) {
+      const cache = cacheUntil()
       lines.push(
-        lastReplyAt !== null && !isTurnRunning && !shouldWarm(s.mode, lastKind)
+        (lastReplyAt !== null && !isTurnRunning && !shouldWarm(s.mode, lastKind)
           ? 'Сейчас не греет: последний ответ не ждёт тебя (`/warm on` — греть и такие).'
-          : 'Сейчас не греет: ждёт следующего ответа.',
+          : 'Сейчас не греет: ждёт следующего ответа.') +
+          (cache !== null && cache > now ? ` Кэш жив до ${hhmm(cache, tzOffsetMin)}.` : ''),
       )
     } else {
       lines.push(`Греет: ${nextText(now)}, кэш жив до ${hhmm(until, tzOffsetMin)}.`)
@@ -192,8 +251,9 @@ export const register: Register = (on, options) => {
   }
 
   on('session.start', async ($, e, next) => {
-    disarm($)
+    disarm()
     lastReplyAt = null
+    refreshedAt = null
     isTurnRunning = false
     sid = await $.session.id()
     await $.command.register({
@@ -212,12 +272,17 @@ export const register: Register = (on, options) => {
       const v = await $.store.get(key)
       if (!isSessionWarm(v) || now - v.at > TTL_MS) await $.store.delete(key)
     }
+    // After a reload the screen keeps the old instance's line, whatever this one last set.
+    await show($, true)
     return next(e)
   })
 
-  // A main-thread turn only: turn.start follows prompt.submit, which a subagent never passes.
-  on('turn.start', ($, e, next) => {
+  // A main-thread turn only: turn.start follows prompt.submit, which a subagent never passes. Its requests renew the
+  // cache, so the line moves to a TTL from now instead of going blank while the turn runs.
+  on('turn.start', async ($, e, next) => {
     isTurnRunning = true
+    refreshedAt = await $.clock.now()
+    await show($)
     return next(e)
   })
 
@@ -227,20 +292,31 @@ export const register: Register = (on, options) => {
     isTurnRunning = false
     sid = await $.session.id()
     lastReplyAt = await $.clock.now()
+    refreshedAt = lastReplyAt
     lastKind = e.isAborted ? 'other' : classify(e.answer)
     await evaluate($)
     return r
   })
 
   // The owner is here: their message renews the cache with the turn it starts.
-  on('prompt.submit', ($, e, next) => {
+  on('prompt.submit', async ($, e, next) => {
     // A slash command is no turn of the model: `/warm on` must not end the window it sets.
     const isCommand = e.text.trimStart().startsWith('/')
     if ((e.origin.kind === 'composer' || e.origin.kind === 'bridge') && !isCommand) {
-      disarm($)
+      disarm()
       lastReplyAt = null
+      await show($)
     }
     return next(e)
+  })
+
+  // stop-point's line joins this one: its text is kept and its own row cleared. Our own calls pass through.
+  on('ui.status', async ($, e, next) => {
+    if (next.origin.plugin !== POINT_PLUGIN) return next(e)
+    const r = await next({ ...e, text: undefined })
+    pointText = e.text
+    await show($)
+    return r
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {

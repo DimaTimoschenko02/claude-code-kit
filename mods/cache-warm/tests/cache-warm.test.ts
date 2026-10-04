@@ -22,10 +22,22 @@ const NOTHING = ['**Ждёт тебя:** от тебя ничего.', '', '### 
 const NEEDS_INPUT = 'Упёрся в доступ.\n\nneeds input: дай токен GitHub с правом repo'
 const MID_WORK = 'Тесты прошли, дальше подключаю мод в settings.'
 
-type World = { store: Map<string, unknown>; forks: number; statuses: (string | undefined)[]; sid: { value: string }; clock: ReturnType<typeof mock.clock> }
+type World = {
+  store: Map<string, unknown>
+  forks: number
+  /** Every line cache-warm set, in order. */
+  statuses: (string | undefined)[]
+  /** The row each plugin holds on screen now: the engine keeps one per plugin. */
+  rows: Map<string, string | undefined>
+  sid: { value: string }
+  clock: ReturnType<typeof mock.clock>
+}
+
+/** What the status bar shows: every plugin's row that is set. */
+const onScreen = (w: World) => [...w.rows.values()].filter(t => t !== undefined)
 
 function world(on: On): World {
-  const w: World = { store: new Map(), forks: 0, statuses: [], sid: { value: 'sess-1' }, clock: mock.clock(on, { now: T0 }) }
+  const w: World = { store: new Map(), forks: 0, statuses: [], rows: new Map(), sid: { value: 'sess-1' }, clock: mock.clock(on, { now: T0 }) }
   on('store.get', (_$, e) => ({ value: w.store.get(e.key) }))
   on('store.set', (_$, e) => {
     w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
@@ -49,8 +61,9 @@ function world(on: On): World {
       },
     } as never
   })
-  on('ui.status', (_$, e) => {
-    w.statuses.push(e.text)
+  on('ui.status', (_$, e, next) => {
+    if (next.origin.plugin === 'cache-warm') w.statuses.push(e.text)
+    w.rows.set(next.origin.plugin, e.text)
     return { value: undefined }
   })
   on('ui.log', () => ({ value: undefined }))
@@ -177,7 +190,8 @@ describe('session', () => {
     await w.clock.advance(50 * MIN)
     expect(w.forks).toBe(1)
     await $.prompt.submit({ text: 'дальше', wait: false, origin: { kind: 'composer' } })
-    expect(w.statuses.at(-1)).toBeUndefined()
+    // The warm at 13:50 renewed the cache for an hour; the window's later warms are off.
+    expect(w.statuses.at(-1)).toBe('кэш до 14:50')
     await w.clock.advance(100 * MIN)
     expect(w.forks).toBe(1)
   })
@@ -212,5 +226,90 @@ describe('session', () => {
     await reply($, WAITS)
     await w.clock.advance(120 * MIN)
     expect(w.forks).toBe(0)
+  })
+})
+
+describe('status line', () => {
+  test('a result-only reply in auto mode is not warmed, yet the line says the cache lives an hour after it', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, NOTHING)
+    expect(w.statuses.at(-1)).toBe('кэш до 14:00')
+    await reply($, MID_WORK)
+    expect(w.statuses.at(-1)).toBe('кэш до 14:00')
+    await w.clock.advance(59 * MIN)
+    expect(w.statuses.at(-1)).toBe('кэш до 14:00')
+    await w.clock.advance(1 * MIN)
+    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(w.forks).toBe(0)
+  })
+
+  test('a running turn keeps the line instead of blanking it, a TTL from its start, renewed while it runs', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, NOTHING)
+    await w.clock.advance(30 * MIN)
+    await $.prompt.submit({ text: 'дальше', wait: false, origin: { kind: 'composer' } })
+    await $.turn.start({ text: 'дальше', turnId: 't2' } as never)
+    expect(w.statuses.at(-1)).toBe('кэш до 14:30')
+    // A turn longer than the TTL still sends requests: the cache part does not go mid-turn.
+    await w.clock.advance(70 * MIN)
+    expect(w.statuses.at(-1)).toBe('кэш до 15:30')
+    // Nothing blank since the first reply (the one before it is the empty line set at start).
+    expect(w.statuses.slice(1)).not.toContain(undefined)
+  })
+
+  test('/warm off after a reply that was warmed shows the cache the last warm bought', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, WAITS)
+    await w.clock.advance(50 * MIN)
+    expect(w.forks).toBe(1)
+    await warm($, 'off')
+    expect(w.statuses.at(-1)).toBe('кэш до 14:50')
+  })
+
+  test(
+    'with stop-point loaded both parts share one line and stop-point keeps no row of its own',
+    {
+      plugins: [
+        {
+          name: 'stop-point',
+          register(on) {
+            on('turn.complete', async ($, e, next) => {
+              const r = await next(e)
+              if (e.agentId === undefined) $.ui.status(`точка ${e.answer.length > 50 ? '13:00' : '12:00'}`)
+              return r
+            })
+            on('prompt.submit', ($, e, next) => {
+              if (e.text === 'compact') $.ui.status('точка пишется…')
+              if (e.text === 'gone') $.ui.status(undefined)
+              return next(e)
+            })
+          },
+        },
+      ],
+    },
+    async ($, on) => {
+      const w = world(on)
+      await start($)
+      await reply($, WAITS)
+      expect(onScreen(w)).toEqual(['кэш до 15:40 · точка 13:00'])
+      expect(w.rows.get('stop-point')).toBeUndefined()
+      await $.prompt.submit({ text: 'compact', wait: false, origin: { kind: 'composer' } })
+      expect(onScreen(w)).toEqual(['кэш до 14:00 · точка пишется…'])
+      // The cache lapsed: the point stays alone on the line.
+      await w.clock.advance(60 * MIN)
+      expect(onScreen(w)).toEqual(['точка пишется…'])
+      await $.prompt.submit({ text: 'gone', wait: false, origin: { kind: 'composer' } })
+      expect(onScreen(w)).toEqual([])
+    },
+  )
+
+  test('without stop-point (not loaded or stood down) the line is the cache alone', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, WAITS)
+    expect(onScreen(w)).toEqual(['кэш до 15:40'])
   })
 })

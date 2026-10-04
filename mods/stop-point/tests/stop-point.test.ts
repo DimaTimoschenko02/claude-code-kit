@@ -34,6 +34,8 @@ type World = {
   settings: { project: Record<string, unknown>; local: Record<string, unknown>; user: Record<string, unknown> }
   messages: SessionMessage[]
   status: (string | undefined)[]
+  /** The row each plugin holds on screen: the engine keeps one per plugin. */
+  rows: Map<string, string | undefined>
   toasts: string[]
   runs: (readonly string[])[]
   prompts: { text: string; context: readonly string[] }[]
@@ -64,6 +66,7 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
     settings: { project: {}, local: {}, user: {}, ...opts.settings },
     messages: [],
     status: [],
+    rows: new Map(),
     toasts: [],
     runs: [],
     prompts: [],
@@ -140,8 +143,9 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
     w.commands.push(e.name)
     return { value: { command: e.name } }
   })
-  on('ui.status', (_$, e) => {
+  on('ui.status', (_$, e, next) => {
     w.status.push(e.text)
+    w.rows.set(next.origin.plugin, e.text)
     return { value: undefined }
   })
   on('ui.toast', (_$, e) => {
@@ -224,6 +228,15 @@ describe('a write after every reply', () => {
     expect(w.files.get(`${HOME}/.claude/state/stop-point/writes.log`)?.text).toMatch(
       /reply written \d+\.\ds msgs=3 chars=\d+ bytes=\d+ in=1200 out=300 cache_read=0 cache_write=0/,
     )
+  })
+
+  test('without cache-warm loaded the point keeps its own status row', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    expect([...w.rows.entries()]).toEqual([['stop-point', `точка ${clockTime(START)}`]])
   })
 
   test('a subagent\'s turn writes nothing', async ($, on) => {
