@@ -193,9 +193,11 @@ const IS_TYPEWORD = (w: string) => NOT_VALUES.has(w.toLowerCase()) || /^[A-Z][a-
 export function valueToHide(raw: string, ctx: { quoted: boolean; upperName: boolean; eol: boolean; minLen?: number }): string | null {
   let v = raw
   if (!ctx.quoted) {
-    // a value that runs into a JSON tail (`pw","user":"x"`) ends where the tail begins: the mask covers the value only
-    const tail = v.search(/["'],\s*["'][^"'\n]{0,80}["']\s*:/)
-    if (tail > 0) v = v.slice(0, tail)
+    // a to-end-of-line value that runs into a JSON line (`pw","user":"x"`) ends where the next key begins
+    if (ctx.eol) {
+      const tail = v.search(/"\s*,\s*"[A-Za-z_$][\w$.-]*"\s*:/)
+      if (tail > 0) v = v.slice(0, tail)
+    }
     v = v.replace(/\s+#.*$/, '').trim().replace(/[;,]+['"`)\]]*[;,]*$/, '').trim()
     if (/^[A-Za-z]+[.:!?]$/.test(v)) v = v.slice(0, -1) // a word ending a sentence in prose (--api-key=value.)
   }
@@ -251,8 +253,8 @@ export function isKnownCandidate(value: string, secretName: boolean): boolean {
   const v = value.trim()
   if (v.length < 8 || v.length > 8192) return false
   if (/^\d+$/.test(v)) return false
-  // JSON structure (`x","n":3`) is a rule's overreach into the line, never a value worth hiding everywhere
-  if (/["'],\s*["']|["']\s*:\s*["'\d{[]/.test(v)) return false
+  // a JSON key inside (`x","n":3`) is a rule's overreach into the line, never a value worth hiding everywhere
+  if (/"[A-Za-z_$][\w$.-]*"\s*:/.test(v)) return false
   if (/\s/.test(v) && !/^[a-z]{4}( [a-z]{4}){3}$/.test(v)) return false
   if (isPlaceholder(v) || isReference(v) || COMMON_VALUES.has(v.toLowerCase())) return false
   if (/^(\/|~\/|\.\.?\/|[A-Za-z]:\\)/.test(v)) return false // paths
@@ -679,18 +681,26 @@ function redactK8sSecret(t: string): string {
 }
 
 /**
- * A ~/.pgpass line, `host:port:db:user:password`, each field as libpq reads it: `\\:` and `\\\\` escapes, no
- * unescaped colon inside a field, the password ended by the line or the first unescaped colon. The host, db and user
- * are names (no quotes, braces or spaces) and the port is `*` or a Postgres-range number, so a `grep -n` hit
- * (`file:12:a:b:c`), a timestamp or a JSON log line is not one; a grep prefix before a real line is allowed. A placeholder
- * already there (its `‹secret:` holds a colon) is not a password.
+ * A ~/.pgpass line, `host:port:db:user:password`, read as libpq reads it: any characters in a field, `\:` and `\\`
+ * escaped, the password ended by the line or the first unescaped colon, so a mask never runs past it. A grep prefix
+ * (`file:N:` or `N:`) before a real line is allowed. The shape also fits ordinary lines; those are turned away by what
+ * they are (pgpassOverreach), not by narrowing what a real line may hold.
  */
-const PG_HOST = String.raw`(?:[\w.*/%-]|\\[^\s])+`
-const PG_NAME = String.raw`(?:[\w.$*@+-]|\\[^\s])+`
+const PG_FIELD = String.raw`(?:[^:\\\n]|\\[^\n])+`
+const PG_WORD = String.raw`(?:[^:\\\s]|\\[^\s])+`
 const PGPASS_RE = new RegExp(
-  String.raw`^((?:[^\s:]{1,300}:\d{1,7}:)?${PG_HOST}:(?:\*|[1-9]\d{3,4}):${PG_NAME}:${PG_NAME}:)(?!‹secret:)((?:[^:\\\s]|\\[^\s])+)(?=[ \t\r]*$|:)`,
+  String.raw`^(((?:(?:[^\s:]{1,300}:)?\d{1,7}[:-])?)((?![#])${PG_WORD}):(\d{1,5}|\*):${PG_FIELD}:${PG_FIELD}:)(?!‹secret:)(${PG_WORD})(?=[ \t\r]*$|:)(?=([^\n]*))`,
   'gm',
 )
+/** File names `grep -n` prints before a line number; a host never ends so. */
+const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|jsonl?|json5|md|mdx|ya?ml|toml|ini|conf|cfg|env|log|txt|csv|tsv|sql|sh|bash|zsh|py|rb|php|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|html?|css|scss|vue|svelte|xml|lock|tpl|twig|gradle|properties)$/i
+
+/** A line in the .pgpass shape that is something else: a grep -n hit, a clock time or MAC address, a JSON line. */
+function pgpassOverreach(line: string, prefix: string, host: string, port: string): boolean {
+  if (!prefix && SOURCE_FILE.test(host) && /^\d+$/.test(port)) return true // notes.md:3:a:b:c
+  if (/(?:^|T)\d{1,2}$/.test(host) && /^\d{2}$/.test(port)) return true // 12:34:56:…, 2026-10-04T18:48:12Z, 00:11:22:…
+  return /"[^"\s:]{1,80}"\s*:/.test(line) // a JSON key: `{"agent":"probe:…`
+}
 
 /** ~/.netrc and ~/.pgpass lines, docker config "auth". */
 function redactCredentialLines(t: string): string {
@@ -699,8 +709,8 @@ function redactCredentialLines(t: string): string {
     t = t.replace(/^([ \t]*(?:(?:machine|default)(?:[ \t]+\S+)?[ \t]+)?(?:login[ \t]+\S+[ \t]+)?password[ \t]+)(\S+)([ \t]*(?:account[ \t]+\S+)?[ \t]*)$/gm, (m, head: string, v: string, tail: string) =>
       v.startsWith(MARK) || isPlaceholder(v) ? m : (note(v, 'netrc-password'), `${head}${placeholder('netrc-password')}${tail}`))
   }
-  t = t.replace(PGPASS_RE, (m, head: string, v: string) =>
-    v === '*' ? m : (note(v, 'pgpass-password'), `${head}${placeholder('pgpass-password')}`))
+  t = t.replace(PGPASS_RE, (m, head: string, prefix: string, host: string, port: string, v: string, rest: string) =>
+    v === '*' || pgpassOverreach(head + v + rest, prefix, host, port) ? m : (note(v, 'pgpass-password'), `${head}${placeholder('pgpass-password')}`))
   t = t.replace(/("auth"\s*:\s*")([A-Za-z0-9+/=]{16,})(")/g, (_m, a: string, v: string, b: string) => (note(v, 'docker-auth'), `${a}${placeholder('docker-auth')}${b}`))
   return t
 }

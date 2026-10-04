@@ -795,9 +795,32 @@ describe('a line rule hides one field, never ordinary output', () => {
     expect(out).toBe('  password: ‹secret:password›","user":"acme","retries":3\n')
   })
 
+  test('a long pgpass password with any names is hidden and learned for later outputs', async ($, on) => {
+    const w = world(on)
+    const pw = 'Fk9pgpassLongValue42'
+    const out = stdoutOf(await bash($, w, `localhost:543:книги:app%ro#1:${pw}\n`, 'cat ~/.pgpass'))
+    expect(out).not.toContain(pw)
+    expect(stdoutOf(await bash($, w, `${pw}\n`, 'echo'))).not.toContain(pw)
+  })
+
+  test('a secret-named value holding quotes, colons and commas is hidden whole and learned', async ($, on) => {
+    const w = world(on)
+    for (const [text, pw] of [
+      [`DB_PASSWORD='Xy7":9abcQ4mZ8pLw'\n`, 'Xy7":9abcQ4mZ8pLw'],
+      [`password: p0','Wq8zR2kT5vNx\n`, "p0','Wq8zR2kT5vNx"],
+      [`"api_token": "Rt5\\":7,\\"zQ9mK2pL8"\n`, 'Rt5\\":7,\\"zQ9mK2pL8'],
+    ] as const) {
+      const out = stdoutOf(await bash($, w, text, 'cat cfg'))
+      expect({ text, out: out.includes(pw) }).toEqual({ text, out: false })
+      expect({ pw, later: stdoutOf(await bash($, w, `${pw}\n`, 'echo')).includes(pw) }).toEqual({ pw, later: false })
+    }
+  })
+
   test('a JSON fragment is never a value known everywhere; a random token still is', () => {
     expect(isKnownCandidate('k7Qx2","input_tokens":1840,"output_tokens":412,"cost_usd":0.0213}', false)).toBe(false)
     expect(isKnownCandidate('Qz8rT4vW2xy9","user":"acme"', true)).toBe(false)
+    expect(isKnownCandidate('Xy7":9abcQ4mZ8pLw', false)).toBe(true)
+    expect(isKnownCandidate("p0','Wq8zR2kT5vNx", false)).toBe(true)
     expect(isKnownCandidate('Lrn3dT0kenValue9xQ2mZ7pK4wR8sV1yB6', false)).toBe(true)
     expect(isKnownCandidate(FAKE.pgpassPw, true)).toBe(true)
   })
@@ -816,6 +839,12 @@ describe('a line rule hides one field, never ordinary output', () => {
       // an escaped colon belongs to the password; libpq ends it at the first unescaped one
       [`localhost:5432:acme:acme:ab\\:${pw}`, `localhost:5432:acme:acme:${mark}`],
       [`localhost:5432:acme:acme:${pw}:old-field`, `localhost:5432:acme:acme:${mark}:old-field`],
+      // libpq takes any name and port: Cyrillic, punctuation, a low port, a leading zero, grep -n of one file
+      [`localhost:5432:книги:менеджер:${pw}`, `localhost:5432:книги:менеджер:${mark}`],
+      [`db.local:5432:shop:app%ro#1!=~:${pw}`, `db.local:5432:shop:app%ro#1!=~:${mark}`],
+      [`localhost:543:acme:acme:${pw}`, `localhost:543:acme:acme:${mark}`],
+      [`localhost:05432:acme:acme:${pw}`, `localhost:05432:acme:acme:${mark}`],
+      [`1:localhost:5432:acme:acme:${pw}`, `1:localhost:5432:acme:acme:${mark}`],
     ]
     for (const [line, hidden] of cases) {
       const out = redactText(`${line}\nnext line stays\n`, EMPTY_INDEX)
