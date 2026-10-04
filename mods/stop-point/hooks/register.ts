@@ -13,6 +13,7 @@ import { atom, read, update } from 'claude-code'
 import type { StopPointSession } from '../types'
 import {
   COMPACT_WAIT_MS,
+  SIZE_SOFT,
   INITIAL,
   MAX_REPLY_TOKENS,
   WRITER_MODEL,
@@ -26,8 +27,14 @@ import {
   deltaFrom,
   failureReason,
   lostRefs,
+  lostAnchors,
+  noTranscriptError,
   norm,
   parseReply,
+  reaskIssues,
+  reaskPrompt,
+  restoreAnchors,
+  utf8Bytes,
   releaseRun,
   renderDelta,
   resumeText,
@@ -161,8 +168,26 @@ type Outcome = {
   ms: number
   count: number
   chars: number
-  usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
+  usage?: Usage
+  /** The writer was asked once more: anchors it dropped, or a file over the size bound. */
+  reask?: boolean
+  /** Anchors put back mechanically after the second answer still lacked them. */
+  restored?: number
+  /** The written file's size in UTF-8 bytes. */
+  bytes?: number
 }
+
+type Usage = { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
+
+const addUsage = (a: Usage, b: Usage): Usage => ({
+  input_tokens: a.input_tokens + b.input_tokens,
+  output_tokens: a.output_tokens + b.output_tokens,
+  cache_read_input_tokens: a.cache_read_input_tokens + b.cache_read_input_tokens,
+  cache_creation_input_tokens: a.cache_creation_input_tokens + b.cache_creation_input_tokens,
+})
+
+/** A re-ask needs at least this much of the run's time left; with less, dropped anchors are restored mechanically. */
+const REASK_MIN_MS = 15_000
 
 /**
  * One write: the delta since the cursor, the writer's completion, then — if no newer generation landed meanwhile —
@@ -194,38 +219,66 @@ async function writeOnce(
   }
 
   const previous = await pointFile($, c)
-  const r = await $.model.complete({
-    model: WRITER_MODEL,
-    system: WRITER_SYSTEM,
-    prompt: writerPrompt({
-      templatePath: c.templatePath,
-      templateBody: c.templateBody,
-      pointPath: c.pointPath,
-      previous,
-      delta: rendered.text,
-      count: rendered.count,
-      root: c.root,
-      now: t0,
-    }),
-    maxTokens: MAX_REPLY_TOKENS,
-    effort: 'medium',
-    timeoutMs,
+  const prompt = writerPrompt({
+    templatePath: c.templatePath,
+    templateBody: c.templateBody,
+    pointPath: c.pointPath,
+    previous,
+    delta: rendered.text,
+    count: rendered.count,
+    root: c.root,
+    now: t0,
   })
-  const now = await $.clock.now()
+  const ask = (text: string, ms: number) =>
+    $.model.complete({
+      model: WRITER_MODEL,
+      system: WRITER_SYSTEM,
+      prompt: text,
+      maxTokens: MAX_REPLY_TOKENS,
+      effort: 'medium',
+      timeoutMs: ms,
+    })
+  const r = await ask(prompt, timeoutMs)
+  let usage: Usage = r.usage
+  let now = await $.clock.now()
+  if (!r.isAnswered) return { ...(await fail(failureReason(r), now - t0)), usage }
+  let reply = parseReply(r.text)
+  if (reply.kind === 'empty') return { ...(await fail('пустой ответ', now - t0)), usage }
+
+  // Checks in code, not in the prompt alone: the previous point's anchors survive unless the delta closed them, and
+  // the file stays near the template's 3 KB. One re-ask for both; what is still dropped is put back mechanically.
+  // The file is never cut: an oversize second answer is written as it is and logged.
+  const extra = { reask: false, restored: 0 }
+  if (reply.kind === 'written') {
+    const prevText = previous?.text ?? ''
+    const issues = reaskIssues(lostAnchors(prevText, reply.body, rendered.text), utf8Bytes(reply.body))
+    const left = timeoutMs - (now - t0)
+    if (issues.length > 0 && left >= REASK_MIN_MS) {
+      extra.reask = true
+      const r2 = await ask(reaskPrompt(prompt, reply.body, issues), left)
+      usage = addUsage(usage, r2.usage)
+      now = await $.clock.now()
+      const second = r2.isAnswered ? parseReply(r2.text) : null
+      if (second !== null && second.kind === 'written') reply = second
+    }
+    const still = lostAnchors(prevText, reply.body, rendered.text)
+    if (still.length > 0) {
+      reply = { kind: 'written', body: restoreAnchors(reply.body, prevText, still) }
+      extra.restored = still.length
+    }
+  }
   const ms = now - t0
-  if (!r.isAnswered) return { ...(await fail(failureReason(r), ms)), usage: r.usage }
-  const reply = parseReply(r.text)
-  if (reply.kind === 'empty') return { ...(await fail('пустой ответ', ms)), usage: r.usage }
-  if ((await $.session.id()) !== c.sid) return { kind: 'discarded', ms, ...base, usage: r.usage }
+  const bytes = reply.kind === 'written' ? utf8Bytes(reply.body) : undefined
+  if ((await $.session.id()) !== c.sid) return { kind: 'discarded', ms, ...base, usage }
 
   const last = {
     kind: reply.kind,
     at: now,
     ms,
-    input: r.usage.input_tokens,
-    output: r.usage.output_tokens,
-    cacheRead: r.usage.cache_read_input_tokens,
-    cacheWrite: r.usage.cache_creation_input_tokens,
+    input: usage.input_tokens,
+    output: usage.output_tokens,
+    cacheRead: usage.cache_read_input_tokens,
+    cacheWrite: usage.cache_creation_input_tokens,
   }
   const out = { applied: false }
   await change($, v => {
@@ -233,15 +286,15 @@ async function writeOnce(
     if (!out.applied) return v
     return { ...v, appliedGen: gen, cursor, last, error: null }
   })
-  if (!out.applied) return { kind: 'discarded', ms, ...base, usage: r.usage }
+  if (!out.applied) return { kind: 'discarded', ms, ...base, usage }
   if (reply.kind === 'written') {
     try {
       await writeFileAtomic($, c.pointPath, reply.body, gen)
     } catch (err) {
-      return { ...(await fail(`запись файла: ${String(err).slice(0, 60)}`, ms)), usage: r.usage }
+      return { ...(await fail(`запись файла: ${String(err).slice(0, 60)}`, ms)), usage }
     }
   }
-  return { kind: reply.kind, ms, ...base, usage: r.usage }
+  return { kind: reply.kind, ms, ...base, usage, ...extra, bytes }
 }
 
 /** One line per run in the debug log and in writes.log (bounded), so the cost per reply can be measured later. */
@@ -251,7 +304,11 @@ async function logRun($: EngineInterface, c: Config, where: 'reply' | 'compact',
     ? ''
     : ` in=${u.input_tokens} out=${u.output_tokens} cache_read=${u.cache_read_input_tokens} cache_write=${u.cache_creation_input_tokens}`
   const what = o.kind === 'error' ? `error(${o.reason ?? '?'})` : o.kind
-  const line = `${where} ${what} ${(o.ms / 1000).toFixed(1)}s msgs=${o.count} chars=${o.chars}${cost}`
+  const checks =
+    (o.bytes === undefined ? '' : ` bytes=${o.bytes}${o.bytes > SIZE_SOFT ? ' oversize' : ''}`) +
+    (o.reask === true ? ' reask' : '') +
+    (o.restored !== undefined && o.restored > 0 ? ` restored=${o.restored}` : '')
+  const line = `${where} ${what} ${(o.ms / 1000).toFixed(1)}s msgs=${o.count} chars=${o.chars}${checks}${cost}`
   $.ui.log(`stop-point: ${line}`, { to: 'debug' })
   try {
     const stamp = new Date(await $.clock.now()).toISOString()
@@ -273,7 +330,18 @@ async function backgroundLoop($: EngineInterface, first: number): Promise<void> 
     let c: Config | null = null
     try {
       c = await config($)
-      const messages = await $.session.messages()
+      let messages: readonly SessionMessage[]
+      try {
+        messages = await $.session.messages()
+      } catch (err) {
+        if (!noTranscriptError(err)) throw err
+        // An SDK or headless host keeps no transcript for plugins: nothing to write from, ever, in this session.
+        // Not a failure — no log line, no error, no status.
+        await change($, v => ({ ...v, noTranscript: true, writing: null, dirty: false, error: null })).catch(() => null)
+        shownStatus = undefined
+        $.ui.status(undefined)
+        return
+      }
       outcome = await writeOnce($, c, current, messages, WRITE_TIMEOUT_MS)
     } catch (err) {
       const reason = `сбой: ${String(err).slice(0, 60)}`
@@ -319,6 +387,7 @@ async function commandText($: EngineInterface): Promise<string> {
     const age = Math.max(0, Math.round((now - file.mtimeMs) / 60_000))
     lines.push(`Файл записан в ${clockTime(file.mtimeMs)} (${age} мин назад); обновляется в фоне после каждого ответа (Sonnet).`)
   }
+  if (s.noTranscript) lines.push('Хост этой сессии (SDK, без терминала) не даёт плагинам транскрипт — точка здесь не ведётся.')
   if (s.writing !== null || compacting) lines.push('Сейчас пишется.')
   if (s.error !== null) lines.push(`Последний запуск не удался: ${s.error}.`)
   if (s.last !== null) {
@@ -452,7 +521,7 @@ export const register: Register = on => {
     // the last one) is written now, over the transcript being compacted, bounded so a compaction never wedges.
     try {
       const s = await readState($)
-      if (s.writing !== null || deltaFrom(e.messages, s.cursor).length > 0) {
+      if (!s.noTranscript && (s.writing !== null || deltaFrom(e.messages, s.cursor).length > 0)) {
         const out = { gen: 0 }
         await change($, v => {
           const claim = claimForCompaction(v)

@@ -49,6 +49,11 @@ export type StopPointSession = {
   pointDue: boolean
   /** Model-only blocks waiting for the next main tool call or prompt (files and links the summary dropped). */
   pending: string[]
+  /**
+   * The session has no transcript for plugins (an Agent SDK or headless host: `$.session.messages` is not available).
+   * The mod stands down in it for good: no write, no status, no error.
+   */
+  noTranscript: boolean
 }
 
 declare module 'claude-code' {
