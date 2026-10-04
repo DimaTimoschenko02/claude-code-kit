@@ -17,7 +17,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { scrub } from './scrub.mjs';
+import { scrubHead } from './scrub.mjs';
 import { projectFolders } from './discover.mjs';
 
 // ---------------------------------------------------------------- normalize
@@ -174,7 +174,7 @@ export function analyze(projectDir, opts = {}) {
               const reason = b[2].replace(/\\[nrt]/g, ' ').replace(/\\"/g, '"')
                 .replace(/\s+/g, ' ').trim();
               if (reason.length > 8 && !D.blockReason.has(b[1])) {
-                D.blockReason.set(b[1], scrub(reason.slice(0, 160)));
+                D.blockReason.set(b[1], scrubHead(reason, 160));
               }
             }
             if (DENIED.test(blob)) D.denials++;
@@ -186,7 +186,7 @@ export function analyze(projectDir, opts = {}) {
         if (rec.toolUseResult && typeof rec.toolUseResult === 'object') {
           const err = String(rec.toolUseResult.stderr || '').slice(0, 400);
           if (err && FAIL.test(err)) {
-            const head = scrub(err.trim().split('\n')[0].slice(0, 120));
+            const head = scrubHead(err.trim().split('\n')[0], 120);
             bump(D.fails, head);
           }
         }
@@ -223,7 +223,7 @@ export function analyze(projectDir, opts = {}) {
 
             const norm = normalizeCmd(cmd);
             bump(D.cmdNorm, norm);
-            if (!D.cmdExample.has(norm)) D.cmdExample.set(norm, scrub(cmd.slice(0, 220)));
+            if (!D.cmdExample.has(norm)) D.cmdExample.set(norm, scrubHead(cmd, 220));
 
             const k = `${sid} ${norm}`;
             if (lastSeen.has(k) && seq - lastSeen.get(k) <= 3) bump(D.retries, norm);
@@ -232,7 +232,7 @@ export function analyze(projectDir, opts = {}) {
             for (const [lang, code] of extractInline(cmd)) {
               const sig = inlineSignature(code);
               if (!sig) continue;
-              if (!D.inline.has(sig)) D.inline.set(sig, { n: 0, lang, sample: scrub(code.trim().slice(0, 300)), sessions: new Set() });
+              if (!D.inline.has(sig)) D.inline.set(sig, { n: 0, lang, sample: scrubHead(code.trim(), 300), sessions: new Set() });
               const slot = D.inline.get(sig);
               slot.n++;
               slot.sessions.add(sid);

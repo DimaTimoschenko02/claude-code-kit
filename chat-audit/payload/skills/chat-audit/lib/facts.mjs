@@ -9,7 +9,7 @@
 //   lastAssistantReply(file) — assistant text after the user's last real prompt
 import fs from 'node:fs';
 import path from 'node:path';
-import { scrub } from './scrub.mjs';
+import { scrub, scrubHead } from './scrub.mjs';
 
 // Not the user speaking: harness notices, compaction summaries, slash-command echoes, interrupts.
 const NOISE = /^(?:This session is being continued|Caveat: The messages below|<local-command|<command-name|<command-message|<system-reminder>|<task-notification>|<cross-session-message|<agent-message|\[SYSTEM NOTIFICATION|Another Claude session sent a message|Stop hook feedback|\[Request interrupted)/;
@@ -57,6 +57,8 @@ export function isRealPrompt(o) {
 }
 
 const cap = (s, n) => (s.length > n ? `${s.slice(0, n)}\n…[+${s.length - n} chars]` : s);
+// Raw text is cut only after scrubbing: a cut first can halve a token so that no shape matches its head.
+const capScrub = (s, n) => (s.length > n ? `${scrubHead(s, n)}\n…[+${s.length - n} chars]` : scrub(s));
 
 // A result too large for the transcript is persisted beside it; the body only says where.
 function persistedOutput(body, n) {
@@ -96,7 +98,7 @@ function walk(records, { resultCap, afterUuid, sidechainOk }) {
         uses.set(b.id, { name: b.name, input: b.input || {} });
         // A subagent hands its final report back through a tool call, not as text.
         if (b.name === 'SubagentHandback' && typeof b.input?.message === 'string') {
-          items.push({ k: 'handback', ts: o.timestamp, text: scrub(cap(b.input.message, resultCap * 3)) });
+          items.push({ k: 'handback', ts: o.timestamp, text: capScrub(b.input.message, resultCap * 3) });
         }
       }
       continue;
@@ -114,22 +116,22 @@ function walk(records, { resultCap, afterUuid, sidechainOk }) {
         if (AGENT_TOOLS.has(u.name)) {
           if (/^Async agent launched/.test(body)) continue; // the report comes from the subagent transcript
           items.push({ k: 'agent-report', ts: o.timestamp, task: scrub(briefInput(u.name, u.input)),
-                       text: scrub(cap(body.trim(), resultCap * 2)) });
+                       text: capScrub(body.trim(), resultCap * 2) });
           continue;
         }
         if (!FACT_TOOLS.has(u.name)) continue;
         if (u.name === 'Bash' && isNoiseCmd(u.input.command)) continue;
         if (body.includes('<persisted-output>')) body = persistedOutput(body, resultCap) ?? body;
         if (!body.trim()) continue;
-        items.push({ k: u.name.toLowerCase(), ts: o.timestamp, input: scrub(cap(briefInput(u.name, u.input), 2000)),
-                     output: scrub(cap(body.trim(), resultCap)) });
+        items.push({ k: u.name.toLowerCase(), ts: o.timestamp, input: capScrub(briefInput(u.name, u.input), 2000),
+                     output: capScrub(body.trim(), resultCap) });
       }
       continue;
     }
     if (o.isSidechain && !sidechainOk) continue;
     const t = textOf(o.message).trim();
     if (!t || NOISE.test(t)) continue;
-    items.push({ k: 'user', ts: o.timestamp, uuid: o.uuid, text: scrub(cap(t, 8000)) });
+    items.push({ k: 'user', ts: o.timestamp, uuid: o.uuid, text: capScrub(t, 8000) });
   }
   return { items, lastUuid, lastTs, started };
 }

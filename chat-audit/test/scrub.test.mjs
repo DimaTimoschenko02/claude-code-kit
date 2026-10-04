@@ -3,7 +3,7 @@
 // protection, takes this file for a leak. Run: node --test chat-audit/test/*.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { scrub, findSecrets } from '../payload/skills/chat-audit/lib/scrub.mjs';
+import { scrub, findSecrets, scrubHead, scrubTail } from '../payload/skills/chat-audit/lib/scrub.mjs';
 
 const body = (n) => 'Ab3x'.repeat(Math.ceil(n / 4)).slice(0, n);
 
@@ -67,4 +67,80 @@ test('a Telegram token inside its API URL is masked', () => {
   const token = TOKENS.telegram;
   const out = scrub(`curl https://api.telegram.org/bot${token}/sendMessage`);
   assert.ok(!out.includes(token.split(':')[1]), out);
+});
+
+// Probe 2026-10-04: shapes that leaked in real-looking text. P is a password, K a 40-char key.
+const P = 'Qx9' + 'kLm2pRt7Zw';
+const K = 'Ck' + 'F10yxf'.repeat(6) + 'Ab';
+const leaks = (text, secret) => scrub(text).includes(secret);
+
+test('a value in escaped quotes inside serialized JSON is masked', () => {
+  for (const cmd of [`export DB_PASSWORD="${P}"`, `mysql --password="${P}" db`, `mysql -uroot -p"${P}" db`,
+    `curl -u "admin:${P}" https://h`, `PGPASSWORD="${P}" psql -h h`]) {
+    assert.ok(!leaks(JSON.stringify({ command: cmd }), P), cmd);
+  }
+  assert.ok(!leaks(JSON.stringify({ content: JSON.stringify({ db: { password: P } }) }), P), 'json in json');
+});
+
+test('PHP arrays, define, getenv defaults and env fallbacks are masked', () => {
+  for (const text of [`'password' => '${P}',`, `'password'=>'${P}',`, `"db_password" => "${P}",`, `password => ${P}`,
+    `define('DB_PASSWORD', '${P}');`, `os.getenv("API_KEY", "${K}")`, `const pw = process.env.DB_PASSWORD || '${P}';`,
+    `const t = process.env.API_TOKEN ?? '${K}';`, `<password>${P}</password>`]) {
+    const secret = text.includes(K) ? K : P;
+    assert.ok(!leaks(text, secret), text);
+  }
+});
+
+test('a quoted value is masked whole: spaces of a Gmail app password, a paren inside', () => {
+  const out = scrub('IMAP_PASSWORD="qmzv kytr bnwx plhd"');
+  for (const group of ['qmzv', 'kytr', 'bnwx', 'plhd']) assert.ok(!out.includes(group), out);
+  assert.ok(!leaks('password="XoI)uu6bY7JR"', 'uu6bY7JR'));
+});
+
+test('env keys, any-case bearer, base64 PEM, PGP, 0x hex, base64 with slashes, curl -uuser:pw', () => {
+  const pemB64 = 'LS0tLS1CRUdJTi' + 'BSU0EgUFJJVkFURSBLRVktLS0tLQo' + K;
+  const hex = 'ec21' + '1731974ef4ec'.repeat(5);
+  const slashed = 's7pOW/' + 'GZkVNZ/' + 'imYPssVWYH';
+  const cases = [
+    [`ENCRYPTION_KEY=${K}`, K], [`APP_KEY=base64:${K}=`, K], [`DB_PW=${P}`, P],
+    [`authorization: bearer ${K}`, K], [`    client-key-data: ${pemB64}`, K],
+    [`-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n${K}\n-----END PGP PRIVATE KEY BLOCK-----`, K],
+    [`PRIVATE=0x${hex}`, hex], [`DB_PASS=${slashed}`, slashed], [`{"SecretAccessKey":"${slashed}"}`, slashed],
+    [`curl -uadmin:${P} https://h/api`, P],
+  ];
+  for (const [text, secret] of cases) assert.ok(!leaks(text, secret), text);
+});
+
+test('code, descriptions of a secret and ordinary config stay as written', () => {
+  for (const s of ['author: Пушкин', 'authors=Толстой Шевченко', 'authMode: basic', 'authenticated: true',
+    'max_tokens=4096', 'tokenCount: 1234', 'const token = getToken();', '{ password: hashedPassword }',
+    '{ password: dto.password }', 'passwordHash: user.passwordHash', 'accessKey: this.cfg.accessKey',
+    'secret: Buffer.from(raw)', 'secretName: pricehub-env', 'apiKey: string;', 'token_type: Bearer',
+    'password-reset: enabled', 'sk-learn-classification-tutorial', 'image@sha256:' + 'ab12'.repeat(16),
+    `.option('--password', 'Password to use')`, '{ password: "Password is required" }',
+    'password: "see brain/access.md → Postgres"', "IDENTIFIED BY '$PW'"]) {
+    assert.equal(scrub(s), s);
+    assert.equal(findSecrets(s).length, 0, s);
+  }
+});
+
+test('a cut made after scrubbing never shows the head of a token it crosses', () => {
+  const token = TOKENS.notion;
+  const cmd = `curl -H 'Authorization: Bearer ${token}' -d @page.json`;
+  for (let n = cmd.indexOf(token) + 4; n < cmd.indexOf(token) + token.length; n += 7) {
+    assert.ok(!scrubHead(cmd, n).includes(token.slice(4, 12)), `head ${n}`);
+  }
+  const tail = scrubTail(`noise ${TOKENS.telegram} tail`, 20);
+  assert.ok(!tail.includes(TOKENS.telegram.slice(-12)), tail);
+});
+
+// Unbounded runs around a key and a splice per hit made these take 6–19 s; serialized JSON is one line of megabytes.
+test('long words, hex runs and a big serialized output are scrubbed in linear time', () => {
+  const rows = Array.from({ length: 12000 }, (_, i) => `row ${i} token=abc${i} https://h/x?a=${i} password: see vault`);
+  for (const text of ['a'.repeat(100000), 'ab12'.repeat(25000), 'password'.repeat(6000), JSON.stringify({ o: rows.join('\n') })]) {
+    const started = performance.now();
+    scrub(text);
+    findSecrets(text);
+    assert.ok(performance.now() - started < 3000, `${text.slice(0, 12)}… took ${Math.round(performance.now() - started)} ms`);
+  }
 });

@@ -26,7 +26,7 @@ import fs from 'node:fs';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { scrub } from './scrub.mjs';
+import { scrub, scrubHead, scrubTail } from './scrub.mjs';
 import { listSessions } from './discover.mjs';
 import { extractFacts } from './facts.mjs';
 
@@ -101,9 +101,11 @@ export function extractSession(file, opts = {}) {
     replyBuf = [];
     if (!full) return null;
     const half = Math.floor(pairChars / 2);
-    const head = full.slice(0, half);
-    const tail = full.length > pairChars ? full.slice(-half) : full.slice(half);
-    return { ts: replyTs, chars: full.length, head: scrub(head), tail: scrub(tail),
+    // Scrubbed before the split: a token across the middle would leave half of itself in each part.
+    const whole = full.length > pairChars ? null : scrub(full);
+    const head = whole === null ? scrubHead(full, half) : whole.slice(0, half);
+    const tail = whole === null ? scrubTail(full, half) : whole.slice(half);
+    return { ts: replyTs, chars: full.length, head, tail,
              truncated: full.length > pairChars };
   };
 
@@ -122,7 +124,7 @@ export function extractSession(file, opts = {}) {
     if (o.type === 'system') {
       if (o.subtype === 'stop_hook_summary') {
         for (const h of o.hookInfos || []) bump(out.hooks, (h.command || '').split('/').pop());
-        for (const e of o.hookErrors || []) out.hookErrors.push(scrub(String(e).slice(0, 300)));
+        for (const e of o.hookErrors || []) out.hookErrors.push(scrubHead(String(e), 300));
       }
       if (o.subtype === 'turn_duration' && o.durationMs > 180000) {
         out.longTurns.push({ ts: o.timestamp, durationMs: o.durationMs, messages: o.messageCount });
@@ -145,18 +147,18 @@ export function extractSession(file, opts = {}) {
           const cmd = inp.command;
           bump(out.bashShapes, normalizeCmd(cmd));
           bump(out.bashHeads, cmd.trim().split(/\s+/)[0].replace(/^.*\//, ''));
-          brief = cmd.slice(0, 200);
+          brief = scrubHead(cmd, 200);
         } else if (['Write', 'Edit', 'NotebookEdit'].includes(b.name) && inp.file_path) {
           bump(out.filesTouched, String(inp.file_path));
           brief = String(inp.file_path);
         } else if (b.name === 'Agent' || b.name === 'Task') {
           bump(out.agentTypes, inp.subagent_type || 'default');
           out.agents.push({ ts: o.timestamp, type: inp.subagent_type || 'default',
-                            description: scrub(String(inp.description || '').slice(0, 160)),
+                            description: scrubHead(String(inp.description || ''), 160),
                             sidechain: !!o.isSidechain });
           brief = String(inp.description || '');
         } else if (b.name === 'Skill') {
-          out.skillCalls.push({ ts: o.timestamp, skill: inp.skill, args: scrub(String(inp.args || '').slice(0, 120)) });
+          out.skillCalls.push({ ts: o.timestamp, skill: inp.skill, args: scrubHead(String(inp.args || ''), 120) });
           brief = String(inp.skill || '');
         }
         toolUseById.set(b.id, { name: b.name, brief: scrub(brief) });
@@ -173,7 +175,7 @@ export function extractSession(file, opts = {}) {
     const tur = o.toolUseResult;
     if (tur && typeof tur === 'object' && typeof tur.stderr === 'string' && FAIL.test(tur.stderr)) {
       out.errors.push({ ts: o.timestamp, tool: 'Bash', call: '',
-                        error: scrub(tur.stderr.trim().slice(0, 300)) });
+                        error: scrubHead(tur.stderr.trim(), 300) });
     }
     if (Array.isArray(o.message?.content)) {
       for (const b of o.message.content) {
@@ -184,7 +186,7 @@ export function extractSession(file, opts = {}) {
         if (!isErr) continue;
         const src = toolUseById.get(b.tool_use_id) || {};
         out.errors.push({ ts: o.timestamp, tool: src.name || '?', call: src.brief || '',
-                          error: scrub(body.trim().slice(0, 300)) });
+                          error: scrubHead(body.trim(), 300) });
       }
     }
 
@@ -196,7 +198,7 @@ export function extractSession(file, opts = {}) {
     if (t.includes('<system-reminder>') && t.length > 4000) continue;
 
     out.turnCount++;
-    const entry = { ts: o.timestamp, uuid: o.uuid, text: scrub(t.slice(0, maxTurnChars)),
+    const entry = { ts: o.timestamp, uuid: o.uuid, text: scrubHead(t, maxTurnChars),
                     truncated: t.length > maxTurnChars, chars: t.length };
     const prev = takeReply();
     if (prev) entry.prevReply = prev;

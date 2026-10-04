@@ -21,7 +21,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
-import { scrub } from './scrub.mjs';
+import { scrubHead } from './scrub.mjs';
 import { listSessions } from './discover.mjs';
 
 function ts(s) {
@@ -190,8 +190,8 @@ export function extractAgent(file, parentSession, mainModel = null) {
           const key = `${src.name || '?'}::${cls}`;
           if (!errExamples.has(key)) {
             errExamples.set(key, {
-              tool: src.name || '?', class: cls, desc: (src.desc || '').slice(0, 100),
-              text: scrub(txt.slice(0, 160).replace(/\n/g, ' ')),
+              tool: src.name || '?', class: cls, desc: scrubHead(src.desc || '', 100),
+              text: scrubHead(txt, 160).replace(/\n/g, ' '),
             });
           }
         }
@@ -207,7 +207,7 @@ export function extractAgent(file, parentSession, mainModel = null) {
     parent: parentSession,
     agentId: path.basename(file, '.jsonl'),
     agentType: meta.agentType || meta.subagent_type || null,
-    description: scrub(String(meta.description || '').slice(0, 160)),
+    description: scrubHead(String(meta.description || ''), 160),
     // Inherited = nothing chose the model: none passed, none in the type's definition, and it ran on the main one.
     model,
     inherited: !meta.model && !typeHasOwnModel(meta.agentType || meta.subagent_type, cwd) &&

@@ -20,6 +20,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
+import { scrub } from './scrub.mjs';
 
 const HOME = os.homedir();
 
@@ -152,7 +153,7 @@ export function sessionMeta(file) {
     let o;
     try { o = JSON.parse(line); } catch { continue; }
     if (o.timestamp) { if (!first) first = o.timestamp; last = o.timestamp; }
-    if (o.type === 'ai-title' && o.aiTitle) title = o.aiTitle;
+    if (o.type === 'ai-title' && o.aiTitle) title = scrub(o.aiTitle);
     if (o.type === 'agent-name' && o.agentName) agentName = o.agentName;
     if (o.gitBranch && !branch) branch = o.gitBranch;
     if (o.cwd && !cwd) cwd = o.cwd;

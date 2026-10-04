@@ -9,6 +9,19 @@
 // secret (memory is supposed to hold `see <access note> → …` and `$DB_PASSWORD`, never the value).
 // Shapes were taken from real transcripts; values in tests are synthetic.
 // JS `\b` is ASCII-only — every Cyrillic boundary below is a `\p{L}` lookaround instead.
+// Callers that keep only part of a text cut it with scrubHead/scrubTail: a cut made first can halve a token so that no
+// shape matches what is left.
+//
+// Known gaps (measured by an adversarial probe 2026-10-04, rare in our transcripts, left open):
+//   - a value with no secret-ish name and no provider shape: `redis-cli -a X`, `docker login -p X`, `ldapsearch -w X`,
+//     `smbclient -U u%X`, `htpasswd -b f u X`, `jq -r .password` output, a cookie value;
+//   - DSN edges: an empty user (`redis://:X@h`), `@` or `/` inside the password, a JSON-escaped `\/` scheme;
+//   - URL-encoded text (`%3D`, `%20Bearer%20`), grep colour codes splitting a token in two, `\x1b(B`;
+//   - base64 that is not a known shape: a k8s Secret's data values, a docker `auths` blob;
+//   - a key written only as `\uXXXX` escapes (Cyrillic «пароль» in JSON), an XML attribute pair `key="Password" value="X"`,
+//     a setter call `setPassword('X')`, webhook URLs;
+//   - a value whose JSON escape (`\"`) sits inside it is masked up to the escape only;
+//   - a camelCase value with no digit that holds a secret word (`hashedPassword`) is taken for an identifier.
 
 // ------------------------------------------------------------- value checks
 
@@ -23,14 +36,28 @@ const PLACEHOLDER = new RegExp(
     'your[_-]?\\w*', 'example', 'redacted', 'hidden', 'masked', 'none', 'null', 'nil', 'undefined',
     'true', 'false', 'string', 'number', 'boolean', 'required', 'optional', 'any', 'unknown', 'empty',
     'env', 'see', 'token', 'basic', 'bearer', 'host', 'port', 'dbname', 'database', 'login', 'name',
+    'enabled', 'disabled',
   ].join('|') + ')$', 'i',
 );
 // Words that follow «пароль» / «пасс» as a subject, not as the value («пароль от gmail»).
 const RU_NOUN = /^(?:gmail|google|mysql|mariadb|postgres(?:ql)?|imap|smtp|ssh|sftp|ftp|odata|bas|db|env|http|https|basic|auth|oauth|app|wifi|vpn|api|sudo|git|github|redis|notion|admin|root-?доступ)$/i;
 const ENV_NAME = /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/;        // DB_PASSWORD — a name, not a value
 const NUMERIC = /^[\d.,_:+-]+[kKmMbB%]?$/;              // tokens: 263k, port 5432
-const PATHLIKE = /^(?:~|\.{1,2})?\/[^\s/]+\/|^[\w.-]+\/[\w.-]+\//;
-const CODE_REF = /^(?:process\.env|env|config|this|ctx|opts?|options|settings|cfg|secrets|args|req|res|self)\.\w|[()]/;
+// A relative path ends in a file extension or a slash; base64 with slashes (`s7pOW/GZkVNZ/imYP`) ends in neither.
+const PATHLIKE = /^(?:~|\.{1,2})?\/[^\s/]+\/|^[\w.-]+(?:\/[\w.-]+)*\/(?:[\w-]*\.[A-Za-z0-9]{1,5})?$/;
+// A member access, a call, a parenthesised expression; `XoI)uu6bY7JR` is a password, not code.
+const CODE_REF = /^(?:process\.env|env|config|this|ctx|opts?|options|settings|cfg|secrets|args|req|res|self)\.\w|^[\w.$]+\(|^\(/;
+// An identifier that names the secret instead of holding it: `dto.password`, `hashedPassword`, `accessToken`.
+const IDENT_REF = /^[A-Za-z_$]+(?:\.[A-Za-z_$]+)+$|^[a-z]+(?:[A-Z][a-z]+)+$/;
+const SECRET_WORD = /pass|pwd|secret|token|key|cred|auth|hash/i;
+// A key that describes a secret instead of holding it: `secretName`, `token_type`, `passwordHash`, `secretKeyRef`.
+const META = 'name|id|type|count|len|length|hash|file|path|dir|url|uri|field|mode|hint|label|prompt|ref|ttl|header|provider|format|version|expiry|expires|prefix|store|manager';
+const META_SNAKE = new RegExp(`[_.-](?:${META})s?$`, 'i');
+const META_CAMEL = new RegExp(`(?<=[a-z])(?:${META.replace(/\b\w/g, (c) => c.toUpperCase())}|ID)s?$`);
+const describesSecret = (key) => META_SNAKE.test(key) || META_CAMEL.test(key);
+const GMAIL_APP = /^[a-z]{4}(?: [a-z]{4}){3}$/;
+/** A quoted value with spaces is a secret only when short and secret-looking, or a Gmail app password — not a message. */
+const quotedSecret = (v) => !/\s/.test(v) || GMAIL_APP.test(v) || (v.trim().split(/\s+/).length <= 3 && looksSecret(v));
 
 // Rules whose key is an explicit password word/flag — there even an all-digit value is a password.
 const PASSWORD_RULES = new Set(['db-cli-p', 'ru-password', 'en-password', 'cli-password', 'sql-password']);
@@ -62,6 +89,7 @@ export function isRealValue(raw, { min = 4, rule = '' } = {}) {
   if (ENV_NAME.test(v)) return false;
   if (PATHLIKE.test(v)) return false;
   if (CODE_REF.test(v)) return false;
+  if (IDENT_REF.test(v) && SECRET_WORD.test(v)) return false;
   return true;
 }
 
@@ -71,13 +99,19 @@ export function isRealValue(raw, { min = 4, rule = '' } = {}) {
 const KEY_NAMES = [
   'passw(?:or)?d', 'passwort', 'passphrase', '(?<![A-Za-z])pass(?![A-Za-z])', 'pwd', 'pgpassword',
   'secret', 'token(?![a-rt-z])', 'api[_-]?key', 'apikey', 'access[_-]?key', 'private[_-]?key',
-  'client[_-]?secret', 'credentials?', 'app[_-]?password',
+  'client[_-]?secret', 'credentials?', 'app[_-]?password', '(?<![A-Za-z])auth(?![A-Za-z])',
 ].join('|');
+// Bounded on both sides: an unbounded run made every start position rescan a long word (quadratic on base64/hex).
+const SECRET_KEY = `[\\w.-]{0,64}?(?:${KEY_NAMES})[\\w.-]{0,64}`;
+// After `=`/`:` either a quoted value (may hold spaces and `)`) or a bare run.
+const QUOTED = `(?<q>["'\`])(?<v>[^"'\`\\n]{3,200}?)\\k<q>`;
 
 export const DETECTORS = [
   // Whole-token provider shapes — the match itself is the value.
-  { name: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/gd },
-  { name: 'api-key-sk', re: /\bsk-[A-Za-z0-9_-]{16,}/gd },
+  { name: 'private-key', re: /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/gd },
+  // A PEM block in base64 (kubeconfig `client-key-data`, k8s Secrets): base64 of «-----BEGIN». Certificates go too.
+  { name: 'pem-base64', re: /\bLS0tLS1CRUdJTi[A-Za-z0-9+/=]{20,}/gd },
+  { name: 'api-key-sk', re: /\bsk-[A-Za-z0-9_-]{16,}/gd, check: (v) => /\d/.test(v) },
   { name: 'github-token', re: /\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{16,}/gd },
   { name: 'slack-token', re: /\bxox[abposr]-[A-Za-z0-9-]{10,}/gd },
   { name: 'aws-key', re: /\bAKIA[0-9A-Z]{16}\b/gd },
@@ -89,29 +123,52 @@ export const DETECTORS = [
   // Telegram bot token: <bot id>:AA<33 chars>, also inside its API URL (`/bot<token>/sendMessage`, a letter before it).
   { name: 'telegram-bot-token', re: /(?<!\d)\d{8,10}:AA[A-Za-z0-9_-]{33}(?![A-Za-z0-9_-])/gd },
   { name: 'jwt', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/gd },
-  { name: 'hex-blob', re: /\b[A-Fa-f0-9]{48,}\b/gd },
+  // A long hex run, `0x` private keys too; a content digest (`@sha256:…`) is a hash, not a secret.
+  { name: 'hex-blob', re: /(?<!sha\d{1,3}:)(?:\b0x|\b)[A-Fa-f0-9]{48,}\b/gd },
 
-  // Authorization: Basic <b64> / Bearer <token>. A plain word («Basic authentication») is not a credential.
+  // Authorization: Basic <b64> / Bearer <token>, any case. A plain word («Basic authentication») is not a credential.
   {
     name: 'auth-header', group: 'v', min: 8,
-    re: /\b(?:Basic|Bearer|Token)\s+(?<v>[A-Za-z0-9._~+/=-]{8,})/gd,
+    re: /\b(?:Basic|Bearer|Token)\s+(?<v>[A-Za-z0-9._~+/=-]{8,})/gid,
     check: (v) => /[\d=+/]/.test(v) || v.length >= 20,
   },
-  // scheme://user:pass@host
+  // scheme://user:pass@host. Every run is bounded: serialized JSON is one line of megabytes, and an unbounded run
+// rescanned from each start position is quadratic there.
   { name: 'url-credentials', group: 'v', min: 3,
-    re: /[a-z][a-z0-9+.-]*:\/\/[^\s:@/'"`]+:(?<v>[^\s@/'"`]+)@/gid },
+    re: /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,30}:\/\/[^\s:@/'"`]{1,256}:(?<v>[^\s@/'"`]+)@/gid },
   // user:pass@host without a scheme (not a git remote: that has no colon before @).
   { name: 'host-credentials', group: 'v', min: 3,
     re: /(?<![\w/:.@-])[A-Za-z0-9._-]{1,64}:(?<v>[^\s:@/'"`]{3,})@(?:localhost|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/gd },
-  // curl -u user:pass / --user user:pass (also wget/httpie).
+  // curl -u user:pass / -uuser:pass / --user user:pass (also wget/httpie).
   { name: 'curl-user', group: 'v', min: 3,
-    re: /\b(?:curl|wget|https?|httpie)\b[^\n|;]*?\s(?:-[A-Za-z]*u|--user|--auth|-a)[\s=]+["']?[^\s:'"]+:(?<v>[^\s'"@]+)/gd },
+    re: /\b(?:curl|wget|https?|httpie)\b[^\n|;]{0,400}?\s(?:-[A-Za-z]*u[\s=]*|(?:--user|--auth|-a)[\s=]+)["']?[^\s:'"]+:(?<v>[^\s'"@]+)/gd },
   // mysql/mariadb/psql … -p<val> | -p <val> ; sshpass -p <val>. `-p$VAR`, `-p "$VAR"`, `psql -p 5432` pass.
   { name: 'db-cli-p', group: 'v', min: 3,
-    re: /\b(?:mysql|mariadb|mysqldump|mariadb-dump|mysqladmin|mysqlsh|psql|pg_dump|pg_restore|pg_dumpall|sshpass|kdb)\b[^\n|;&]*?\s-p\s*["']?(?<v>[^\s'"`$\\-][^\s'"`]*)/gd },
-  // key = value / key: value for secret-ish names, incl. `.env` lines, YAML, JSON, `**Password:** x`.
+    re: /\b(?:mysql|mariadb|mysqldump|mariadb-dump|mysqladmin|mysqlsh|psql|pg_dump|pg_restore|pg_dumpall|sshpass|kdb)\b[^\n|;&]{0,400}?\s-p\s*["']?(?<v>[^\s'"`$\\-][^\s'"`]*)/gd },
+  // key = value / key: value / 'key' => value for secret-ish names, incl. `.env` lines, YAML, JSON, PHP arrays,
+  // `**Password:** x`. A key that describes the secret (`secretName`, `token_type`) holds no value.
   { name: 'key-value', group: 'v',
-    re: new RegExp(`(?<![\\p{L}\\d])(?:[\\w.-]*?(?:${KEY_NAMES})[\\w.-]*)\\**["'\`]?\\s*\\**\\s*(?:[:=]|=>)\\s*\\**\\s*["'\`]?(?<v>[^\\s"'\`,;)}\\]]+)`, 'giud') },
+    re: new RegExp(`(?<![\\p{L}\\d])(?<k>${SECRET_KEY})\\**["'\`]?\\s*\\**\\s*(?:=>|[:=])\\s*\\**\\s*["'\`]?(?<v>[^\\s"'\`,;)}\\]]+)`, 'giud'),
+    check: (v, bare, m) => !describesSecret(m.groups.k) },
+  // The same with the value quoted whole: `IMAP_PASSWORD="abcd efgh ijkl mnop"`, `password="XoI)uu6b"`.
+  { name: 'key-value-quoted', group: 'v',
+    re: new RegExp(`(?<![\\p{L}\\d])(?<k>${SECRET_KEY})\\**["'\`]?\\s*\\**\\s*(?:=>|[:=])\\s*\\**\\s*${QUOTED}`, 'giud'),
+    check: (v, bare, m) => !describesSecret(m.groups.k) && quotedSecret(v) },
+  // An env-style name ending in _KEY/_PW/_AUTH/_SALT that KEY_NAMES does not cover: `ENCRYPTION_KEY=…`, `APP_KEY=base64:…`.
+  { name: 'env-key', group: 'v',
+    re: /(?<![\w])[A-Z][A-Z0-9_]*_(?:KEY|PW|AUTH|SALT|PASSPHRASE)(?![\w])\s*[:=]\s*["']?(?<v>[^\s"'`,;)}\]]+)/gd,
+    check: (v) => looksSecret(v) },
+  // A secret name passed with its literal: `define('DB_PASSWORD', 'x')`, `getenv("API_KEY", "x")`, `('password', 'x')`.
+  { name: 'name-literal', group: 'v',
+    re: new RegExp(`(?<kq>["'])(?<k>${SECRET_KEY})\\k<kq>\\s*,\\s*${QUOTED}`, 'giud'),
+    check: (v, bare, m) => !describesSecret(m.groups.k) && quotedSecret(v) },
+  // A literal fallback after a secret reference: `process.env.DB_PASSWORD || 'x'`, `env.API_TOKEN ?? 'x'`.
+  { name: 'fallback-literal', group: 'v',
+    re: new RegExp(`(?<![\\p{L}\\d])${SECRET_KEY}[\\]'"\`)]*\\s*(?:\\|\\||\\?\\?)\\s*${QUOTED}`, 'giud'),
+    check: (v) => quotedSecret(v) },
+  // An XML element: `<password>x</password>`, `<api-key>x</api-key>`.
+  { name: 'xml-element', group: 'v',
+    re: new RegExp(`<(?<t>${SECRET_KEY.replaceAll('[\\w.-]', '[\\w:.-]')})>(?<v>[^<\\n]{3,200})</\\k<t>>`, 'giud') },
   // Cyrillic keys: «пароль: x», «пароль `x`», «пароль приложения `x`», «пасс x», «логин `a`, пароль `b`».
   // Up to 3 context words (each with a Cyrillic letter) may sit between the key and the value.
   { name: 'ru-password', group: 'v',
@@ -129,9 +186,10 @@ export const DETECTORS = [
   { name: 'cli-password', group: 'v', min: 3,
     re: /(?<![\w-])--(?:password|passwd|pass|pwd)(?:=|[ \t]+)["']?(?<v>[^\s'"`$\\-][^\s'"`]*)/gd },
   // SQL literals: `CREATE USER … IDENTIFIED BY 'x'`, `IDENTIFIED WITH plugin BY 'x'`, Postgres `… PASSWORD 'x'`,
-  // `SET PASSWORD = PASSWORD('x')`. `IDENTIFIED BY '$PW'` passes (placeholder).
+  // `SET PASSWORD = PASSWORD('x')`. `IDENTIFIED BY '$PW'` passes (placeholder). A quoted key (`'password' => 'x'`)
+  // is not SQL: the word must not sit inside quotes, or its own closing quote opens the «value».
   { name: 'sql-password', group: 'v', min: 3,
-    re: /\b(?:IDENTIFIED(?:\s+WITH\s+\w+)?\s+BY(?:\s+PASSWORD)?|(?:ENCRYPTED\s+)?PASSWORD(?:\s*=\s*PASSWORD\s*\(|\s*=)?)\s*\(?\s*(?<q>['"])(?<v>[^'"\n]+)\k<q>/gid },
+    re: /\b(?:IDENTIFIED(?:\s+WITH\s+\w+)?\s+BY(?:\s+PASSWORD)?\s*|(?<![\w'"`])(?:ENCRYPTED\s+)?PASSWORD(?:\s*=\s*PASSWORD\s*\(\s*|\s*=\s*|\s+))(?<q>['"])(?<v>[^'"\n]+)\k<q>/gid },
   // Gmail app password written bare as four groups of four letters after a password word (en or ru):
   // the backtick rules above catch `qwer tyui opas dfgh`, a bare one would lose three of its four groups.
   // Gmail generates lowercase random groups; «app password must have been sent» is prose (COMMON4).
@@ -147,8 +205,9 @@ export const DETECTORS = [
 ];
 
 // A token right after a JSON escape ("\n", "\u001b[0m") or a raw terminal colour code sits behind a letter, so no \b
-// fires; callers scrub serialized JSON and coloured output alike. The view blanks those sequences at the same length.
-const BEHIND_LETTER = /\x1b\[[0-9;?]*[A-Za-z]|\\u001b\[[0-9;?]*[A-Za-z]|\\u[0-9a-fA-F]{4}|\\[nrtbf]/g;
+// fires; a value in escaped quotes (`PASSWORD=\"x\"` in a serialized command) starts with a backslash no value shape
+// takes. Callers scrub serialized JSON and coloured output alike. The view blanks those sequences at the same length.
+const BEHIND_LETTER = /\x1b\[[0-9;?]*[A-Za-z]|\\u001b\[[0-9;?]*[A-Za-z]|\\u[0-9a-fA-F]{4}|\\[nrtbf]|\\+["']/g;
 
 /** Hits over the text and over its view: the text's own pass keeps a value that holds a literal "\t" whole, the view's
  *  pass adds what hid behind an escape. A view hit is dropped only when a text hit covers it whole — a partial overlap
@@ -158,7 +217,24 @@ function* hits(text) {
   const own = [...passHits(text)];
   yield* own;
   if (view === text) return;
-  for (const h of passHits(view)) if (!own.some((o) => o.start <= h.start && h.end <= o.end)) yield h;
+  // Text hits merged into sorted disjoint spans: a binary search per view hit, not a scan of every text hit.
+  const spans = [];
+  for (const o of [...own].sort((a, b) => a.start - b.start)) {
+    const last = spans[spans.length - 1];
+    if (last && o.start <= last.end) last.end = Math.max(last.end, o.end);
+    else spans.push({ start: o.start, end: o.end });
+  }
+  const covered = (h) => {
+    let lo = 0, hi = spans.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (spans[mid].start > h.start) hi = mid - 1;
+      else if (spans[mid].end < h.start) lo = mid + 1;
+      else return h.end <= spans[mid].end;
+    }
+    return false;
+  };
+  for (const h of passHits(view)) if (!covered(h)) yield h;
 }
 
 function* passHits(view) {
@@ -181,21 +257,25 @@ function* passHits(view) {
 /** Strict detection: every literal secret-shaped value, with offsets (never the value itself). */
 export function findSecrets(text) {
   if (typeof text !== 'string' || !text) return [];
-  const out = [];
-  for (const h of hits(text)) {
-    const line = text.slice(0, h.start).split('\n').length;
-    out.push({ ...h, line });
+  const out = [...hits(text)].sort((a, b) => a.start - b.start);
+  // Line numbers counted in one forward pass: a split per hit is quadratic on a big text with many hits.
+  let line = 1;
+  let next = text.indexOf('\n');
+  for (const h of out) {
+    while (next !== -1 && next < h.start) { line++; next = text.indexOf('\n', next + 1); }
+    h.line = line;
   }
-  return out.sort((a, b) => a.start - b.start);
+  return out;
 }
 
 // ------------------------------------------------------------ redaction only
 
 const RULES = [
-  // key=value / key: value assignments for secret-ish names (audit-era rule, broader than the detector).
+  // key=value / key: value assignments for secret-ish names (audit-era rule, broader than the detector). The value
+  // checks are the detectors': `max_tokens=4096`, `apiKey: string`, `author: …`, `token = getToken()` stay.
   [
-    /\b((?:[A-Za-z_]*(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|auth)[A-Za-z_]*))(\s*[:=]\s*)(["']?)([^\s"',;)]{4,})\3/gi,
-    '$1$2$3[REDACTED]$3',
+    /\b((?:[A-Za-z_]{0,64}(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|auth(?:orization)?(?![a-z]))[A-Za-z_]{0,64}))(\s*[:=]\s*)(["']?)([^\s"',;)]{4,})\3/gi,
+    (m, key, sep, q, v) => (isRealValue(v) && !describesSecret(key) ? `${key}${sep}${q}[REDACTED]${q}` : m),
   ],
   // One-time codes stated next to the word.
   [/(?<!\p{L})(otp|одноразов\p{L}*|код подтверждения|verification code|2fa)(?!\p{L})([^\n]{0,20}?)\b\d{4,8}\b/giu, '$1$2 [OTP]'],
@@ -204,7 +284,7 @@ const RULES = [
 /** Redact secrets from a string. Returns the cleaned string. */
 export function scrub(text) {
   if (typeof text !== 'string' || !text) return text;
-  // Detector hits first, spliced from the end so earlier offsets stay valid. Overlaps merge.
+  // Detector hits first. Overlaps merge.
   const spans = [...hits(text)].sort((a, b) => a.start - b.start);
   const merged = [];
   for (const s of spans) {
@@ -212,14 +292,32 @@ export function scrub(text) {
     if (last && s.start <= last.end) { last.end = Math.max(last.end, s.end); continue; }
     merged.push({ ...s });
   }
-  let out = text;
-  for (let i = merged.length - 1; i >= 0; i--) {
-    const { start, end, rule } = merged[i];
-    const tag = rule === 'private-key' ? '[PRIVATE_KEY]' : rule === 'hex-blob' ? '[HEX_BLOB]' : '[REDACTED]';
-    out = out.slice(0, start) + tag + out.slice(end);
+  // Assembled in one forward pass: a splice per span re-copies the whole text each time.
+  const parts = [];
+  let at = 0;
+  for (const { start, end, rule } of merged) {
+    parts.push(text.slice(at, start), rule === 'private-key' ? '[PRIVATE_KEY]' : rule === 'hex-blob' ? '[HEX_BLOB]' : '[REDACTED]');
+    at = end;
   }
+  parts.push(text.slice(at));
+  let out = parts.join('');
   for (const [re, repl] of RULES) out = out.replace(re, repl);
   return out;
+}
+
+// A token is far shorter than this; a window this much longer than the kept part holds any token the cut crosses whole.
+const CUT_MARGIN = 4000;
+
+/** The first `n` characters of `text`, scrubbed before the cut. */
+export function scrubHead(text, n) {
+  if (typeof text !== 'string' || text.length <= n) return scrub(text);
+  return scrub(text.slice(0, n + CUT_MARGIN)).slice(0, n);
+}
+
+/** The last `n` characters of `text`, scrubbed before the cut. */
+export function scrubTail(text, n) {
+  if (typeof text !== 'string' || text.length <= n) return scrub(text);
+  return scrub(text.slice(-(n + CUT_MARGIN))).slice(-n);
 }
 
 /** Redact recursively through plain objects/arrays. */

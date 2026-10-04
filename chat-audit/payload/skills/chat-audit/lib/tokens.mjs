@@ -22,6 +22,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { scrub } from './scrub.mjs';
 
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, arr) => {
@@ -84,7 +85,8 @@ function toolKey(name) {
 
 function bashKey(cmd) {
   if (!cmd) return '?';
-  const c = cmd.replace(/^\s*(cd\s+\S+\s*&&\s*)+/, '').trim();
+  // Leading `NAME=value` assignments go too: the key is the command, and `PGPASSWORD=…` must not reach the report.
+  const c = cmd.replace(/^\s*(cd\s+\S+\s*&&\s*)+/, '').replace(/^(?:\s*[A-Za-z_]\w*=\S*)+\s+/, '').trim();
   const m =
     c.match(/^(npx\s+tsx\s+tools\/)([\w.-]+)/) ||
     c.match(/^(npm\s+run\s+)([\w:-]+)/) ||
@@ -179,8 +181,8 @@ async function processFile({ p, size }) {
     try { j = JSON.parse(line); } catch { continue; }
     const ts = j.timestamp ? Date.parse(j.timestamp) : null;
     if (j.cwd) cwd = j.cwd.replace(/\/\.claude\/worktrees\/[^/]+$/, '');
-    if (j.type === 'custom-title') title = j.customTitle;
-    if (j.type === 'agent-name' && !title) title = j.agentName;
+    if (j.type === 'custom-title') title = scrub(j.customTitle);
+    if (j.type === 'agent-name' && !title) title = scrub(j.agentName);
     if (j.type === 'bridge-session') isJob = true;
     if (j.type === 'system' && j.subtype === 'compact_boundary') {
       flushSegment();
