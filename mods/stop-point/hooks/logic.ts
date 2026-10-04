@@ -197,11 +197,12 @@ export function resumeText(point: string, body: string, mtimeMs: number, now: nu
 }
 
 /** The status line: context against the compaction window, the point of this cycle, what the mod waits for. */
-export function statusText(s: StopPointSession, tokens: number | null, lim: Limits): string {
+/** The status line speaks only when the owner has something to do; the 💾 line in the reply already says a point is written. */
+export function statusText(s: StopPointSession, tokens: number | null, lim: Limits): string | undefined {
+  const wait = s.hold ? 'жду /compact' : s.need !== null ? 'компакт ждёт точку' : null
+  if (wait === null) return undefined
   const ctx = tokens === null ? 'ctx ?' : `ctx ${Math.round((tokens / lim.window) * 100)}%`
-  const point = s.point === null ? 'точки нет' : `точка ${clockTime(s.point.writtenAt)}`
-  const wait = s.hold ? ' · жду /compact' : s.need !== null ? ' · компакт ждёт точку' : ''
-  return `${ctx} · ${point}${wait}`
+  return `${ctx} · ${wait}`
 }
 
 // --- paths ---------------------------------------------------------------------------------------------------------

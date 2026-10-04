@@ -178,7 +178,7 @@ describe('threshold', () => {
     w.tokens = 280_000
     expect(ctx(await read($))).toBe('')
     expect((await stop($)).block).toBeUndefined()
-    expect(w.status.at(-1)).toMatch(/^ctx 93% · точка \d\d:\d\d$/)
+    expect(w.status.at(-1)).toBeUndefined() // nothing for the owner to do: the 💾 line already told him
   })
 
   test('derives from autoCompactWindow and the model window', () => {
@@ -379,7 +379,7 @@ describe('after compaction', () => {
     expect(injected).toContain('42 rows, measured 04.10')
     expect(injected).toContain(`Файл: ${POINT}`)
     expect(ctx(await read($))).not.toContain('ТОЧКА ОСТАНОВА (после компакта')
-    expect(w.status.at(-1)).toContain('точки нет') // a new cycle: the old point is not this one's
+    expect(w.status.at(-1)).toBeUndefined() // a new cycle with nothing pending keeps the status line quiet
   })
 
   test('SessionStart(compact) after the compaction carries it, once', async ($, on) => {
