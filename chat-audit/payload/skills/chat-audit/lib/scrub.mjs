@@ -147,9 +147,12 @@ export const DETECTORS = [
 ];
 
 function* hits(text) {
+  // Detectors read a view where the JSON escapes \n \t \r are two spaces: callers scrub serialized JSON too, and there
+  // a token right after "\n" sits behind the letter n, so no \b fires. Same length, so the offsets fit the original.
+  const view = text.replace(/\\[nrt]/g, '  ');
   for (const d of DETECTORS) {
     d.re.lastIndex = 0;
-    for (const m of text.matchAll(d.re)) {
+    for (const m of view.matchAll(d.re)) {
       let g = d.group;
       let bare = false;
       if (g && m.groups?.[g] === undefined && d.alt && m.groups?.[d.alt] !== undefined) { g = d.alt; bare = true; }

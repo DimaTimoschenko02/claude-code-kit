@@ -27,6 +27,18 @@ for (const [name, token] of Object.entries(TOKENS)) {
   });
 }
 
+// agents.mjs scrubs JSON.stringify(tool result): a token opening a line sits right after the two characters \n.
+test('a token right after an escaped newline or tab in serialized JSON is masked, old shapes too', () => {
+  const shapes = [...Object.values(TOKENS), 'sk-' + body(30), 'ghp_' + body(36), 'AKIA' + 'ABCDEFGHIJKLMNOP', 'AIza' + body(30)];
+  for (const token of shapes) {
+    for (const sep of ['\n', '\t', '\r\n']) {
+      const out = scrub(JSON.stringify({ stdout: `line one${sep}${token}` }));
+      assert.ok(!out.includes(token), `${token.slice(0, 6)}… after ${JSON.stringify(sep)}`);
+      assert.ok(out.includes('line one'));
+    }
+  }
+});
+
 test('names and short ids that merely share a prefix stay', () => {
   for (const s of ['secret_key_name', 'hf_hub_download', 'npm_config_cache', 'ntn_page', 'sk_live_mode', 'port 5432:AA']) {
     assert.equal(scrub(s), s);
