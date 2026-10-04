@@ -127,6 +127,35 @@ describe('session', () => {
     expect(w.forks).toBe(2)
   })
 
+  test('/warm says when the next warm runs and what the last one read, so the owner sees the mod alive', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, WAITS)
+    // Reply at 13:00 owner time: warms at 13:50 and 14:40, cache alive until 15:40.
+    let text = textOf(await warm($, ''))
+    expect(text).toContain('Греет: следующий прогрев в 13:50 (через 50 мин), кэш жив до 15:40.')
+    expect(text).toContain('Прогревов в этом окне ещё не было.')
+    await w.clock.advance(20 * MIN)
+    expect(textOf(await warm($, ''))).toContain('следующий прогрев в 13:50 (через 30 мин)')
+    await w.clock.advance(30 * MIN)
+    text = textOf(await warm($, ''))
+    expect(text).toContain('следующий прогрев в 14:40 (через 50 мин)')
+    expect(text).toContain('Прогревов в этом окне: 1, последний в 13:50 — 180 000 токенов из кэша.')
+    await w.clock.advance(50 * MIN)
+    text = textOf(await warm($, ''))
+    expect(text).toContain('Греет: прогревы этого окна сделаны, кэш жив до 15:40.')
+    expect(text).toContain('Прогревов в этом окне: 2, последний в 14:40')
+    await w.clock.advance(60 * MIN)
+    expect(textOf(await warm($, ''))).toContain('Сейчас не греет: ждёт следующего ответа.')
+  })
+
+  test('/warm after a reply that waits for nothing says why it is cold', async ($, on) => {
+    world(on)
+    await start($)
+    await reply($, NOTHING)
+    expect(textOf(await warm($, ''))).toContain('Сейчас не греет: последний ответ не ждёт тебя')
+  })
+
   test('a result-only reply stays cold until /warm on', async ($, on) => {
     const w = world(on)
     await start($)

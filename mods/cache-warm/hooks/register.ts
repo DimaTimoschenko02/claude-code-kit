@@ -18,6 +18,7 @@ import {
   parseTzOffset,
   shouldWarm,
   stepMs,
+  tokensText,
 } from './logic'
 
 type Engine = EngineInterface
@@ -40,7 +41,11 @@ let lastReplyAt: number | null = null
 let lastKind: ReplyKind = 'other'
 let isTurnRunning = false
 let timer: { cancel: () => void } | null = null
+/** When the armed timer fires the next warm; null while none is due. `/warm` shows it, so the owner sees the mod alive. */
+let nextAt: number | null = null
 let warms = 0
+/** The last fork of this window and what it read, the proof that the warm reached the cache. */
+let lastWarm: { at: number; cacheRead?: number; reason?: string } | null = null
 
 function isSessionWarm(v: unknown): v is SessionWarm {
   if (typeof v !== 'object' || v === null) return false
@@ -65,6 +70,7 @@ async function settings($: Engine) {
 function disarm($: Engine): void {
   timer?.cancel()
   timer = null
+  nextAt = null
   replyAt = null
   void $.ui.status(undefined)
 }
@@ -78,7 +84,10 @@ async function evaluate($: Engine): Promise<void> {
   }
   timer?.cancel()
   timer = null
-  if (replyAt !== lastReplyAt) warms = 0
+  if (replyAt !== lastReplyAt) {
+    warms = 0
+    lastWarm = null
+  }
   replyAt = lastReplyAt
   await plan($)
 }
@@ -92,6 +101,7 @@ async function plan($: Engine): Promise<void> {
   const at = nextWarm(replyAt, now, hours, cfg.ttlMin)
   await $.ui.status(until > now ? `кэш до ${hhmm(until, tzOffsetMin)}` : undefined)
   const from = replyAt
+  nextAt = at
   if (at === null) {
     // The window is covered: the status goes when the cache does, not with the owner's next look.
     if (until > now) timer = $.clock.after(until - now, () => void lapse($, from))
@@ -111,11 +121,14 @@ async function warm($: Engine, from: number): Promise<void> {
   // The owner came back, or a newer reply re-armed: this tick belongs to a window that is over.
   if (replyAt !== from) return
   if (!isTurnRunning) {
+    const at = await $.clock.now()
     const r = await $.model.fork({ prompt: FORK_PROMPT })
     if (r.isAnswered) {
       warms++
+      lastWarm = { at, cacheRead: r.usage.cache_read_input_tokens }
       await $.ui.log(`cache-warm: warm ${warms}, ${r.usage.cache_read_input_tokens} tokens read from cache`, { to: 'debug' })
     } else {
+      lastWarm = { at, reason: r.reason }
       await $.ui.log(`cache-warm: warm failed (${r.reason})`, { to: 'debug' })
       if (r.reason === 'nothing-to-fork') {
         disarm($)
@@ -124,6 +137,23 @@ async function warm($: Engine, from: number): Promise<void> {
     }
   }
   if (replyAt === from) await plan($)
+}
+
+/** The next warm as the timer holds it: due, running now, overdue (the timer did not fire), or none left. */
+function nextText(now: number): string {
+  if (nextAt === null) return 'прогревы этого окна сделаны'
+  if (nextAt > now) return `следующий прогрев в ${hhmm(nextAt, tzOffsetMin)} (через ${hoursText(Math.ceil((nextAt - now) / 60_000) / 60)})`
+  if (timer === null) return 'прогрев идёт сейчас'
+  return `прогрев опаздывает: был нужен в ${hhmm(nextAt, tzOffsetMin)}, таймер не сработал`
+}
+
+function warmsText(): string {
+  if (lastWarm === null) return 'Прогревов в этом окне ещё не было.'
+  const last =
+    lastWarm.reason === undefined
+      ? `${tokensText(lastWarm.cacheRead ?? 0)} токенов из кэша`
+      : `не удался: ${lastWarm.reason}`
+  return `Прогревов в этом окне: ${warms}, последний в ${hhmm(lastWarm.at, tzOffsetMin)} — ${last}.`
 }
 
 async function statusText($: Engine): Promise<string> {
@@ -137,9 +167,18 @@ async function statusText($: Engine): Promise<string> {
   else if (s.hours * 3_600_000 <= step) {
     lines.push(`Окно не длиннее ${step / 60_000} мин: кэш и так живёт ${cfg.ttlMin} мин после ответа — прогревов не будет.`)
   } else {
+    const now = await $.clock.now()
     const until = replyAt === null ? null : aliveUntil(replyAt, s.hours, cfg.ttlMin)
-    if (until === null || until <= (await $.clock.now())) lines.push('Сейчас не греет: ждёт следующего ответа.')
-    else lines.push(`Греет: кэш жив до ${hhmm(until, tzOffsetMin)}, прогревов в этом окне: ${warms}.`)
+    if (until === null || until <= now) {
+      lines.push(
+        lastReplyAt !== null && !isTurnRunning && !shouldWarm(s.mode, lastKind)
+          ? 'Сейчас не греет: последний ответ не ждёт тебя (`/warm on` — греть и такие).'
+          : 'Сейчас не греет: ждёт следующего ответа.',
+      )
+    } else {
+      lines.push(`Греет: ${nextText(now)}, кэш жив до ${hhmm(until, tzOffsetMin)}.`)
+      lines.push(warmsText())
+    }
   }
   lines.push(`По умолчанию для новых сессий: ${hoursText(def)}.`)
   lines.push('`/warm 3` или `/warm 1h 30m` — окно этой сессии · `/warm off` · `/warm on` (после каждого ответа) · `/warm auto` · `/warm default 2`')

@@ -124,3 +124,8 @@ export function hoursText(h: number): string {
   const mm = total % 60
   return [hh > 0 ? `${hh} ч` : '', mm > 0 ? `${mm} мин` : ''].filter(Boolean).join(' ') || '0 мин'
 }
+
+/** 180000 → «180 000»: grouped by hand, the module's runtime is not promised an `Intl` with Russian data. */
+export function tokensText(n: number): string {
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+$)/g, ' ')
+}
