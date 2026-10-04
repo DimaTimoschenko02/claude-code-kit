@@ -39,6 +39,24 @@ test('a token right after an escaped newline or tab in serialized JSON is masked
   }
 });
 
+test('a token right after a terminal colour code is masked, raw and serialized', () => {
+  const token = TOKENS.notion;
+  for (const text of [`\x1b[32mok\x1b[0m${token}`, JSON.stringify({ out: `\x1b[0m${token}` })]) {
+    assert.ok(!scrub(text).includes(token));
+  }
+});
+
+// A view that blanked "\t" alone cut these values at the escape or lost the match, and the tail leaked.
+test('a value holding a literal backslash-t or backslash-n is masked whole', () => {
+  const texts = [
+    'postgres://app:Qx\\t9vLm2@db.example.com/x',
+    JSON.stringify({ c: 'postgres://app:Qx\\t9vLm2@db.example.com/x' }),
+    'curl -u admin:Qx\\n9vLm2 https://h',
+    'mysql -pQx\\t9vLm2 db',
+  ];
+  for (const text of texts) assert.ok(!scrub(text).includes('9vLm2'), text);
+});
+
 test('names and short ids that merely share a prefix stay', () => {
   for (const s of ['secret_key_name', 'hf_hub_download', 'npm_config_cache', 'ntn_page', 'sk_live_mode', 'port 5432:AA']) {
     assert.equal(scrub(s), s);

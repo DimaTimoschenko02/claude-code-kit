@@ -146,10 +146,21 @@ export const DETECTORS = [
     re: /\/\s+`?(?<v>(?=[A-Za-z0-9]*[a-z])(?=[A-Za-z0-9]*[A-Z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{12,})`?/gd },
 ];
 
+// A token right after a JSON escape ("\n", "\u001b[0m") or a raw terminal colour code sits behind a letter, so no \b
+// fires; callers scrub serialized JSON and coloured output alike. The view blanks those sequences at the same length.
+const BEHIND_LETTER = /\x1b\[[0-9;?]*[A-Za-z]|\\u001b\[[0-9;?]*[A-Za-z]|\\u[0-9a-fA-F]{4}|\\[nrtbf]/g;
+
+/** Hits over the text and over its view, a view hit kept only where the text gave none: the text's own pass keeps a
+ *  value that holds a literal "\t" whole, the view's pass adds what hid behind an escape. */
 function* hits(text) {
-  // Detectors read a view where the JSON escapes \n \t \r are two spaces: callers scrub serialized JSON too, and there
-  // a token right after "\n" sits behind the letter n, so no \b fires. Same length, so the offsets fit the original.
-  const view = text.replace(/\\[nrt]/g, '  ');
+  const view = text.replace(BEHIND_LETTER, (s) => ' '.repeat(s.length));
+  const own = [...passHits(text)];
+  yield* own;
+  if (view === text) return;
+  for (const h of passHits(view)) if (!own.some((o) => h.start < o.end && o.start < h.end)) yield h;
+}
+
+function* passHits(view) {
   for (const d of DETECTORS) {
     d.re.lastIndex = 0;
     for (const m of view.matchAll(d.re)) {
