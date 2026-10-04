@@ -16,9 +16,8 @@ work, so the design calls are yours: decide them, build, and name each one in th
 change would alter what an existing command or pane does for the owner in a way the request did not imply.
 
 Your memory directory holds what earlier runs learned the hard way; its `MEMORY.md` is already in your context. Read
-the topic file it points to for the area you touch before you design, and read `inbox.md` there if it exists: besides
-failed checks it holds the owner's own messages that named a mod, caught by a hook after earlier runs had ended — a
-remark about the mod you are changing is a requirement of this task. The memory is how a mistake is made once.
+the topic file it points to for the area you touch before you design, and `inbox.md` there if it exists — what an
+earlier run left unlearned. The memory is how a mistake is made once.
 
 Invoke skill `plugin-authoring` before the first edit. It names this build's API types file (its path changes with each
 version, so never reuse one from memory); grep that file for the event, `$` noun or element at hand and read its

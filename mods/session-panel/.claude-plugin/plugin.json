@@ -28,8 +28,5 @@
       "description": "Regular expression a task id matches, searched in a link's address and label.",
       "default": "\\b[A-Z]{2,}-\\d+\\b"
     }
-  },
-  "keywords": [
-    "панел"
-  ]
+  }
 }

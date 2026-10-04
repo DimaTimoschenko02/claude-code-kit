@@ -5,9 +5,5 @@
     "name": "Dima Timoschenko"
   },
   "description": "Stop point before compaction: asks for it at the context threshold and on the owner's «точка останова», holds the turn once it is written, defers auto-compaction until it is fresh, and puts it back after compaction",
-  "types": "./types/index.d.ts",
-  "keywords": [
-    "останов",
-    "компакт"
-  ]
+  "types": "./types/index.d.ts"
 }

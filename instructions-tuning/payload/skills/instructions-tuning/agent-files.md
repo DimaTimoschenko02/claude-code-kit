@@ -39,10 +39,10 @@ do instead, replaced when a sharper one arrives.
 
 Writing lessons must be mechanical, not a request in the body. The check script the agent has to run appends every
 failure to an `inbox.md` in that folder, and a frontmatter `Stop` hook refuses to let the agent finish while the inbox
-has lines — releasing it on `stop_hook_active`, so a second refusal never loops. Then cover the feedback that arrives
-after the agent has finished: the owner's corrections land in another session, so a `UserPromptSubmit` hook that
-appends messages naming the agent's subject to the same inbox, plus one line in the body that corrections passed in
-its prompt are lessons too, closes that gap. Without it the agent learns only from what fails inside its own run.
+has lines — releasing it on `stop_hook_active`, so a second refusal never loops. The owner's corrections
+arrive after the agent has finished, in the calling session: the caller passes them verbatim in the next run's
+prompt, and one line in the body says a correction in its prompt is a lesson even when every check passes. Without
+that the agent learns only from what fails inside its own run.
 
 ## Verify with a real run
 

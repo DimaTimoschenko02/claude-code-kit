@@ -5,10 +5,5 @@
   "author": {
     "name": "Dima Timoschenko"
   },
-  "types": "./types/index.d.ts",
-  "keywords": [
-    "диктов",
-    "надиктов",
-    "батч"
-  ]
+  "types": "./types/index.d.ts"
 }

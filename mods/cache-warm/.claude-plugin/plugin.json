@@ -19,10 +19,5 @@
       "description": "The session's prompt-cache lifetime (60 for the 1-hour cache, 5 for the default one). With 5 the mod does not warm: a read every 4 minutes costs more than one rewrite.",
       "default": 60
     }
-  },
-  "keywords": [
-    "прогрев",
-    "кэш",
-    "кеш"
-  ]
+  }
 }
