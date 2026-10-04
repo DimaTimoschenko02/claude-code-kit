@@ -36,6 +36,12 @@ instead of a shell command per event. Each has its own tests (`claude plugin tes
 | **session-panel** | A side pane per session: links the replies carried, grouped under their task (a done card — ticked, or its `status:` among `doneStatuses` in `cardsDir` — folds its PR and design away), and one line per `result:`. The owner ticks, rewrites, deletes and adds lines in place; the changes reach the model with the next message. `/sp` opens or closes it; the model adds what no reply carried with `mcp__session-panel__add`. |
 | **cache-warm** | Keeps an idle session's prompt cache alive while the last reply waits for the owner: a tool-less fork of the session's own transcript every TTL − 10 min (50 min on the 1 h cache) reads the cached prefix and renews it, for a window after the reply (`defaultHours`, 2). `auto` warms only a reply with a filled «Ждёт тебя» slot or a `needs input:` line — measured, those are the replies the owner comes back to an hour or more later; a cache under 40 min is never warmed (a read every few minutes costs more than the rewrite). The owner's next message ends the window. `/warm` shows the state; `/warm 3` (or `1h 30m`, `90m`, `1ч 30мин`) sets this session's window, `/warm off | on | auto` its mode — kept per session id, so a respawn keeps them; `/warm default 4` changes it for sessions without their own. |
 
+### Agents (`agents/`)
+
+| Agent | What it does |
+|---|---|
+| **mod-builder** | Creates and changes mods end to end — code, tests, validate, type-check, settings wiring, smoke run, commit — so a mod request made mid-task goes to a background agent instead of derailing the session. Carries the engine facts that cost a round when missed (validator rules, test-engine gaps, start-only loading, respawn by job id). Install: symlink into `~/.claude/agents/`. |
+
 ### instructions-tuning (`instructions-tuning/`)
 
 A self-contained, installable package pairing the **instructions-tuning skill** (above)
