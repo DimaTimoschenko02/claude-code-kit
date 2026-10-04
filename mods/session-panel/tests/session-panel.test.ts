@@ -129,6 +129,15 @@ describe('session', () => {
     }
   })
 
+  test('the header names the command that restarts this background session', { options: OPTIONS }, async ($, on) => {
+    world(on)
+    mock.env(on, { CLAUDE_JOB_DIR: '/home/fake/.claude/jobs/ab12cd34' })
+    await start($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /перезапуск: claude respawn ab12cd34/ })).toBeDefined()
+    await ui.unmount()
+  })
+
   test("the owner's ticks and lines reach the model with their next message, once", { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     await start($)

@@ -47,6 +47,8 @@ let cfg: Config = { pattern: taskRegex(undefined), cardsDir: '', doneStatuses: [
 let addRound = 0
 // The session the atom holds; `/clear` starts a new id, whose panel is loaded fresh.
 let sid = ''
+// How to restart this session so it loads new mods: a background job by its job id, any other by its session id.
+let restart = ''
 
 async function sync($: Engine): Promise<void> {
   const id = await $.session.id()
@@ -130,6 +132,9 @@ export const register: Register = (on, options) => {
 
     sid = ''
     await sync($)
+    const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
+    const job = jobDir?.replace(/\/+$/, '').split('/').pop()
+    restart = job !== undefined && job !== '' ? `claude respawn ${job}` : `claude --resume ${sid}`
     if (e.isInteractive && !(await $.ui.panes()).some(p => p.id === PANE)) {
       void $.ui.open({ id: PANE, title: 'Сессия', columns: COLUMNS })
     }
@@ -210,8 +215,8 @@ export const register: Register = (on, options) => {
           <Button key={`t-${item.id}`} plain label={item.checked ? '☑' : '☐'} onPress={() => change($, p => toggle(p, item.id))} />
           <Text key={`s-${item.id}`}> </Text>
           {item.href === undefined
-            ? <Text key={`x-${item.id}`} wrap="truncate-end" dimColor={item.checked && item.kind !== 'done'}>{item.text}</Text>
-            : <Link key={`l-${item.id}`} href={item.href} label={item.text} />}
+            ? <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap" dimColor={item.checked && item.kind !== 'done'}>{item.text}</Text></Box>
+            : <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap"><Link href={item.href} label={item.text} /></Text></Box>}
           <Text key={`g-${item.id}`}> </Text>
           {Input === null ? null : <Button key={`e-${item.id}`} plain dimColor label="✎" onPress={() => update($, editingAtom, () => item.id)} />}
           <Button key={`d-${item.id}`} plain dimColor label="✕" onPress={() => change($, p => remove(p, item.id))} />
@@ -236,6 +241,7 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
+        {restart === '' ? null : <Text dimColor wrap="wrap">перезапуск: {restart}</Text>}
         {panel.items.length === 0 ? <Text dimColor>Пока пусто: ссылки и итоги из ответов появятся здесь.</Text> : null}
         {section('Задачи', taskRows)}
         {section('Ссылки', v.links.map(i => row(i)))}
