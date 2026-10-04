@@ -18,9 +18,20 @@ that were originally coupled to a particular setup have been decoupled before pu
 
 | Hook | Event | What it does |
 |---|---|---|
-| **block-secrets.sh** | PreToolUse | Blocks the agent from reading or exfiltrating credentials — sensitive file paths, env dumps, keychain/cloud-secret-manager reads, token-printing CLI commands. Defense-in-depth against accidental leaks (not a determined adversary). |
-| **block-env-files.sh** | PreToolUse | Blocks reading/copying/sourcing any `.env` file (templates like `.env.example` are whitelisted). Complements `block-secrets.sh`. |
+| **block-secrets.sh** | PreToolUse | Blocks the agent from reading or exfiltrating credentials — sensitive file paths, env dumps, keychain/cloud-secret-manager reads, token-printing CLI commands. Defense-in-depth against accidental leaks (not a determined adversary). Superseded by the `secrets-redact` mod below, which lets the agent read and use secrets but hides their values. |
+| **block-env-files.sh** | PreToolUse | Blocks reading/copying/sourcing any `.env` file (templates like `.env.example` are whitelisted). Complements `block-secrets.sh`; superseded by `secrets-redact` the same way. |
 | **memory-checkpoint.sh** | SessionStart (`compact`) | After a context compaction, nudges the agent to review whether anything durable should be written to its persistent memory. |
+
+### Mods (`mods/`)
+
+Claude Code mods: in-process TypeScript function hooks (`on(event, hook)` with `$, e, next`), loaded from a folder
+instead of a shell command per event. Each has its own tests (`claude plugin test <folder>`).
+
+| Mod | What it does |
+|---|---|
+| **secrets-redact** | Hides secret values in everything the model reads — tool results, injected rows, notifications — instead of blocking reads; names and listings stay visible, and a secret can still be used in a command. Known values come from env, rc files, `.env*` and `extraFiles`; shape rules catch the rest. A mod that fails to load is skipped silently, so two classic hooks in `guard/` watch it from outside the engine: `alive.sh` (PreToolUse `*`) denies every tool call of a session the mod left no heartbeat for, `canary.sh` (SessionStart) runs the mod's tests once per Claude Code version and warns when they fail. |
+| **stop-point** | Keeps a stop point (`.claude/state/resume/<session>.md`) in step with compaction: asks for it at the context threshold and on «точка останова», defers auto-compaction until it is fresh, puts it back after compaction. |
+| **dictate** | Voice dictation: `/pack` holds several prompts as one batch until a release word, and misheard project terms are fixed from `~/.claude/dictate-terms.json`. |
 
 ### instructions-tuning (`instructions-tuning/`)
 
@@ -62,6 +73,8 @@ These are building blocks, not a framework — copy what you want.
 - **Hooks** → copy the `.sh` into `~/.claude/hooks/` (or project `.claude/hooks/`) and wire each
   under the matching event in `settings.json` (`PreToolUse` for the two guards, `SessionStart`
   with matcher `compact` for memory-checkpoint). Make them executable (`chmod +x`).
+- **Mods** → list the folders in `CLAUDE_CODE_PLUGIN_DIRS` (colon-separated) under `env` in `~/.claude/settings.json`;
+  it is read at session start, so restart sessions after a change. One-off: `claude --plugin-dir <folder>`.
 - **instructions-tuning** (skill + skill-gate hook) → run its own `instructions-tuning/install.sh`.
 - **chat-audit** (skill + extractors + nudge hook) → run its own `chat-audit/install.sh`.
 - **learning-log** → run its own `learning-log/install.sh`.
