@@ -102,7 +102,10 @@ async function show($: Engine, force = false): Promise<void> {
   const now = await $.clock.now()
   const until = cacheUntil()
   const isAlive = until !== null && until > now
-  const text = composeStatus(isAlive ? `кэш до ${hhmm(until, tzOffsetMin)}` : undefined, pointText)
+  // The fire says the time is the warmed window's, kept by warms still to come; plain, it is the cache's own expiry.
+  const isWarming = nextAt !== null && windowUntil !== null
+  const cache = isAlive ? `${isWarming ? '🔥 ' : ''}кэш до ${hhmm(until, tzOffsetMin)}` : undefined
+  const text = composeStatus(cache, pointText)
   if (text !== shown || force) {
     shown = text
     void $.ui.status(text)

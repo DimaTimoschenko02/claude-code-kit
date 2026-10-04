@@ -375,9 +375,11 @@ export function failureReason(r: { reason: string; status?: number | null; error
 /** The owner asked for it: when the point was last made current, that it is being written, or why it failed. */
 export function statusText(s: StopPointSession): string | undefined {
   if (s.noTranscript) return undefined
-  if (s.writing !== null) return 'точка пишется…'
-  if (s.error !== null) return `точка: ошибка ${s.error}`
-  if (s.last !== null) return `точка ${clockTime(s.last.at)}`
+  // Every main reply claims a write (or marks the one in flight dirty), so with none in flight and no error the point
+  // covers the transcript up to the last reply: green. The status line is plain text, so the circle carries the colour.
+  if (s.writing !== null) return '🟡 точка пишется…'
+  if (s.error !== null) return `🔴 точка: ошибка ${s.error}`
+  if (s.last !== null) return `🟢 точка ${clockTime(s.last.at)}`
   return undefined
 }
 

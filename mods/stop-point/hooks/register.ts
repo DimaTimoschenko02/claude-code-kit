@@ -134,7 +134,7 @@ const change = ($: EngineInterface, fn: (v: StopPointSession) => StopPointSessio
 
 /** `force`: after a reload the line on screen may be the old instance's, whatever this one last set. */
 function showStatus($: EngineInterface, s: StopPointSession, force = false): void {
-  const text = compacting ? 'точка пишется…' : statusText(s)
+  const text = compacting ? '🟡 точка пишется…' : statusText(s)
   if (text === shownStatus && !force) return
   shownStatus = text
   $.ui.status(text)

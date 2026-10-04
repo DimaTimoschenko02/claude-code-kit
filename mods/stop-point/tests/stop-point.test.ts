@@ -212,7 +212,7 @@ describe('a write after every reply', () => {
     await start($)
     w.messages = [...EXCHANGE]
     await reply($)
-    expect(w.status.at(-1)).toBe('точка пишется…')
+    expect(w.status.at(-1)).toBe('🟡 точка пишется…')
     await w.clock.settle()
     expect(w.calls).toHaveLength(1)
     const req = w.calls[0]?.req
@@ -224,7 +224,7 @@ describe('a write after every reply', () => {
     expect(req?.prompt).toContain('← 53116')
     expect(w.files.get(POINT)?.text).toBe('# Точка останова\n\n- запись 1\n')
     expect([...w.files.keys()].some(k => k.includes('.tmp-'))).toBe(false) // temp file renamed into place
-    expect(w.status.at(-1)).toBe(`точка ${clockTime(START)}`)
+    expect(w.status.at(-1)).toBe(`🟢 точка ${clockTime(START)}`)
     expect(w.files.get(`${HOME}/.claude/state/stop-point/writes.log`)?.text).toMatch(
       /reply written \d+\.\ds msgs=3 chars=\d+ bytes=\d+ in=1200 out=300 cache_read=0 cache_write=0/,
     )
@@ -236,7 +236,24 @@ describe('a write after every reply', () => {
     w.messages = [...EXCHANGE]
     await reply($)
     await w.clock.settle()
-    expect([...w.rows.entries()]).toEqual([['stop-point', `точка ${clockTime(START)}`]])
+    expect([...w.rows.entries()]).toEqual([['stop-point', `🟢 точка ${clockTime(START)}`]])
+  })
+
+  test('green only while the point covers the last reply: a newer reply turns it yellow until its write lands', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    expect(w.status.at(-1)).toBe(`🟢 точка ${clockTime(START)}`)
+    w.auto = false
+    w.messages = [...w.messages, owner('а на проде?'), said('На проде 61 004.')]
+    await reply($)
+    expect(w.status.at(-1)).toBe('🟡 точка пишется…')
+    await w.clock.advance(60_000)
+    w.calls.at(-1)?.resolve(w.reply(2))
+    await w.clock.settle()
+    expect(w.status.at(-1)).toBe(`🟢 точка ${clockTime(START + 60_000)}`)
   })
 
   test('a subagent\'s turn writes nothing', async ($, on) => {
@@ -276,7 +293,7 @@ describe('a write after every reply', () => {
     await reply($)
     await w.clock.settle()
     expect(w.files.get(POINT)?.text).toContain('- запись 1')
-    expect(w.status.at(-1)).toBe(`точка ${clockTime(START + 60_000)}`)
+    expect(w.status.at(-1)).toBe(`🟢 точка ${clockTime(START + 60_000)}`)
     w.reply = n => answered(`# Точка останова\n\n- запись ${n}`)
     w.messages.push(owner('дальше'))
     await reply($)
@@ -291,14 +308,14 @@ describe('a write after every reply', () => {
     w.messages = [...EXCHANGE]
     await reply($)
     await w.clock.settle()
-    expect(w.status.at(-1)).toBe('точка: ошибка API 529 overloaded')
+    expect(w.status.at(-1)).toBe('🔴 точка: ошибка API 529 overloaded')
     expect(w.files.has(POINT)).toBe(false)
     w.reply = n => answered(`# Точка останова\n\n- запись ${n}`)
     w.messages.push(owner('ещё раз'))
     await reply($)
     await w.clock.settle()
     expect(w.calls[1]?.req.prompt).toContain('сколько строк в price_row')
-    expect(w.status.at(-1)).toBe(`точка ${clockTime(START)}`)
+    expect(w.status.at(-1)).toBe(`🟢 точка ${clockTime(START)}`)
   })
 })
 
@@ -317,7 +334,7 @@ describe('single flight', () => {
     await reply($)
     await w.clock.settle()
     expect(w.calls).toHaveLength(1) // still the first, nothing in parallel
-    expect(w.status.at(-1)).toBe('точка пишется…')
+    expect(w.status.at(-1)).toBe('🟡 точка пишется…')
     w.calls[0]?.resolve(w.reply(1))
     await w.clock.settle()
     expect(w.calls).toHaveLength(2) // one more, for both replies
@@ -329,7 +346,7 @@ describe('single flight', () => {
     await w.clock.settle()
     expect(w.calls).toHaveLength(2)
     expect(w.files.get(POINT)?.text).toContain('- запись 2')
-    expect(w.status.at(-1)).toBe(`точка ${clockTime(START)}`)
+    expect(w.status.at(-1)).toBe(`🟢 точка ${clockTime(START)}`)
   })
 
   test('a write claimed by a module instance a reload cut is taken over, not waited on forever', async ($, on) => {
@@ -445,12 +462,12 @@ describe('no word trigger, no hold', () => {
 describe('status line', () => {
   test('texts: nothing before the first write, then writing, time, error', () => {
     expect(statusText(INITIAL)).toBeUndefined()
-    expect(statusText({ ...INITIAL, writing: { gen: 1, startedAt: START } })).toBe('точка пишется…')
-    expect(statusText({ ...INITIAL, error: 'API 529 overloaded' })).toBe('точка: ошибка API 529 overloaded')
+    expect(statusText({ ...INITIAL, writing: { gen: 1, startedAt: START } })).toBe('🟡 точка пишется…')
+    expect(statusText({ ...INITIAL, error: 'API 529 overloaded' })).toBe('🔴 точка: ошибка API 529 overloaded')
     const last = { kind: 'written' as const, at: START, ms: 1, input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }
-    expect(statusText({ ...INITIAL, last })).toBe(`точка ${clockTime(START)}`)
-    expect(statusText({ ...INITIAL, last, writing: { gen: 2, startedAt: START } })).toBe('точка пишется…')
-    expect(statusText({ ...INITIAL, last, error: 'пустой ответ' })).toBe('точка: ошибка пустой ответ')
+    expect(statusText({ ...INITIAL, last })).toBe(`🟢 точка ${clockTime(START)}`)
+    expect(statusText({ ...INITIAL, last, writing: { gen: 2, startedAt: START } })).toBe('🟡 точка пишется…')
+    expect(statusText({ ...INITIAL, last, error: 'пустой ответ' })).toBe('🔴 точка: ошибка пустой ответ')
   })
 
   test('/stop-point names the file, its time and the last run\'s cost', async ($, on) => {
@@ -812,7 +829,7 @@ describe('a host without a transcript (Agent SDK, headless)', () => {
     await w.clock.settle()
     expect(w.calls).toHaveLength(0)
     expect(w.status.at(-1)).toBeUndefined()
-    expect(w.status.filter(t => t !== undefined && t.startsWith('точка:'))).toHaveLength(0)
+    expect(w.status.filter(t => t !== undefined && t.includes('точка:'))).toHaveLength(0)
     expect(w.files.has(`${HOME}/.claude/state/stop-point/writes.log`)).toBe(false)
     expect(w.files.has(POINT)).toBe(false)
     await compact($, 'auto', [...EXCHANGE, owner('ещё')])
