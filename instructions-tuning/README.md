@@ -9,9 +9,13 @@ before touching those files.
   instruction fails — conflict between layers, stale old-model crutch, bloat, or one of
   seven failure types — and picks the form that fixes it, judgement-in-prose first,
   hook last. A folder, not one file: `skill-files.md` (descriptions as triggers,
-  splitting by situation, gotchas), `audit.md` (whole-surface sweep built on
-  `/doctor prompt-audit`), `tool-holes.md` (fix the *class*, not the instance) and
-  `bash-hooks.md` (nine rules derived from real hook misfires).
+  splitting by situation, gotchas, near-miss trigger checks), `agent-files.md`
+  (subagent definitions: routing description, frontmatter, agents that learn),
+  `audit.md` (whole-surface sweep built on `/doctor prompt-audit`), `tool-holes.md`
+  (fix the *class*, not the instance) and `bash-hooks.md` (nine rules derived from
+  real hook misfires). Its own frontmatter hook, `scripts/frontmatter-check.rb`
+  (PostToolUse, live once the skill is invoked), checks every edited SKILL.md and
+  agent definition the way Claude Code reads it.
 - **Gate:** `skill-gate-guard.sh` (PreToolUse Write|Edit|Bash) — blocks an edit to a
   *governed* path until its owner skill was invoked **this context window**. Pure
   prose is advisory; the gate is the deterministic backstop for "must invoke first".
@@ -37,7 +41,7 @@ results are recorded as user turns, so a "last user message" boundary would drif
 
 ## Requirements
 
-- `bash`, `jq` (≥1.6).
+- `bash`, `jq` (≥1.6). `ruby` for the frontmatter check (skipped without it).
 - Windows: **Git for Windows** (Git Bash). Clone with `git` (don't download the ZIP).
 
 ## Install

@@ -1,6 +1,12 @@
 ---
 name: instructions-tuning
 description: "Use when creating, editing, splitting or auditing any file an agent reads to decide how to behave — CLAUDE.md, AGENTS.md, SKILL.md, agent definitions, .claude/rules, text a hook injects, system prompts — or when an instruction keeps getting ignored, misapplied, or contradicts another one. Also when one of our own hooks, scripts or agent tools misfires or stays silent when it should fire. Trigger words: 'инструкции', 'правило', 'правь CLAUDE.md', 'поправь скилл', 'мета-файл', 'хук не сработал'. Diagnoses why an instruction fails, picks the form that fixes it, and keeps the surface lean for current Claude models."
+hooks:
+  PostToolUse:
+    - matcher: "Write|Edit|MultiEdit"
+      hooks:
+        - type: command
+          command: 'for f in "$CLAUDE_PROJECT_DIR/.claude/skills/instructions-tuning/scripts/frontmatter-check.rb" "$HOME/.claude/skills/instructions-tuning/scripts/frontmatter-check.rb"; do [ -f "$f" ] && command -v ruby >/dev/null && exec ruby "$f"; done; exit 0'
 ---
 
 # Instructions Tuning
@@ -20,6 +26,7 @@ Editing the files an agent reads to decide how to behave. Two facts frame every 
 | Auditing a whole surface — a project's CLAUDE.md, rules, skills — for dated patterns | `audit.md` |
 | One of our own hooks, scripts or tools misfires or stays silent | `tool-holes.md` |
 | Writing or fixing a bash hook | `bash-hooks.md` |
+| Writing or fixing a subagent definition (`agents/*.md`) | `agent-files.md` |
 
 ## Process
 
@@ -83,11 +90,11 @@ For each line: *would removing it make the agent make a mistake?* If not, cut it
 
 **One place per fact.** Two files that agree are fine; two that disagree are a conflict (step 1).
 
-Limits: CLAUDE.md under 200 lines — every line is resent on every turn. SKILL.md body under 500 lines, and split by situation well before that (`skill-files.md`). `description` at most 1024 characters.
+Limits: CLAUDE.md under 200 lines — every line is resent on every turn. SKILL.md body under 500 lines, and split by situation well before that (`skill-files.md`). The frontmatter of a SKILL.md or an agent definition is checked by this skill's own hook after every edit (`scripts/frontmatter-check.rb`: YAML, `description` present and at most 1024 characters for a skill, `name` shape); read what it reports and fix it.
 
 ### 5. Apply and record
 
-Show the diff with one line of why, get a light OK, apply. Then check that behavior actually shifts — one observation, not a test suite.
+Show the diff with one line of why, get a light OK, apply. Then check that behavior actually shifts — one observation, not a test suite. For a rewrite or a deletion bigger than a line, make that observation a comparison: 2–3 realistic prompts run in parallel subagents, one set given the old text (`git show HEAD:<path>`), one the new. Judge by the transcripts, not only the final answers: a rule that costs wasted turns, a misread step or a ritual tool call shows in the run, while the answers can look the same.
 
 A removal is a hypothesis. If what the rule guarded against comes back, re-add it in its smallest form; don't restore the original.
 

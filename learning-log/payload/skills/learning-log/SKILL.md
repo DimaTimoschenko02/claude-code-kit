@@ -1,8 +1,8 @@
-<!-- cc-learning-log:managed -->
 ---
 name: learning-log
 description: Накопление и разбор наблюдений за поведением Claude (self-learning log) — промахи (mistakes) и удачные переиспользуемые решения (wins). Используется когда пользователь говорит "/log <текст>", "/learning-log", "/learning-log analyze", "/learning-log wins", "/learning-log flush", "/learning-log on|off [chat|global]", "/learning-log status", "покажи лог", "разбери лог", "что я там накопил", "анализ ошибок", "выключи лог", "не логируй этот чат". Также при повторных коррекциях ("я же говорил", "опять то же", "again the same") — предложить добавить запись через /log.
 ---
+<!-- cc-learning-log:managed -->
 
 # Learning Log
 
