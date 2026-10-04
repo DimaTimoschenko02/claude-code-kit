@@ -85,8 +85,15 @@ function toolKey(name) {
 
 function bashKey(cmd) {
   if (!cmd) return '?';
-  // Leading `NAME=value` assignments go too: the key is the command, and `PGPASSWORD=…` must not reach the report.
-  const c = cmd.replace(/^\s*(cd\s+\S+\s*&&\s*)+/, '').replace(/^(?:\s*[A-Za-z_]\w*=\S*)+\s+/, '').trim();
+  let c = cmd.replace(/^\s*(cd\s+\S+\s*&&\s*)+/, '').trim();
+  // Leading `NAME=value` assignments are not the command, and `PGPASSWORD=…` must not reach the report: quoted values
+  // are skipped whole; a command that is only assignments, or whose value does not parse, keys as `NAME=…`.
+  const assign = c.match(/^(?:[A-Za-z_]\w*=(?:'[^']*'|"(?:[^"\\]|\\.)*"|[^\s'"])*(?:\s+|$))+/);
+  if (assign) {
+    const rest = c.slice(assign[0].length).trim();
+    if (!rest || /^['"]/.test(rest)) return `${assign[0].split('=')[0]}=…`;
+    c = rest;
+  } else if (/^[A-Za-z_]\w*=/.test(c)) return `${c.split('=')[0]}=…`;
   const m =
     c.match(/^(npx\s+tsx\s+tools\/)([\w.-]+)/) ||
     c.match(/^(npm\s+run\s+)([\w:-]+)/) ||
@@ -96,7 +103,7 @@ function bashKey(cmd) {
     c.match(/^(node\s+)(\S+)/) ||
     c.match(/^(bash\s+)(\S+)/);
   if (m) return (m[1] + m[2].replace(/^_.*/, '_scratch')).replace(/\s+/g, ' ');
-  return c.split(/\s+/)[0].slice(0, 30);
+  return scrub(c.split(/\s+/)[0].replace(/=.*/s, '=…')).slice(0, 30);
 }
 
 // Read results grouped by top-level directory of the session's project

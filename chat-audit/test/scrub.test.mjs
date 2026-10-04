@@ -113,7 +113,7 @@ test('env keys, any-case bearer, base64 PEM, PGP, 0x hex, base64 with slashes, c
 
 test('code, descriptions of a secret and ordinary config stay as written', () => {
   for (const s of ['author: Пушкин', 'authors=Толстой Шевченко', 'authMode: basic', 'authenticated: true',
-    'max_tokens=4096', 'tokenCount: 1234', 'const token = getToken();', '{ password: hashedPassword }',
+    'max_tokens=4096', 'tokenCount: 1234', 'const token = getToken();',
     '{ password: dto.password }', 'passwordHash: user.passwordHash', 'accessKey: this.cfg.accessKey',
     'secret: Buffer.from(raw)', 'secretName: pricehub-env', 'apiKey: string;', 'token_type: Bearer',
     'password-reset: enabled', 'sk-learn-classification-tutorial', 'image@sha256:' + 'ab12'.repeat(16),
@@ -143,4 +143,19 @@ test('long words, hex runs and a big serialized output are scrubbed in linear ti
     findSecrets(text);
     assert.ok(performance.now() - started < 3000, `${text.slice(0, 12)}… took ${Math.round(performance.now() - started)} ms`);
   }
+});
+
+// The redaction-only net under the detectors stays broad: narrowing it with the detectors' value checks lost all of
+// these, which the version before it masked (a security review of 2cf532d caught it).
+test('the broad net still masks what only it caught: glued auth keys, numbers, paths, camelCase words', () => {
+  const ts = 'tskey-auth-' + 'kQ9xZ2'.repeat(5);
+  const long = '{"k":"v"},'.repeat(80);
+  const cases = [
+    [`TS_AUTHKEY=${ts}`, ts], [`authkey: ${ts}`, ts], ['DB_PASSWORD=84736251', '84736251'], ['password=4821', '4821'],
+    ['db_pass=>4821', '4821'], [`PASS=>XoI)uu6bY7JR`, 'uu6bY7JR'], ['token=84736251', '84736251'],
+    ['password: Ab3/x9.Kq', 'x9.Kq'], ['password: superSecretPassword', 'superSecretPassword'],
+    [`VAULT_SECRET_ID=${P}`, P], [`api_secret_hash: ${P}`, P], [`token_header: ${P}`, P],
+    [`curl -s -X POST https://h/api -d '${long}' -u admin:${P}`, P],
+  ];
+  for (const [text, secret] of cases) assert.ok(!leaks(text, secret), text);
 });

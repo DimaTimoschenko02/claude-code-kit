@@ -21,7 +21,6 @@
 //   - a key written only as `\uXXXX` escapes (Cyrillic «пароль» in JSON), an XML attribute pair `key="Password" value="X"`,
 //     a setter call `setPassword('X')`, webhook URLs;
 //   - a value whose JSON escape (`\"`) sits inside it is masked up to the escape only;
-//   - a camelCase value with no digit that holds a secret word (`hashedPassword`) is taken for an identifier.
 
 // ------------------------------------------------------------- value checks
 
@@ -43,24 +42,29 @@ const PLACEHOLDER = new RegExp(
 const RU_NOUN = /^(?:gmail|google|mysql|mariadb|postgres(?:ql)?|imap|smtp|ssh|sftp|ftp|odata|bas|db|env|http|https|basic|auth|oauth|app|wifi|vpn|api|sudo|git|github|redis|notion|admin|root-?доступ)$/i;
 const ENV_NAME = /^[A-Z][A-Z0-9]*_[A-Z0-9_]+$/;        // DB_PASSWORD — a name, not a value
 const NUMERIC = /^[\d.,_:+-]+[kKmMbB%]?$/;              // tokens: 263k, port 5432
-// A relative path ends in a file extension or a slash; base64 with slashes (`s7pOW/GZkVNZ/imYP`) ends in neither.
-const PATHLIKE = /^(?:~|\.{1,2})?\/[^\s/]+\/|^[\w.-]+(?:\/[\w.-]+)*\/(?:[\w-]*\.[A-Za-z0-9]{1,5})?$/;
+// A relative path has two slashes and ends in a file extension or a slash; base64 with slashes (`s7pOW/GZkVNZ/imYP`)
+// ends in neither.
+const PATHLIKE = /^(?:~|\.{1,2})?\/[^\s/]+\/|^[\w.-]+(?:\/[\w.-]+)+\/(?:[\w-]*\.[A-Za-z0-9]{1,5})?$/;
 // A member access, a call, a parenthesised expression; `XoI)uu6bY7JR` is a password, not code.
 const CODE_REF = /^(?:process\.env|env|config|this|ctx|opts?|options|settings|cfg|secrets|args|req|res|self)\.\w|^[\w.$]+\(|^\(/;
-// An identifier that names the secret instead of holding it: `dto.password`, `hashedPassword`, `accessToken`.
-const IDENT_REF = /^[A-Za-z_$]+(?:\.[A-Za-z_$]+)+$|^[a-z]+(?:[A-Z][a-z]+)+$/;
+// A member access that names the secret instead of holding it: `dto.password`, `user.passwordHash`. A bare camelCase
+// word is not taken for code — it can be a password.
+const IDENT_REF = /^[A-Za-z_$]+(?:\.[A-Za-z_$]+)+$/;
 const SECRET_WORD = /pass|pwd|secret|token|key|cred|auth|hash/i;
 // A key that describes a secret instead of holding it: `secretName`, `token_type`, `passwordHash`, `secretKeyRef`.
-const META = 'name|id|type|count|len|length|hash|file|path|dir|url|uri|field|mode|hint|label|prompt|ref|ttl|header|provider|format|version|expiry|expires|prefix|store|manager';
+// No `id` (Vault's `secret_id` is a secret), `hash` or `header` (both can hold one).
+const META = 'name|type|count|len|length|file|path|dir|url|uri|field|mode|hint|label|prompt|ref|ttl|provider|format|version|expiry|expires|prefix';
 const META_SNAKE = new RegExp(`[_.-](?:${META})s?$`, 'i');
-const META_CAMEL = new RegExp(`(?<=[a-z])(?:${META.replace(/\b\w/g, (c) => c.toUpperCase())}|ID)s?$`);
+const META_CAMEL = new RegExp(`(?<=[a-z])(?:${META.replace(/\b\w/g, (c) => c.toUpperCase())})s?$`);
 const describesSecret = (key) => META_SNAKE.test(key) || META_CAMEL.test(key);
 const GMAIL_APP = /^[a-z]{4}(?: [a-z]{4}){3}$/;
 /** A quoted value with spaces is a secret only when short and secret-looking, or a Gmail app password — not a message. */
 const quotedSecret = (v) => !/\s/.test(v) || GMAIL_APP.test(v) || (v.trim().split(/\s+/).length <= 3 && looksSecret(v));
 
-// Rules whose key is an explicit password word/flag — there even an all-digit value is a password.
+// Rules whose key is an explicit password word/flag — there even an all-digit value is a password; the same for a
+// key-value pair whose key is a password word (`DB_PASSWORD=84736251`).
 const PASSWORD_RULES = new Set(['db-cli-p', 'ru-password', 'en-password', 'cli-password', 'sql-password']);
+const PASSWORD_KEY = /pass|pwd|secret|(?<![a-z])pin(?![a-z])/i;
 
 /** A bare English value after «password …» must look like a secret, not a word («password reset», «is required»). */
 function looksSecret(v) {
@@ -79,13 +83,14 @@ function clean(v) {
 }
 
 /** Is `raw` (the captured value) a literal secret rather than a placeholder/name/reference? */
-export function isRealValue(raw, { min = 4, rule = '' } = {}) {
+export function isRealValue(raw, { min = 4, rule = '', key = '' } = {}) {
   const v = clean(raw);
   if (v.length < min) return false;
   if (PLACEHOLDER.test(v)) return false;
   if (/^\[[A-Z_]+\]/.test(v)) return false;             // already scrubbed
-  // A number is a secret only after an explicit password key (`пароль 84736251`); 2–5 digits there is a port/year.
-  if (NUMERIC.test(v) && !(PASSWORD_RULES.has(rule) && /^\d{6,}$/.test(v))) return false;
+  // A number is a secret only after an explicit password key: 6+ digits in prose (`пароль 84736251`; 2–5 digits there is
+  // a port or a year), 4+ under a password-named key (`DB_PASS=4821`).
+  if (NUMERIC.test(v) && !((PASSWORD_RULES.has(rule) && /^\d{6,}$/.test(v)) || (PASSWORD_KEY.test(key) && /^\d{4,}$/.test(v)))) return false;
   if (ENV_NAME.test(v)) return false;
   if (PATHLIKE.test(v)) return false;
   if (CODE_REF.test(v)) return false;
@@ -99,7 +104,7 @@ export function isRealValue(raw, { min = 4, rule = '' } = {}) {
 const KEY_NAMES = [
   'passw(?:or)?d', 'passwort', 'passphrase', '(?<![A-Za-z])pass(?![A-Za-z])', 'pwd', 'pgpassword',
   'secret', 'token(?![a-rt-z])', 'api[_-]?key', 'apikey', 'access[_-]?key', 'private[_-]?key',
-  'client[_-]?secret', 'credentials?', 'app[_-]?password', '(?<![A-Za-z])auth(?![A-Za-z])',
+  'client[_-]?secret', 'credentials?', 'app[_-]?password', '(?<![A-Za-z])auth(?!or)',
 ].join('|');
 // Bounded on both sides: an unbounded run made every start position rescan a long word (quadratic on base64/hex).
 const SECRET_KEY = `[\\w.-]{0,64}?(?:${KEY_NAMES})[\\w.-]{0,64}`;
@@ -141,14 +146,14 @@ export const DETECTORS = [
     re: /(?<![\w/:.@-])[A-Za-z0-9._-]{1,64}:(?<v>[^\s:@/'"`]{3,})@(?:localhost|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/gd },
   // curl -u user:pass / -uuser:pass / --user user:pass (also wget/httpie).
   { name: 'curl-user', group: 'v', min: 3,
-    re: /\b(?:curl|wget|https?|httpie)\b[^\n|;]{0,400}?\s(?:-[A-Za-z]*u[\s=]*|(?:--user|--auth|-a)[\s=]+)["']?[^\s:'"]+:(?<v>[^\s'"@]+)/gd },
+    re: /\b(?:curl|wget|https?|httpie)\b[^\n|;]{0,2000}?\s(?:-[A-Za-z]*u[\s=]*|(?:--user|--auth|-a)[\s=]+)["']?[^\s:'"]+:(?<v>[^\s'"@]+)/gd },
   // mysql/mariadb/psql … -p<val> | -p <val> ; sshpass -p <val>. `-p$VAR`, `-p "$VAR"`, `psql -p 5432` pass.
   { name: 'db-cli-p', group: 'v', min: 3,
-    re: /\b(?:mysql|mariadb|mysqldump|mariadb-dump|mysqladmin|mysqlsh|psql|pg_dump|pg_restore|pg_dumpall|sshpass|kdb)\b[^\n|;&]{0,400}?\s-p\s*["']?(?<v>[^\s'"`$\\-][^\s'"`]*)/gd },
+    re: /\b(?:mysql|mariadb|mysqldump|mariadb-dump|mysqladmin|mysqlsh|psql|pg_dump|pg_restore|pg_dumpall|sshpass|kdb)\b[^\n|;&]{0,2000}?\s-p\s*["']?(?<v>[^\s'"`$\\-][^\s'"`]*)/gd },
   // key = value / key: value / 'key' => value for secret-ish names, incl. `.env` lines, YAML, JSON, PHP arrays,
   // `**Password:** x`. A key that describes the secret (`secretName`, `token_type`) holds no value.
   { name: 'key-value', group: 'v',
-    re: new RegExp(`(?<![\\p{L}\\d])(?<k>${SECRET_KEY})\\**["'\`]?\\s*\\**\\s*(?:=>|[:=])\\s*\\**\\s*["'\`]?(?<v>[^\\s"'\`,;)}\\]]+)`, 'giud'),
+    re: new RegExp(`(?<![\\p{L}\\d])(?<k>${SECRET_KEY})\\**["'\`]?\\s*\\**\\s*(?:=>|[:=])\\s*\\**\\s*["'\`]?(?<v>[^\\s"'\`,;}\\]]*[^\\s"'\`,;)}\\]])`, 'giud'),
     check: (v, bare, m) => !describesSecret(m.groups.k) },
   // The same with the value quoted whole: `IMAP_PASSWORD="abcd efgh ijkl mnop"`, `password="XoI)uu6b"`.
   { name: 'key-value-quoted', group: 'v',
@@ -156,7 +161,7 @@ export const DETECTORS = [
     check: (v, bare, m) => !describesSecret(m.groups.k) && quotedSecret(v) },
   // An env-style name ending in _KEY/_PW/_AUTH/_SALT that KEY_NAMES does not cover: `ENCRYPTION_KEY=…`, `APP_KEY=base64:…`.
   { name: 'env-key', group: 'v',
-    re: /(?<![\w])[A-Z][A-Z0-9_]*_(?:KEY|PW|AUTH|SALT|PASSPHRASE)(?![\w])\s*[:=]\s*["']?(?<v>[^\s"'`,;)}\]]+)/gd,
+    re: /(?<![\w])[A-Z][A-Z0-9_]*_(?:KEY|PW|AUTH|SALT|PASSPHRASE)(?![\w])\s*[:=]\s*["']?(?<v>[^\s"'`,;}\]]*[^\s"'`,;)}\]])/gd,
     check: (v) => looksSecret(v) },
   // A secret name passed with its literal: `define('DB_PASSWORD', 'x')`, `getenv("API_KEY", "x")`, `('password', 'x')`.
   { name: 'name-literal', group: 'v',
@@ -247,7 +252,7 @@ function* passHits(view) {
       const value = g ? m.groups?.[g] : m[0];
       if (value === undefined) continue;
       const [start, end] = g ? m.indices.groups[g] : m.indices[0];
-      if (g && !isRealValue(value, { min: d.min ?? 4, rule: d.name })) continue;
+      if (g && !isRealValue(value, { min: d.min ?? 4, rule: d.name, key: m.groups?.k ?? '' })) continue;
       if (d.check && !d.check(value, bare, m)) continue;
       yield { rule: d.name, start, end };
     }
@@ -270,12 +275,19 @@ export function findSecrets(text) {
 
 // ------------------------------------------------------------ redaction only
 
+function netKeeps(key, raw) {
+  const v = clean(raw);
+  return PLACEHOLDER.test(v) || /^\[[A-Z_]+\]/.test(v) || (NUMERIC.test(v) && /tokens(?![a-z])/i.test(key)) ||
+    CODE_REF.test(v) || (IDENT_REF.test(v) && SECRET_WORD.test(v)) || describesSecret(key);
+}
+
 const RULES = [
-  // key=value / key: value assignments for secret-ish names (audit-era rule, broader than the detector). The value
-  // checks are the detectors': `max_tokens=4096`, `apiKey: string`, `author: …`, `token = getToken()` stay.
+  // key=value / key: value assignments for secret-ish names (audit-era rule, broader than the detectors on purpose:
+  // it is the net under them). It lets through only the false positives seen: `author…` keys, placeholders, a number
+  // under an LLM token counter (`max_tokens=4096`), a call or member access, a key describing a secret.
   [
-    /\b((?:[A-Za-z_]{0,64}(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|auth(?:orization)?(?![a-z]))[A-Za-z_]{0,64}))(\s*[:=]\s*)(["']?)([^\s"',;)]{4,})\3/gi,
-    (m, key, sep, q, v) => (isRealValue(v) && !describesSecret(key) ? `${key}${sep}${q}[REDACTED]${q}` : m),
+    /\b((?:[A-Za-z_]{0,64}(?:password|passwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credential|auth(?:orization|(?!or)))[A-Za-z_]{0,64}))(\s*[:=]\s*)(["']?)([^\s"',;)]{4,})\3/gi,
+    (m, key, sep, q, v) => (netKeeps(key, v) ? m : `${key}${sep}${q}[REDACTED]${q}`),
   ],
   // One-time codes stated next to the word.
   [/(?<!\p{L})(otp|одноразов\p{L}*|код подтверждения|verification code|2fa)(?!\p{L})([^\n]{0,20}?)\b\d{4,8}\b/giu, '$1$2 [OTP]'],
