@@ -228,6 +228,16 @@ class HeredocPathAsData(unittest.TestCase):
     def test_node_written_text_is_data(self):
         self.assertEqual(targets(node("fs.writeFileSync('/tmp/o.txt', '/v/x.md');")), ["/tmp/o.txt"])
 
+    def test_one_line_loop_writing_rows_of_dicts(self):
+        # The ledger append the gate denied: `for c in C: f.write(json.dumps(c))` read C's dict values as targets.
+        body = "C = [{'paths': ['.claude/hooks/a.mjs'], 'src': 'tool:Skill.skill'}]\n" \
+               "with open('.claude/state/ledger.jsonl', 'a') as f:\n" \
+               "  for c in C: f.write(json.dumps(c) + '\\n')"
+        self.assertEqual(targets(py(body)), ["/w/.claude/state/ledger.jsonl"])
+
+    def test_one_line_loop_whose_body_writes_its_variable(self):
+        self.assertEqual(targets(py("for p in ['/v/a.md', '/v/b.md']: open(p, 'w').write('x')")), ["/v/a.md", "/v/b.md"])
+
     def test_loop_over_lines_of_a_read_file(self):
         body = "for line in open('brain/list.txt'):\n    p = line.split('\\t')\n    open('/tmp/o/' + p[0], 'w').write(p[1])"
         self.assertEqual(targets(py(body)), ["/tmp/o"])

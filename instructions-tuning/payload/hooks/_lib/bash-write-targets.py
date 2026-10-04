@@ -213,6 +213,20 @@ def without_data(code):
     return "".join(out)
 
 
+HEADER = re.compile(r"\s*(?:async\s+)?(?:for|while|if|elif)\b")
+
+
+def header_body(code):
+    """A one-line compound statement's body, its header blanked: in `for c in rows: f.write(c)` the header names what the
+    body walks or tests, the body says where it writes. The loop itself is still followed from the whole statement.
+    `with open(…) as f:` keeps its header: that header is the write."""
+    parts = split_top(code, ":") if HEADER.match(code) else []
+    if len(parts) < 2:
+        return code
+    head = len(parts[0]) + 1
+    return " " * head + code[head:]
+
+
 def path_values(code, lits):
     """The literals in a piece of folded code that are paths: they hold a `/` or are a FILE_NAME."""
     values = (lits[int(x)] for x in LIT.findall(code))
@@ -291,7 +305,7 @@ def heredoc_targets(body, js, argv):
     found, names, done, bound = [], set(), set(), {}
     for code, lits, wcode in stmts:
         if BODY_WRITE.search(wcode):
-            target = without_data(code)
+            target = without_data(code) if js else header_body(without_data(code))
             found += path_values(target, lits)
             names |= names_in(target)
         m = ASSIGN.match(code)
