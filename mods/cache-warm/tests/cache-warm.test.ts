@@ -2,7 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { aliveUntil, classify, nextWarm, parse } from '../hooks/logic'
+import { aliveUntil, classify, hoursText, nextWarm, parse } from '../hooks/logic'
 
 const MIN = 60_000
 // 10:00 UTC; `date +%z` answers +0300, so the owner's clock reads 13:00.
@@ -95,7 +95,15 @@ describe('logic', () => {
     expect(parse('стоп')).toEqual({ kind: 'mode', mode: 'off' })
     expect(parse('всегда')).toEqual({ kind: 'mode', mode: 'on' })
     expect(parse('default 4h')).toEqual({ kind: 'default', hours: 4 })
+    expect(parse('1h 30m')).toEqual({ kind: 'hours', hours: 1.5 })
+    expect(parse('2ч15м')).toEqual({ kind: 'hours', hours: 2.25 })
+    expect(parse('2 hours 10 minutes')).toEqual({ kind: 'hours', hours: 2 + 10 / 60 })
+    expect(parse('default 1h 45m')).toEqual({ kind: 'default', hours: 1.75 })
+    // Hours past a day, a unit dropped after the first part, words: no guess.
     expect(parse('30').kind).toBe('error')
+    expect(parse('1h 30').kind).toBe('error')
+    expect(parse('1h abc').kind).toBe('error')
+    expect([hoursText(2), hoursText(1.5), hoursText(0.75)]).toEqual(['2 ч', '1 ч 30 мин', '45 мин'])
   })
 })
 
@@ -149,6 +157,9 @@ describe('session', () => {
     const w = world(on)
     await start($)
     expect(textOf(await warm($, '3'))).toContain('окно 3 ч (своё у этой сессии)')
+    expect(textOf(await warm($, '1h 30m'))).toContain('окно 1 ч 30 мин (своё у этой сессии)')
+    expect(textOf(await warm($, '40m'))).toContain('прогревов не будет')
+    await warm($, '3')
 
     w.sid.value = 'sess-2'
     await start($)

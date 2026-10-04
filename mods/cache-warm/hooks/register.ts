@@ -132,14 +132,17 @@ async function statusText($: Engine): Promise<string> {
   const lines = [
     `Прогрев кэша: ${MODE_TEXT[s.mode]}, окно ${hoursText(s.hours)}${s.isOwn ? ' (своё у этой сессии)' : ' (по умолчанию)'}.`,
   ]
-  if (stepMs(cfg.ttlMin) === null) lines.push(`Кэш живёт ${cfg.ttlMin} мин — греть дороже, чем переписать: прогрев не идёт.`)
-  else {
+  const step = stepMs(cfg.ttlMin)
+  if (step === null) lines.push(`Кэш живёт ${cfg.ttlMin} мин — греть дороже, чем переписать: прогрев не идёт.`)
+  else if (s.hours * 3_600_000 <= step) {
+    lines.push(`Окно не длиннее ${step / 60_000} мин: кэш и так живёт ${cfg.ttlMin} мин после ответа — прогревов не будет.`)
+  } else {
     const until = replyAt === null ? null : aliveUntil(replyAt, s.hours, cfg.ttlMin)
     if (until === null || until <= (await $.clock.now())) lines.push('Сейчас не греет: ждёт следующего ответа.')
     else lines.push(`Греет: кэш жив до ${hhmm(until, tzOffsetMin)}, прогревов в этом окне: ${warms}.`)
   }
   lines.push(`По умолчанию для новых сессий: ${hoursText(def)}.`)
-  lines.push('`/warm 3` — окно этой сессии · `/warm off` · `/warm on` (после каждого ответа) · `/warm auto` · `/warm default 2`')
+  lines.push('`/warm 3` или `/warm 1h 30m` — окно этой сессии · `/warm off` · `/warm on` (после каждого ответа) · `/warm auto` · `/warm default 2`')
   return lines.join('\n')
 }
 

@@ -64,13 +64,22 @@ export type Command =
   | { kind: 'default'; hours: number }
   | { kind: 'error'; text: string }
 
+const PART = /(\d+(?:[.,]\d+)?)\s*(час\p{L}*|мин\p{L}*|hours?|hrs?|minutes?|mins?|h|ч|m|м)?/giu
+
+/** `3`, `2.5h`, `90m`, `1h 30m`, `1ч30мин` → hours, whole minutes; a bare number is hours. Up to 24 h. */
 function duration(raw: string): number | null {
-  const m = /^(\d+(?:[.,]\d+)?)\s*(h|ч|час\p{L}*|m|м|мин\p{L}*)?$/iu.exec(raw.trim())
-  if (m === null) return null
-  const n = Number(m[1]!.replace(',', '.'))
-  const minutes = m[2] !== undefined && /^[mм]/i.test(m[2])
-  const hours = minutes ? n / 60 : n
-  return hours > 0 && hours <= 24 ? hours : null
+  const text = raw.trim()
+  if (text === '' || text.replace(PART, '').trim() !== '') return null
+  const parts = [...text.matchAll(PART)]
+  // A unit may be left off only when the number stands alone: «1h 30» reads as a typo, not as 1 h 30 h.
+  if (parts.length > 1 && parts.some(p => p[2] === undefined)) return null
+  let minutes = 0
+  for (const p of parts) {
+    const n = Number(p[1]!.replace(',', '.'))
+    minutes += p[2] !== undefined && /^[mм]/i.test(p[2]) ? n : n * 60
+  }
+  minutes = Math.round(minutes)
+  return minutes > 0 && minutes <= 24 * 60 ? minutes / 60 : null
 }
 
 export function parse(args: string): Command {
@@ -110,5 +119,8 @@ export function parseTzOffset(text: string): number | null {
 }
 
 export function hoursText(h: number): string {
-  return Number.isInteger(h) ? `${h} ч` : `${Math.round(h * 60)} мин`
+  const total = Math.round(h * 60)
+  const hh = Math.floor(total / 60)
+  const mm = total % 60
+  return [hh > 0 ? `${hh} ч` : '', mm > 0 ? `${mm} мин` : ''].filter(Boolean).join(' ') || '0 мин'
 }
