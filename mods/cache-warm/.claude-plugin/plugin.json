@@ -1,0 +1,21 @@
+{
+  "name": "cache-warm",
+  "version": "0.1.0",
+  "author": { "name": "Dima Timoschenko" },
+  "description": "Keeps an idle session's prompt cache warm while the last reply waits for the owner: one tool-less fork of the session every TTL minus 10 minutes, for a window per session (/warm)",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "defaultHours": {
+      "type": "number",
+      "title": "Default window, hours",
+      "description": "How long after a reply the cache is kept warm in a session that set no window of its own; `/warm default <n>` overrides it.",
+      "default": 2
+    },
+    "ttlMinutes": {
+      "type": "number",
+      "title": "Prompt cache TTL, minutes",
+      "description": "The session's prompt-cache lifetime (60 for the 1-hour cache, 5 for the default one). With 5 the mod does not warm: a read every 4 minutes costs more than one rewrite.",
+      "default": 60
+    }
+  }
+}
