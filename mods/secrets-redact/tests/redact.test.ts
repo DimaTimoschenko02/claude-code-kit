@@ -1,8 +1,8 @@
 import type { On, SessionAppendResult, ToolCallResult } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
-import { ACCESS_MD, CLEAN, ENV_EXAMPLE, ENV_FILE, FAKE, LEAKS, PROC_ENV, ZSHENV } from './fixtures.ts'
-import { EMPTY_INDEX, buildIndex, hasPlaceholder, placeholder, redactText } from '../hooks/redact.ts'
+import { ACCESS_MD, CLEAN, ENV_EXAMPLE, ENV_FILE, FAKE, LEAKS, PROC_ENV, ZSHENV } from './fixtures'
+import { EMPTY_INDEX, buildIndex, hasPlaceholder, isKnownCandidate, placeholder, redactText } from '../hooks/redact'
 
 const HOME = '/home/fake'
 const PROJ = '/work/proj'
@@ -756,5 +756,70 @@ describe('review round 2', () => {
     w.sessionId = 'sess-2'
     await $.prompt.submit({ text: 'hi', origin: { kind: 'composer' }, wait: false } as never)
     expect(w.files.has(`${HOME}/.claude/state/secrets-redact/alive/sess-2`)).toBe(true)
+  })
+})
+
+// A grep -n over a JSON log (stop-point's writes.log) was hidden from its 5th colon to the end of the line as a
+// .pgpass password, and that tail was then learned and hidden in later outputs too.
+describe('a line rule hides one field, never ordinary output', () => {
+  const LOG = 'writes.log:3:{"agent":"probe:k7Qx2","input_tokens":1840,"output_tokens":412,"cost_usd":0.0213}'
+  const STAMPED = '2026-10-04T18:48:12Z {"agent":"probe:k7Qx2","output_tokens":412,"ms":5120}'
+  const TAIL = 'k7Qx2","input_tokens":1840,"output_tokens":412,"cost_usd":0.0213}'
+
+  test('grep -n and timestamped lines of a JSON log come back as given', () => {
+    for (const text of [LOG, STAMPED, `${LOG}\n${STAMPED}\n`, `${LOG.replace('writes.log:3:', '')}\n`]) {
+      expect({ text, out: redactText(text, EMPTY_INDEX) }).toEqual({ text, out: text })
+    }
+  })
+
+  test('through Bash: the JSON tail is neither hidden nor learned for later outputs', async ($, on) => {
+    const w = world(on)
+    expect(stdoutOf(await bash($, w, `${LOG}\n${STAMPED}\n`, 'grep -n probe writes.log'))).toBe(`${LOG}\n${STAMPED}\n`)
+    expect(stdoutOf(await bash($, w, `${TAIL}\n`, 'tail -1 writes.log'))).toBe(`${TAIL}\n`)
+  })
+
+  test('grep -n hits with five colon fields stay: a line number is not a Postgres port, a sentence is not a field', () => {
+    for (const text of [
+      'src/db.ts:12:host:localhost:5432',
+      'docker-compose.yml:7:image:node:20-alpine',
+      'notes.md:3:todo:ask:Denis-about-it',
+      'app.log:812:ERROR:pool:timeout-after-5000ms',
+      '12:34:56:note:retry-in-30s',
+    ]) {
+      expect({ text, out: redactText(text, EMPTY_INDEX) }).toEqual({ text, out: text })
+    }
+  })
+
+  test('a secret-named key whose unquoted value runs into a JSON tail hides the value, not the tail', () => {
+    const out = norm(redactText('  password: Qz8rT4vW2xy","user":"acme","retries":3\n', EMPTY_INDEX))
+    expect(out).toBe('  password: ‹secret:password›","user":"acme","retries":3\n')
+  })
+
+  test('a JSON fragment is never a value known everywhere; a random token still is', () => {
+    expect(isKnownCandidate('k7Qx2","input_tokens":1840,"output_tokens":412,"cost_usd":0.0213}', false)).toBe(false)
+    expect(isKnownCandidate('Qz8rT4vW2xy9","user":"acme"', true)).toBe(false)
+    expect(isKnownCandidate('Lrn3dT0kenValue9xQ2mZ7pK4wR8sV1yB6', false)).toBe(true)
+    expect(isKnownCandidate(FAKE.pgpassPw, true)).toBe(true)
+  })
+
+  test('a real .pgpass line still hides exactly its password, and only it', () => {
+    const pw = FAKE.pgpassPw
+    const mark = '‹secret:pgpass-password›'
+    const cases: [line: string, hidden: string][] = [
+      [`localhost:5432:acme:acme:${pw}`, `localhost:5432:acme:acme:${mark}`],
+      [`*:*:*:postgres:${pw}`, `*:*:*:postgres:${mark}`],
+      [`db.example.com:6432:shop_db:app.user@srv:${pw}\r`, `db.example.com:6432:shop_db:app.user@srv:${mark}\r`],
+      [`/var/run/postgresql:5432:acme:acme:${pw}`, `/var/run/postgresql:5432:acme:acme:${mark}`],
+      [`\\:\\:1:5432:acme:acme:${pw}  `, `\\:\\:1:5432:acme:acme:${mark}  `],
+      // grep -n over the file itself
+      [`/home/fake/.pgpass:1:localhost:5432:acme:acme:${pw}`, `/home/fake/.pgpass:1:localhost:5432:acme:acme:${mark}`],
+      // an escaped colon belongs to the password; libpq ends it at the first unescaped one
+      [`localhost:5432:acme:acme:ab\\:${pw}`, `localhost:5432:acme:acme:${mark}`],
+      [`localhost:5432:acme:acme:${pw}:old-field`, `localhost:5432:acme:acme:${mark}:old-field`],
+    ]
+    for (const [line, hidden] of cases) {
+      const out = redactText(`${line}\nnext line stays\n`, EMPTY_INDEX)
+      expect({ line, out: norm(out) }).toEqual({ line, out: `${hidden}\nnext line stays\n` })
+    }
   })
 })

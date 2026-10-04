@@ -35,7 +35,7 @@ import {
   signatureOf,
   type Index,
   type Secret,
-} from './redact.ts'
+} from './redact'
 
 type Engine = Parameters<Hook<'tool.call'>>[0]
 type Kind = 'dotenv' | 'shell' | 'mcp' | 'settings' | 'markdown'
