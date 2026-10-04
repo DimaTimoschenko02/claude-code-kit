@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stop hook of the mod-builder agent (its frontmatter `hooks: Stop`, which runs as SubagentStop): the agent may not
-# finish while mod-check has failures in the memory inbox it has not turned into lessons. The failure is recorded
-# by code; this makes the lesson happen too, instead of hoping the agent remembers.
+# finish while the memory inbox has entries — mod-check failures, owner remarks from mod-remark-capture — it has not
+# turned into lessons. Both are recorded by code; this makes the lesson happen too, instead of hoping the agent
+# remembers.
 set -uo pipefail
 
 inbox=${MOD_BUILDER_INBOX:-$HOME/.claude/agent-memory/mod-builder/inbox.md}
@@ -13,8 +14,9 @@ payload=$(cat 2>/dev/null || true)
 
 count=$(grep -c '^- ' "$inbox")
 cat >&2 <<EOF
-$inbox holds $count failed check(s) from mod-check. Before you finish: for each, add a lesson to MEMORY.md next to it
-(the cause in one sentence and what to do instead, under its topic) or, if a lesson there already covers it, sharpen
-that one; then empty inbox.md. A failure whose cause was a typo with nothing to learn is dropped, not recorded.
+$inbox holds $count entries: failed checks from mod-check and owner remarks that named a mod. Before you finish:
+for each, add a lesson to the topic file MEMORY.md points to (the cause in one sentence and what to do instead) or, if
+a lesson there already covers it, sharpen that one; then empty inbox.md. Drop without a lesson a failure that was a
+typo and a remark that is a question or says nothing about how a mod should behave.
 EOF
 exit 2
