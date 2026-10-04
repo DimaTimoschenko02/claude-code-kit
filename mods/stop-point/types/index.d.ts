@@ -1,35 +1,46 @@
 // The stop-point mod's $.state contract: one value per session, held by the host, so a hot reload of the
-// module keeps it. Everything that used to live in ~/.claude/state/*stop-point*/<sid>.* files is here.
+// module keeps it.
 
-/** What the agent has been asked for and not yet delivered. `owner`: the next write of the point engages the hold. */
-export type StopPointRequest = 'none' | 'owner'
+/** A background write the mod has claimed: its generation and when it started. */
+export type StopPointRun = {
+  gen: number
+  /** ms since the epoch. */
+  startedAt: number
+}
 
-/** The point as written in the current cycle (since the last compaction). */
-export type StopPointRecord = {
-  /** The file as the agent wrote it. */
-  path: string
-  /** When, ms since the epoch. */
-  writtenAt: number
-  /** Context tokens at the write (input + cache read + cache write of the last response); null when unknown. */
-  tokens: number | null
+/** Where the last write's transcript delta ended: the message count then and the last message's fingerprint. */
+export type StopPointCursor = {
+  count: number
+  fp: string
+}
+
+/** What the last finished run did and cost, for /stop-point and the writes log. */
+export type StopPointLastRun = {
+  kind: 'written' | 'unchanged'
+  /** ms since the epoch, when it finished. */
+  at: number
+  ms: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
 }
 
 export type StopPointSession = {
-  /** Written in this cycle; reset by a compaction, so a point from before the last one never counts as fresh. */
-  point: StopPointRecord | null
-  /** Context at the last threshold request (mid-turn or at Stop); the next one waits for +growth. */
-  askedAt: number | null
-  /** Context at the first deferral of an auto-compaction; null while the gate is not waiting. */
-  need: number | null
-  /** Context at the last mid-turn reminder while the gate waits (one per 20k of growth). */
-  naggedAt: number | null
-  /** A Stop block was already spent on the current owner request or gate wait. */
-  stopNagged: boolean
-  /** A turn ended on an API error while the gate was waiting: the next auto-compaction passes. */
-  escape: boolean
-  request: StopPointRequest
-  /** The owner's point is written: only reads and the point itself until the owner prompts or compacts. */
-  hold: boolean
+  /** The background write in flight (single flight); null when none. */
+  writing: StopPointRun | null
+  /** A reply ended while a write was in flight: one more write follows it. */
+  dirty: boolean
+  /** The last generation claimed (background and compaction writes alike). */
+  gen: number
+  /** The newest generation whose result landed; an older result that finishes later is dropped. */
+  appliedGen: number
+  /** The transcript position the point covers; null before the first write of this session (or after /clear). */
+  cursor: StopPointCursor | null
+  /** The last run that left the point current (written or confirmed unchanged). */
+  last: StopPointLastRun | null
+  /** Why the last run failed; cleared by the next success. */
+  error: string | null
   /** Compactions begun in this session (main thread); the post-compaction injection is matched against it. */
   compactSeq: number
   /** The compactSeq whose point classic SessionStart(compact) already injected. */

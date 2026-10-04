@@ -1,68 +1,59 @@
-// stop-point: the stop point ↔ compaction machinery as in-process hooks. It asks the agent for a stop point (a file
-// with what the compaction summary loses) when the context nears the compaction window and when the owner writes
-// «точка останова»; once the owner's point is written it holds the turn to reads until he compacts; it defers an
-// auto-compaction until a fresh point exists (never wedging); after a compaction it puts the point and the files the
-// summary dropped back into context. Everything per session lives in $.state, so a hot reload keeps it.
+// stop-point: keeps the session's stop point (a file with what a compaction summary loses: anchors, numbers,
+// verdicts) fresh by itself. After every main-thread reply a background Sonnet completion rewrites the file from the
+// previous point and the transcript since its last write; the owner never asks and the main model never writes it.
+// One write at a time: a reply during a write queues exactly one more. A compaction makes the point current first
+// (its own write over what is still unwritten, bounded), then puts the point and the files the summary dropped back
+// into context. The status line says when the point was last made current, that it is being written, or why not.
+//
+// Why a completion, not a subagent: a plugin-spawned subagent's hand-back arrives on the main thread as a prompt and
+// starts a turn (measured 2026-10-04: origin `peer`, then a main reply about it) — on every reply, a loop.
 
-import type { EngineInterface, Register, Settings, SettingsSource } from 'claude-code'
+import type { EngineInterface, Register, SessionMessage, Settings, SettingsSource } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { StopPointSession } from '../types'
 import {
-  HOLD_REASON,
+  COMPACT_WAIT_MS,
   INITIAL,
-  PHRASE,
-  READ_ONLY,
-  WHY_GATE,
-  WHY_OWNER_STOP,
-  WHY_THRESHOLD,
-  absolute,
+  MAX_REPLY_TOKENS,
+  WRITER_MODEL,
+  WRITER_SYSTEM,
+  WRITE_TIMEOUT_MS,
   afterCompactText,
-  afterCompaction,
-  basename,
-  gateDecision,
-  isFresh,
-  isOwnerPrompt,
-  limits,
+  claimForCompaction,
+  claimOnReply,
+  clockTime,
+  cursorAt,
+  deltaFrom,
+  failureReason,
   lostRefs,
-  midTurn,
-  normalize,
-  ownerRequest,
-  requestText,
+  norm,
+  parseReply,
+  releaseRun,
+  renderDelta,
   resumeText,
   standDownReason,
   statusText,
   templateBody,
+  writerPrompt,
 } from './logic'
-import type { GateDecision, Limits } from './logic'
 
 const SESSION = atom({ plugin: 'stop-point', key: 'session' } as const, INITIAL)
 
+const COMMAND = 'stop-point'
+
 /** A point's file name: the session id, a UUID. Pruning touches nothing else in the folder. */
 const POINT_NAME = '????????-????-????-????-????????????.md'
-
-/** Tools whose call with the point's path writes the point. */
-const WRITES = new Set(['Write', 'Edit', 'MultiEdit'])
-
-const HOLD_NOTICE =
-  'Точка останова записана по просьбе владельца. Заверши ход отбивкой 💾 — дальше он делает /compact; до этого ' +
-  'открыты только Read, Grep, Glob и правка самого файла точки.'
 
 type Config = {
   /** Why the mod sits this session out (a shell copy is still wired); null when active. */
   standDown: string | null
   sid: string
   root: string
-  cwd: string
   home: string
-  /** Where the point of this session is written, as the request names it. */
+  /** Where the point of this session lives. */
   pointPath: string
-  /** The same file with every symbolic link of its folder followed; null while the folder does not exist. */
-  pointReal: string | null
-  template: string
+  templatePath: string
   templateBody: string
-  autoCompactWindow: number | null
-  triggerOverride: number | null
-  growthOverride: number | null
   logPath: string
   /** The points folder with every symbolic link followed; null while it does not exist. Pruned by its real path. */
   pointsReal: string | null
@@ -70,8 +61,13 @@ type Config = {
 
 let cached: Promise<Config> | null = null
 let shownStatus: string | undefined
+/** A compaction's own write is running (the background slot is in the state; this one is the hook's). */
+let compacting = false
+/** File writes of this module instance, in order; a write of an older generation never lands over a newer one. */
+let fileChain: Promise<unknown> = Promise.resolve()
+let writtenGen = 0
 
-/** The session's paths and settings, read once per session (and again after a reload, /clear or resume). */
+/** The session's paths and settings, read once per session (and again after a reload or /clear). */
 function config($: EngineInterface): Promise<Config> {
   if (cached === null) {
     cached = load($)
@@ -83,14 +79,7 @@ function config($: EngineInterface): Promise<Config> {
 }
 
 async function load($: EngineInterface): Promise<Config> {
-  const [root, cwd, sid, homeEnv, tokensEnv, growthEnv] = await Promise.all([
-    $.session.root(),
-    $.session.cwd(),
-    $.session.id(),
-    $.env.get('HOME'),
-    $.env.get('STOP_POINT_TOKENS'),
-    $.env.get('STOP_POINT_GROWTH'),
-  ])
+  const [root, sid, homeEnv] = await Promise.all([$.session.root(), $.session.id(), $.env.get('HOME')])
   const home = homeEnv ?? ''
   const resumeDir = `${root}/.claude/state/resume`
   const [rootStat, resumeStat, ownShell] = await Promise.all([
@@ -100,83 +89,48 @@ async function load($: EngineInterface): Promise<Config> {
   ])
   // A repo keeps its points in its own .claude/state/resume only where that folder really lies inside the repo: the
   // folder is pruned with find -delete, and a repo cloned from anywhere could link it to any folder of the owner's.
-  // The template is always the mod's own — a repo's text inlined into the context would be a prompt from a stranger.
+  // The template is always the mod's own — a repo's text in the writer's prompt would be a prompt from a stranger.
   const isInsideRoot =
     resumeStat?.kind === 'dir' &&
     resumeStat.realPath !== undefined &&
     rootStat?.realPath !== undefined &&
     resumeStat.realPath.startsWith(`${rootStat.realPath}/`)
   const pointsDir = isInsideRoot ? resumeDir : `${home}/.claude/state/stop-point/points`
-  const template = `${$.plugin.root}/template.md`
-  const settings = (source?: SettingsSource): Promise<Settings> =>
-    $.settings.read(source === undefined ? {} : { source }).catch((): Settings => ({}))
-  const [templateText, merged, project, local, user, dir] = await Promise.all([
-    $.fs.read(template).catch(() => ''),
-    settings(),
+  const templatePath = `${$.plugin.root}/template.md`
+  const settings = (source: SettingsSource): Promise<Settings> => $.settings.read({ source }).catch((): Settings => ({}))
+  const [templateText, project, local, user, dir] = await Promise.all([
+    $.fs.read(templatePath).catch(() => ''),
     settings('project'),
     settings('local'),
     settings('user'),
     $.fs.stat(pointsDir, { resolve: true }).catch(() => null),
   ])
   const hooks = (s: Settings): string => JSON.stringify(s['hooks'] ?? {})
-  const window = merged['autoCompactWindow']
   return {
     standDown: standDownReason(`${hooks(project)}\n${hooks(local)}`, hooks(user), ownShell),
     sid,
     root,
-    cwd,
     home,
     pointPath: `${pointsDir}/${sid}.md`,
-    pointReal: dir?.realPath === undefined ? null : `${dir.realPath}/${sid}.md`,
-    template,
+    templatePath,
     templateBody: templateBody(templateText),
-    autoCompactWindow: typeof window === 'number' ? window : null,
-    triggerOverride: toNumber(tokensEnv),
-    growthOverride: toNumber(growthEnv),
-    logPath: `${home}/.claude/state/stop-point/gate.log`,
+    logPath: `${home}/.claude/state/stop-point/writes.log`,
     pointsReal: dir?.kind === 'dir' && dir.realPath !== undefined ? dir.realPath : null,
   }
 }
 
-const toNumber = (v: string | undefined): number | null => {
-  const n = Number(v)
-  return v !== undefined && v !== '' && Number.isFinite(n) ? n : null
-}
+const readState = async ($: EngineInterface): Promise<StopPointSession> => norm(await read($, SESSION))
 
-/** The live context size (input + cache read + cache write of the last response) and the thresholds over it. */
-async function measure($: EngineInterface, c: Config): Promise<{ tokens: number | null; lim: Limits }> {
-  const usage = await $.session.usage().catch(() => null)
-  const lim = limits({
-    autoCompactWindow: c.autoCompactWindow,
-    modelWindow: usage?.context.window ?? null,
-    triggerOverride: c.triggerOverride,
-    growthOverride: c.growthOverride,
-  })
-  return { tokens: usage?.context.tokens ?? null, lim }
-}
+/** Every state change goes through `update`, which retries on conflict: decide inside `fn`, never on a stale read. */
+const change = ($: EngineInterface, fn: (v: StopPointSession) => StopPointSession): Promise<StopPointSession> =>
+  update($, SESSION, v => fn(norm(v)))
 
-/** The gate waits and the agent has not been reminded within the last 20k tokens of growth. */
-const nagDue = (s: StopPointSession, tokens: number | null, lim: Limits): boolean =>
-  tokens !== null && !s.hold && s.need !== null && !isFresh(s, tokens, lim) && (s.naggedAt === null || tokens >= s.naggedAt + 20_000)
-
-/** The context crossed the threshold (again, past the growth step) with no point and no owner request pending. */
-const thresholdDue = (s: StopPointSession, tokens: number | null, lim: Limits): boolean =>
-  tokens !== null && !s.hold && s.need === null && s.request !== 'owner' && !isFresh(s, tokens, lim) &&
-  tokens >= lim.trigger && (s.askedAt === null || tokens >= s.askedAt + lim.growth)
-
-/** Anything a main tool call's result has to carry or record. */
-const due = (s: StopPointSession, tokens: number | null, lim: Limits): boolean =>
-  s.pending.length > 0 || s.pointDue || nagDue(s, tokens, lim) || thresholdDue(s, tokens, lim)
-
-const field = (e: object, key: string): unknown => (e as Readonly<Record<string, unknown>>)[key]
-
-/** The path names this session's point: its own spelling, its folder's real one, or wherever it resolves. */
-async function isPoint($: EngineInterface, c: Config, p: unknown): Promise<boolean> {
-  if (typeof p !== 'string' || basename(p) !== `${c.sid}.md`) return false
-  const a = absolute(p, c.cwd, c.home)
-  if (a === normalize(c.pointPath) || (c.pointReal !== null && a === normalize(c.pointReal))) return true
-  const st = await $.fs.stat(a, { resolve: true }).catch(() => null)
-  return st?.realPath !== undefined && st.realPath === c.pointReal
+/** `force`: after a reload the line on screen may be the old instance's, whatever this one last set. */
+function showStatus($: EngineInterface, s: StopPointSession, force = false): void {
+  const text = compacting ? 'точка пишется…' : statusText(s)
+  if (text === shownStatus && !force) return
+  shownStatus = text
+  $.ui.status(text)
 }
 
 /** The point file of this session when it is there and not empty. */
@@ -187,23 +141,195 @@ async function pointFile($: EngineInterface, c: Config): Promise<{ text: string;
   return text.trim() === '' ? null : { text, mtimeMs: st.mtimeMs }
 }
 
-function showStatus($: EngineInterface, s: StopPointSession, tokens: number | null, lim: Limits): void {
-  const text = statusText(s, tokens, lim)
-  if (text === shownStatus) return
-  shownStatus = text
-  $.ui.status(text)
+/** Temp file + rename, in this instance's order; an older generation that comes late is dropped. */
+function writeFileAtomic($: EngineInterface, path: string, text: string, gen: number): Promise<void> {
+  const run = fileChain.then(async () => {
+    if (gen < writtenGen) return
+    const tmp = `${path}.tmp-${gen}`
+    await $.fs.write(tmp, text)
+    const mv = await $.process.run(['mv', '-f', tmp, path], { timeoutMs: 5000 })
+    if (mv.exitCode !== 0) throw new Error(`mv exit ${mv.exitCode}`)
+    writtenGen = gen
+  })
+  fileChain = run.catch(() => undefined)
+  return run
 }
 
-async function appendLog($: EngineInterface, c: Config, now: number, tokens: number | null, decision: GateDecision) {
-  const line = `${new Date(now).toISOString()} auto ${tokens ?? '-'} ${c.sid.slice(0, 8)} ${decision}`
+type Outcome = {
+  kind: 'written' | 'unchanged' | 'empty' | 'discarded' | 'error'
+  reason?: string
+  ms: number
+  count: number
+  chars: number
+  usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number; cache_creation_input_tokens: number }
+}
+
+/**
+ * One write: the delta since the cursor, the writer's completion, then — if no newer generation landed meanwhile —
+ * the cursor moves, the file is replaced, and the run's cost is kept. A failure leaves the cursor, so the next run
+ * covers this delta too.
+ */
+async function writeOnce(
+  $: EngineInterface,
+  c: Config,
+  gen: number,
+  messages: readonly SessionMessage[],
+  timeoutMs: number,
+): Promise<Outcome> {
+  const t0 = await $.clock.now()
+  const s = await readState($)
+  const delta = deltaFrom(messages, s.cursor)
+  const cursor = cursorAt(messages)
+  const rendered = renderDelta(delta)
+  const base = { count: delta.length, chars: rendered.text.length }
+  const fail = async (reason: string, ms: number): Promise<Outcome> => {
+    await change($, v => (gen < v.appliedGen ? v : { ...v, error: reason }))
+    return { kind: 'error', reason, ms, ...base }
+  }
+
+  if (rendered.text.trim() === '') {
+    // nothing a writer could use (no messages, or only empty ones): the point already covers it
+    await change($, v => (gen <= v.appliedGen || cursor === null ? v : { ...v, appliedGen: gen, cursor }))
+    return { kind: 'empty', ms: 0, ...base }
+  }
+
+  const previous = await pointFile($, c)
+  const r = await $.model.complete({
+    model: WRITER_MODEL,
+    system: WRITER_SYSTEM,
+    prompt: writerPrompt({
+      templatePath: c.templatePath,
+      templateBody: c.templateBody,
+      pointPath: c.pointPath,
+      previous,
+      delta: rendered.text,
+      count: rendered.count,
+      root: c.root,
+      now: t0,
+    }),
+    maxTokens: MAX_REPLY_TOKENS,
+    effort: 'medium',
+    timeoutMs,
+  })
+  const now = await $.clock.now()
+  const ms = now - t0
+  if (!r.isAnswered) return { ...(await fail(failureReason(r), ms)), usage: r.usage }
+  const reply = parseReply(r.text)
+  if (reply.kind === 'empty') return { ...(await fail('пустой ответ', ms)), usage: r.usage }
+  if ((await $.session.id()) !== c.sid) return { kind: 'discarded', ms, ...base, usage: r.usage }
+
+  const last = {
+    kind: reply.kind,
+    at: now,
+    ms,
+    input: r.usage.input_tokens,
+    output: r.usage.output_tokens,
+    cacheRead: r.usage.cache_read_input_tokens,
+    cacheWrite: r.usage.cache_creation_input_tokens,
+  }
+  const out = { applied: false }
+  await change($, v => {
+    out.applied = gen > v.appliedGen
+    if (!out.applied) return v
+    return { ...v, appliedGen: gen, cursor, last, error: null }
+  })
+  if (!out.applied) return { kind: 'discarded', ms, ...base, usage: r.usage }
+  if (reply.kind === 'written') {
+    try {
+      await writeFileAtomic($, c.pointPath, reply.body, gen)
+    } catch (err) {
+      return { ...(await fail(`запись файла: ${String(err).slice(0, 60)}`, ms)), usage: r.usage }
+    }
+  }
+  return { kind: reply.kind, ms, ...base, usage: r.usage }
+}
+
+/** One line per run in the debug log and in writes.log (bounded), so the cost per reply can be measured later. */
+async function logRun($: EngineInterface, c: Config, where: 'reply' | 'compact', o: Outcome): Promise<void> {
+  const u = o.usage
+  const cost = u === undefined
+    ? ''
+    : ` in=${u.input_tokens} out=${u.output_tokens} cache_read=${u.cache_read_input_tokens} cache_write=${u.cache_creation_input_tokens}`
+  const what = o.kind === 'error' ? `error(${o.reason ?? '?'})` : o.kind
+  const line = `${where} ${what} ${(o.ms / 1000).toFixed(1)}s msgs=${o.count} chars=${o.chars}${cost}`
+  $.ui.log(`stop-point: ${line}`, { to: 'debug' })
   try {
+    const stamp = new Date(await $.clock.now()).toISOString()
     const old = await $.fs.read(c.logPath).catch(() => '')
     const lines = old === '' ? [] : old.replace(/\n$/, '').split('\n')
-    lines.push(line)
-    await $.fs.write(c.logPath, `${lines.slice(-1000).join('\n')}\n`)
+    lines.push(`${stamp} ${c.sid.slice(0, 8)} ${line}`)
+    await $.fs.write(c.logPath, `${lines.slice(-2000).join('\n')}\n`)
   } catch {
-    // the log is for people reading it later; the gate never depends on it
+    // the log is for measuring later; the point never depends on it
   }
+}
+
+/** The background slot: write, then once more for every reply that came meanwhile (never two at once). */
+async function backgroundLoop($: EngineInterface, first: number): Promise<void> {
+  let gen: number | null = first
+  while (gen !== null) {
+    const current: number = gen
+    let outcome: Outcome
+    let c: Config | null = null
+    try {
+      c = await config($)
+      const messages = await $.session.messages()
+      outcome = await writeOnce($, c, current, messages, WRITE_TIMEOUT_MS)
+    } catch (err) {
+      const reason = `сбой: ${String(err).slice(0, 60)}`
+      await change($, v => ({ ...v, error: reason })).catch(() => null)
+      outcome = { kind: 'error', reason, ms: 0, count: 0, chars: 0 }
+    }
+    if (c !== null) await logRun($, c, 'reply', outcome)
+    const now = await $.clock.now()
+    const out = { gen: null as number | null }
+    const after = await change($, v => {
+      const r = releaseRun(v, current, now)
+      out.gen = r.gen
+      return r.state
+    }).catch(() => null)
+    if (after === null) return
+    showStatus($, after)
+    gen = out.gen
+  }
+}
+
+/** The blocks the next tool result or prompt carries: the point after a compaction, the files the summary lost. */
+async function takeDeliveries($: EngineInterface, c: Config): Promise<string[]> {
+  const out = { blocks: [] as string[], due: false }
+  await change($, v => {
+    out.blocks = [...v.pending]
+    out.due = v.pointDue
+    return { ...v, pending: [], pointDue: false }
+  })
+  if (out.due) {
+    const file = await pointFile($, c)
+    if (file !== null) out.blocks.unshift(afterCompactText(c.pointPath, file.text, file.mtimeMs, await $.clock.now()))
+  }
+  return out.blocks
+}
+
+async function commandText($: EngineInterface): Promise<string> {
+  const c = await config($)
+  if (c.standDown !== null) return `Точка останова: мод в этой сессии не работает — ${c.standDown}.`
+  const [s, file, now] = await Promise.all([readState($), pointFile($, c), $.clock.now()])
+  const lines = [`Точка останова этой сессии: ${c.pointPath}`]
+  if (file === null) lines.push('Файла ещё нет: первая запись — после первого ответа.')
+  else {
+    const age = Math.max(0, Math.round((now - file.mtimeMs) / 60_000))
+    lines.push(`Файл записан в ${clockTime(file.mtimeMs)} (${age} мин назад); обновляется в фоне после каждого ответа (Sonnet).`)
+  }
+  if (s.writing !== null || compacting) lines.push('Сейчас пишется.')
+  if (s.error !== null) lines.push(`Последний запуск не удался: ${s.error}.`)
+  if (s.last !== null) {
+    const l = s.last
+    const what = l.kind === 'written' ? 'переписал' : 'без изменений'
+    lines.push(
+      `Последний удачный запуск в ${clockTime(l.at)}: ${what}, ${(l.ms / 1000).toFixed(0)} с, вход ${l.input} ` +
+        `(из кэша ${l.cacheRead}, в кэш ${l.cacheWrite}), выход ${l.output} токенов.`,
+    )
+  }
+  return lines.join('\n')
 }
 
 export const register: Register = on => {
@@ -212,6 +338,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     cached = null
     shownStatus = undefined
+    compacting = false
     const r = await next(e)
     try {
       const c = await config($)
@@ -219,14 +346,22 @@ export const register: Register = on => {
         $.ui.log(`stop-point stands down: ${c.standDown}`, { to: 'debug' })
         return r
       }
+      await $.command
+        .register({
+          name: COMMAND,
+          description: 'Точка останова: где лежит файл, когда записан, сколько стоила последняя запись',
+          immediate: true,
+        })
+        .catch(err => $.ui.log(`stop-point: /${COMMAND} not registered: ${String(err)}`, { to: 'debug' }))
       if (c.pointsReal !== null)
         await $.process
           .run(['find', c.pointsReal, '-maxdepth', '1', '-type', 'f', '-name', POINT_NAME, '-mtime', '+7', '-delete'], {
             timeoutMs: 5000,
           })
           .catch(() => null)
-      const [s, m] = await Promise.all([read($, SESSION), measure($, c)])
-      showStatus($, s, m.tokens, m.lim)
+      // A run claimed by the instance before a reload died with it; the next reply's write covers its delta.
+      const s = await change($, v => (v.writing === null ? v : { ...v, writing: null, dirty: false }))
+      showStatus($, s, true)
     } catch {
       // nothing to set up is worth failing a session start
     }
@@ -241,209 +376,120 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('session.measure', async ($, e, next) => {
-    const r = await next(e)
+  on('command.run', { command: 'stop-point' }, async ($, e, next) => {
     try {
-      const c = await config($)
-      if (c.standDown !== null) return r
-      const s = await read($, SESSION)
-      const lim = limits({
-        autoCompactWindow: c.autoCompactWindow,
-        modelWindow: e.context.window,
-        triggerOverride: c.triggerOverride,
-        growthOverride: c.growthOverride,
-      })
-      showStatus($, s, e.context.tokens ?? null, lim)
-    } catch {
-      // the status line is decoration
+      return { text: await commandText($) }
+    } catch (err) {
+      return { text: `Точка останова: не прочитал состояние — ${String(err).slice(0, 120)}` }
     }
-    return r
   })
 
-  // --- the agent's tool calls: the hold, the point's write, mid-turn requests ------------------------------------------
-
-  on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
-    const c = await config($)
-    if (c.standDown !== null) return next(e)
-    const tool: string = e.tool
-    const writesPoint = WRITES.has(tool) && (await isPoint($, c, field(e, 'file_path')))
-    const s = await read($, SESSION)
-    if (s.hold && !READ_ONLY.has(tool) && !writesPoint) return { deny: HOLD_REASON }
-
-    const r = await next(e)
-    if (r.deny !== undefined) return r
-    const { tokens, lim } = await measure($, c)
-    const written = writesPoint && r.isError === undefined
-    if (!written && !due(s, tokens, lim)) {
-      showStatus($, s, tokens, lim)
-      return r
-    }
-    const now = await $.clock.now()
-    const out = { blocks: [] as string[], due: false, held: false }
-    const after = await update($, SESSION, v => {
-      out.blocks = [...v.pending]
-      out.due = v.pointDue
-      out.held = false
-      let n: StopPointSession = { ...v, pending: [], pointDue: false }
-      if (written) {
-        out.held = v.request === 'owner'
-        n = {
-          ...n,
-          point: { path: c.pointPath, writtenAt: now, tokens },
-          need: null,
-          naggedAt: null,
-          stopNagged: false,
-          hold: v.hold || v.request === 'owner',
-          request: 'none',
-        }
-        return n
-      }
-      if (nagDue(n, tokens, lim)) {
-        out.blocks.push(midTurn(requestText(c.pointPath, WHY_GATE, c.template, c.templateBody)))
-        return { ...n, naggedAt: tokens }
-      }
-      if (thresholdDue(n, tokens, lim)) {
-        out.blocks.push(midTurn(requestText(c.pointPath, WHY_THRESHOLD, c.template, c.templateBody)))
-        return { ...n, askedAt: tokens }
-      }
-      return n
-    })
-    if (out.held) out.blocks.push(HOLD_NOTICE)
-    if (out.due) {
-      const file = await pointFile($, c)
-      if (file !== null) out.blocks.unshift(afterCompactText(c.pointPath, file.text, file.mtimeMs, now))
-    }
-    showStatus($, after, tokens, lim)
-    if (out.blocks.length === 0) return r
-    return { ...r, context: [...(r.context ?? []), ...out.blocks] }
-  })
-
-  on('agent.spawn', async ($, e, next) => {
-    if (e.parentAgentId !== undefined) return next(e)
-    const c = await config($)
-    if (c.standDown !== null) return next(e)
-    const s = await read($, SESSION)
-    return s.hold ? { deny: HOLD_REASON } : next(e)
-  })
-
-  // --- the owner's prompt: «точка останова», lifting the hold, deliveries ------------------------------------------------
-
-  on('prompt.submit', async ($, e, next) => {
-    const c = await config($)
-    if (c.standDown !== null) return next(e)
-    const owner = isOwnerPrompt(e.origin.kind, e.text)
-    const phrase = owner && PHRASE.test(e.text)
-    const idle = e.turnId === undefined
-    const { tokens, lim } = await measure($, c)
-    const out = { blocks: [] as string[], due: false }
-    const after = await update($, SESSION, v => {
-      out.blocks = [...v.pending]
-      out.due = v.pointDue
-      let n: StopPointSession = { ...v, pending: [], pointDue: false }
-      if (owner) n = { ...n, hold: false }
-      if (phrase) n = { ...n, request: 'owner', stopNagged: false }
-      else if (owner && idle) n = { ...n, request: 'none' }
-      if (!phrase && nagDue(n, tokens, lim)) {
-        out.blocks.push(midTurn(requestText(c.pointPath, WHY_GATE, c.template, c.templateBody)))
-        n = { ...n, naggedAt: tokens }
-      }
-      return n
-    })
-    if (out.due) {
-      const file = await pointFile($, c)
-      if (file !== null) out.blocks.unshift(afterCompactText(c.pointPath, file.text, file.mtimeMs, await $.clock.now()))
-    }
-    if (phrase) out.blocks.push(ownerRequest(c.pointPath, c.template, c.templateBody))
-    showStatus($, after, tokens, lim)
-    if (out.blocks.length === 0) return next(e)
-    return next({ ...e, context: [...(e.context ?? []), ...out.blocks] })
-  })
-
-  // --- turn end: a request the turn did not deliver, an API error while the gate waits -----------------------------------
-
-  on('classic.Stop', async ($, e, next) => {
-    const r = await next(e)
-    if (e.agent_id !== undefined || e.stop_hook_active || r.block !== undefined) return r
-    const c = await config($)
-    if (c.standDown !== null) return r
-    const { tokens, lim } = await measure($, c)
-    const out = { reason: null as string | null }
-    const after = await update($, SESSION, v => {
-      out.reason = null
-      if (v.hold) return v
-      const fresh = isFresh(v, tokens, lim)
-      if (v.request === 'owner' && !v.stopNagged) {
-        out.reason = requestText(c.pointPath, WHY_OWNER_STOP, c.template)
-        return { ...v, stopNagged: true }
-      }
-      if (v.need !== null && !fresh && !v.stopNagged) {
-        out.reason = requestText(c.pointPath, WHY_GATE, c.template)
-        return { ...v, stopNagged: true }
-      }
-      if (thresholdDue(v, tokens, lim)) {
-        out.reason = requestText(c.pointPath, WHY_THRESHOLD, c.template)
-        return { ...v, askedAt: tokens }
-      }
-      return v
-    })
-    showStatus($, after, tokens, lim)
-    if (out.reason === null) return r
-    $.ui.toast(`Точка останова: контекст ${tokens === null ? '?' : Math.round(tokens / 1000)}k, пишу состояние сессии.`)
-    return { ...r, block: out.reason }
-  })
+  // --- every main reply: the background write ------------------------------------------------------------------------
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
-    if (e.agentId !== undefined || e.reason !== 'error') return r
-    await update($, SESSION, v => (v.need === null ? v : { ...v, escape: true })).catch(() => null)
+    if (e.agentId !== undefined) return r
+    try {
+      const c = await config($)
+      if (c.standDown !== null) return r
+      const now = await $.clock.now()
+      const out = { gen: null as number | null }
+      const after = await change($, v => {
+        const claim = claimOnReply(v, now)
+        out.gen = claim.gen
+        return claim.state
+      })
+      showStatus($, after)
+      const gen = out.gen
+      // A timer, not this dispatch: the write outlives the turn's hooks and never holds the next prompt.
+      if (gen !== null) $.clock.after(0, () => void backgroundLoop($, gen))
+    } catch (err) {
+      $.ui.log(`stop-point: no write after the reply: ${String(err)}`, { to: 'debug' })
+    }
     return r
   })
 
-  // --- compaction: the gate, then the new cycle ------------------------------------------------------------------------
+  // --- deliveries after a compaction: the next tool result or prompt -------------------------------------------------
+
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const r = await next(e)
+    if (r.deny !== undefined) return r
+    try {
+      const s = await readState($)
+      if (s.pending.length === 0 && !s.pointDue) return r
+      const c = await config($)
+      if (c.standDown !== null) return r
+      const blocks = await takeDeliveries($, c)
+      return blocks.length === 0 ? r : { ...r, context: [...(r.context ?? []), ...blocks] }
+    } catch {
+      return r
+    }
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    try {
+      const s = await readState($)
+      if (s.pending.length === 0 && !s.pointDue) return next(e)
+      const c = await config($)
+      if (c.standDown !== null) return next(e)
+      const blocks = await takeDeliveries($, c)
+      if (blocks.length === 0) return next(e)
+      return next({ ...e, context: [...(e.context ?? []), ...blocks] })
+    } catch {
+      return next(e)
+    }
+  })
+
+  // --- compaction: a current point first, then the new cycle ----------------------------------------------------------
 
   on('session.compact', async ($, e, next) => {
     if (e.agentId !== undefined || e.trigger === 'precompute') return next(e)
-    const c = await config($)
-    if (c.standDown !== null) return next(e)
+    const c = await config($).catch(() => null)
+    if (c === null || c.standDown !== null) return next(e)
 
-    if (e.trigger === 'auto') {
-      const { tokens, lim } = await measure($, c)
-      const s = await read($, SESSION)
-      const onDisk = s.point !== null && (await pointFile($, c)) !== null
-      const out = { decision: 'pass-no-usage' as GateDecision }
-      const after = await update($, SESSION, v => {
-        const d = gateDecision(v, tokens, lim, onDisk)
-        out.decision = d
-        if (d === 'pass-error') return { ...v, escape: false }
-        if (d === 'pass-fresh') return { ...v, need: null }
-        if (d === 'defer') return { ...v, need: tokens, naggedAt: null, stopNagged: false }
-        return v
-      })
-      const d = out.decision
-      if (d !== 'defer-retry') await appendLog($, c, await $.clock.now(), tokens, d)
-      if (d === 'defer' || d === 'defer-retry') {
-        const k = tokens === null ? '?' : `${Math.round(tokens / 1000)}k`
-        if (d === 'defer') $.ui.toast(`Авто-компакт отложен до записи точки останова (контекст ${k})`)
-        showStatus($, after, tokens, lim)
-        return { skip: `авто-компакт отложен до записи точки останова (контекст ${k})` }
+    // The summary is about to replace the transcript: a reply not yet in the point (a write in flight, or work since
+    // the last one) is written now, over the transcript being compacted, bounded so a compaction never wedges.
+    try {
+      const s = await readState($)
+      if (s.writing !== null || deltaFrom(e.messages, s.cursor).length > 0) {
+        const out = { gen: 0 }
+        await change($, v => {
+          const claim = claimForCompaction(v)
+          out.gen = claim.gen ?? 0
+          return claim.state
+        })
+        compacting = true
+        showStatus($, s)
+        const o = await writeOnce($, c, out.gen, e.messages, COMPACT_WAIT_MS).finally(() => {
+          compacting = false
+        })
+        await logRun($, c, 'compact', o)
+        if (o.kind === 'error') $.ui.toast(`Точка останова не обновилась перед сжатием: ${o.reason ?? '?'}`)
       }
+    } catch (err) {
+      compacting = false
+      $.ui.log(`stop-point: no write before the compaction: ${String(err)}`, { to: 'debug' })
     }
 
-    await update($, SESSION, v => ({ ...v, compactSeq: v.compactSeq + 1 }))
+    await change($, v => ({ ...v, compactSeq: v.compactSeq + 1 })).catch(() => null)
     const r = await next(e)
-    if (r.skip !== undefined) return r
+    if (r.skip !== undefined) {
+      showStatus($, await readState($).catch(() => INITIAL))
+      return r
+    }
     try {
       const file = await pointFile($, c)
       const known = `${r.messages.map(m => m.text).join('\n')}\n${file?.text ?? ''}`
       const refs = lostRefs(e.messages, known, c.root, c.home)
-      const after = await update($, SESSION, v => ({
-        ...afterCompaction(v),
+      const cursor = cursorAt(r.messages)
+      const after = await change($, v => ({
+        ...v,
+        cursor,
         pending: refs === null ? v.pending : [...v.pending, refs],
         pointDue: v.injectedSeq !== v.compactSeq,
       }))
-      const { tokens, lim } = await measure($, c)
-      showStatus($, after, tokens, lim)
+      showStatus($, after)
     } catch {
       // the compaction stands whatever the bookkeeping after it does
     }
@@ -456,12 +502,18 @@ export const register: Register = on => {
     if (e.source !== 'compact') cached = null
     const c = await config($)
     if (c.standDown !== null) return r
+    if (e.source === 'clear') {
+      // a new session id: a new point, from its first reply
+      const s = await change($, () => INITIAL)
+      showStatus($, s)
+      return r
+    }
     const file = await pointFile($, c)
     const now = await $.clock.now()
     const blocks: string[] = []
     if (e.source === 'compact') {
       const out = { pending: [] as string[] }
-      await update($, SESSION, v => {
+      await change($, v => {
         out.pending = v.pending
         return { ...v, pending: [], pointDue: false, injectedSeq: v.compactSeq }
       })
