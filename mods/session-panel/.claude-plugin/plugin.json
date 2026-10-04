@@ -1,0 +1,28 @@
+{
+  "name": "session-panel",
+  "version": "0.1.0",
+  "author": { "name": "Dima Timoschenko" },
+  "description": "A side panel per session: the links the replies carried, grouped under their task, and one line per delivered result; the owner ticks, edits, deletes and adds lines in place",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "cardsDir": {
+      "type": "string",
+      "title": "Task cards folder",
+      "description": "Absolute path of the folder with task cards named <TASK-ID>.md; a card whose frontmatter status is a done status folds its task's other links away.",
+      "default": ""
+    },
+    "doneStatuses": {
+      "type": "string",
+      "multiple": true,
+      "title": "Done statuses",
+      "description": "Card frontmatter statuses that count as done.",
+      "default": ["Done"]
+    },
+    "taskPattern": {
+      "type": "string",
+      "title": "Task id pattern",
+      "description": "Regular expression a task id matches, searched in a link's address and label.",
+      "default": "\\b[A-Z]{2,}-\\d+\\b"
+    }
+  }
+}

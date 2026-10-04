@@ -33,6 +33,7 @@ instead of a shell command per event. Each has its own tests (`claude plugin tes
 | **stop-point** | Keeps a stop point (`.claude/state/resume/<session>.md`) in step with compaction: asks for it at the context threshold and on «точка останова», defers auto-compaction until it is fresh, puts it back after compaction. |
 | **dictate** | Voice dictation: `/pack` holds several prompts as one batch until a release word, and misheard project terms are fixed from `~/.claude/dictate-terms.json`. |
 | **mods-help** | `/mods` lists the slash commands the loaded mods serve in this session, read live from the engine, and the mods that work without one — so a new mod's command needs no announcing. |
+| **session-panel** | A side pane per session: links the replies carried, grouped under their task (a done card — ticked, or its `status:` among `doneStatuses` in `cardsDir` — folds its PR and design away), and one line per `result:`. The owner ticks, rewrites, deletes and adds lines in place; the changes reach the model with the next message. `/sp` opens or closes it; the model adds what no reply carried with `mcp__session-panel__add`. |
 
 ### instructions-tuning (`instructions-tuning/`)
 
