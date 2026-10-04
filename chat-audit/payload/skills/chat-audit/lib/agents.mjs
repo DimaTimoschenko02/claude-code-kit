@@ -19,6 +19,7 @@
 import fs from 'node:fs';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import os from 'node:os';
 import path from 'node:path';
 import { scrub } from './scrub.mjs';
 import { listSessions } from './discover.mjs';
@@ -35,19 +36,72 @@ function textOf(msg) {
   return c.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n');
 }
 
-// Same error vocabulary as agents.py, extended to .mjs/.js hook filenames.
-function classifyError(text) {
-  const low = text.toLowerCase();
-  if (low.includes('hook') && (low.includes('block') || low.includes('denied') || low.includes('deny'))) {
+// A failed command's body is "Exit code N" plus whatever it printed — a cat of a note that says "not found" or a hook
+// file that says "deny" is not that error. So a command is classed by its exit code and the shell's own error lines,
+// and any other tool by the head of its message, where the tool states the error.
+export function classifyError(text) {
+  const exit = /^Exit code (\d+)/.exec(text);
+  if (exit) {
+    if (exit[1] === '127' || /command not found/.test(text)) return { cls: 'command not found' };
+    if (/^[\w./-]+: .*(?:No such file or directory|cannot access)/m.test(text)) return { cls: 'not found' };
+    if (/^(?:\(eval\):\d+: )?no matches found/m.test(text)) return { cls: 'glob no match' };
+    return { cls: 'command failed (exit code)' };
+  }
+  const head = text.slice(0, 400);
+  const low = head.toLowerCase();
+  if (/^\w+(?::\w+)? hook error/.test(head) || (low.includes('hook') && (low.includes('block') || low.includes('denied') || low.includes('deny')))) {
     const m = /([\w-]+\.(?:sh|py|mjs|js))/.exec(text);
     return { cls: 'hook block', hook: m ? m[1] : 'hook?' };
   }
+  if (low.includes('string to replace not found')) return { cls: 'edit mismatch' };
+  if (low.includes('unknown skill')) return { cls: 'unknown skill' };
+  if (low.includes('classifier gave no verdict')) return { cls: 'auto-mode classifier down' };
+  if (low.includes('exceeds maximum allowed tokens')) return { cls: 'read too large' };
   if (low.includes('permission') || low.includes('denied') || low.includes('not allowed')) return { cls: 'permission denied' };
   if (low.includes('timed out') || low.includes('timeout')) return { cls: 'timeout' };
   if (low.includes('no such file') || low.includes('does not exist') || low.includes('not found')) return { cls: 'not found' };
   if (low.includes('must read') || low.includes('has not been read') || low.includes('modified since')) return { cls: 'read-before-edit' };
-  if (low.includes('exit code')) return { cls: 'command failed (exit code)' };
   return { cls: 'other' };
+}
+
+const ownModel = new Map();   // "<dir>|<type>" -> whether that agent definition names its own model
+
+/** Whether the agent type's definition names a model of its own: project .claude/agents from the agent's cwd up, then
+ *  ~/.claude/agents. Such an agent runs on that model with nothing passed, so it inherited nothing. */
+function typeHasOwnModel(type, cwd) {
+  if (!type) return false;
+  const name = type.includes(':') ? type.split(':').pop() : type;
+  const dirs = [];
+  for (let d = cwd ? path.resolve(cwd) : null; d; d = path.dirname(d) === d ? null : path.dirname(d)) dirs.push(path.join(d, '.claude', 'agents'));
+  dirs.push(path.join(os.homedir(), '.claude', 'agents'));
+  for (const dir of dirs) {
+    const key = `${dir}|${name}`;
+    if (!ownModel.has(key)) {
+      let text = null;
+      try { text = fs.readFileSync(path.join(dir, `${name}.md`), 'utf8'); } catch {}
+      const front = text && /^---\n([\s\S]*?)\n---/.exec(text);
+      const model = front && /^model:\s*["']?([\w.-]+)/m.exec(front[1]);
+      ownModel.set(key, text === null ? null : Boolean(model && model[1] !== 'inherit'));
+    }
+    const v = ownModel.get(key);
+    if (v !== null) return v;
+  }
+  return false;
+}
+
+/** The main session's model: the first assistant line that names one (read from the head of the file only). */
+function sessionModel(sessionFile) {
+  let fd;
+  try {
+    fd = fs.openSync(sessionFile, 'r');
+    const buf = Buffer.alloc(8 * 1024 * 1024);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    for (const line of buf.subarray(0, n).toString('utf8').split('\n')) {
+      if (!line.includes('"assistant"')) continue;
+      try { const o = JSON.parse(line); if (o.type === 'assistant' && o.message?.model) return o.message.model; } catch {}
+    }
+  } catch {} finally { if (fd !== undefined) fs.closeSync(fd); }
+  return null;
 }
 
 const bump = (map, key, by = 1) => map.set(key, (map.get(key) || 0) + by);
@@ -70,7 +124,7 @@ function walkJsonl(dir) {
 }
 
 /** One subagent transcript -> its stats. Mirrors agents.py's per-file pass. */
-export function extractAgent(file, parentSession) {
+export function extractAgent(file, parentSession, mainModel = null) {
   let meta = {};
   const metaFile = file.replace(/\.jsonl$/, '.meta.json');
   if (fs.existsSync(metaFile)) {
@@ -86,6 +140,7 @@ export function extractAgent(file, parentSession) {
   const T = [];
   let calls = 0, errors = 0, maxGap = 0, gapAt = null, prev = null;
   let model = null;
+  let cwd = null;
 
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); } catch { return null; }
@@ -100,6 +155,7 @@ export function extractAgent(file, parentSession) {
       prev = t;
       T.push(t);
     }
+    if (!cwd && o.cwd) cwd = o.cwd;
     const m = (o.message && typeof o.message === 'object') ? o.message : {};
 
     if (o.type === 'assistant') {
@@ -152,7 +208,10 @@ export function extractAgent(file, parentSession) {
     agentId: path.basename(file, '.jsonl'),
     agentType: meta.agentType || meta.subagent_type || null,
     description: scrub(String(meta.description || '').slice(0, 160)),
-    model, inherited: !meta.model,   // no explicit model in meta -> inherited the main session's
+    // Inherited = nothing chose the model: none passed, none in the type's definition, and it ran on the main one.
+    model,
+    inherited: !meta.model && !typeHasOwnModel(meta.agentType || meta.subagent_type, cwd) &&
+      (mainModel === null || model === null || model === mainModel),
     durationSec: Math.round(dur), calls, errors,
     maxGapSec: Math.round(maxGap), gapAt,
     errClasses: Object.fromEntries(errClasses),
@@ -168,7 +227,8 @@ function agentsUnderSession(sessionFile) {
   const subagentsDir = path.join(dir, 'subagents');
   if (!fs.existsSync(subagentsDir)) return [];
   const parent = path.basename(sessionFile, '.jsonl').slice(0, 8);
-  return walkJsonl(subagentsDir).map((f) => extractAgent(f, parent)).filter(Boolean);
+  const mainModel = sessionModel(sessionFile);
+  return walkJsonl(subagentsDir).map((f) => extractAgent(f, parent, mainModel)).filter(Boolean);
 }
 
 export function collectAgents({ project, days = null, scope = 'subtree', sessionFiles = null } = {}) {
