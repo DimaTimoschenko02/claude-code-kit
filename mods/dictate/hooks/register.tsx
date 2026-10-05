@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { CommandRunResult, EngineInterface, PromptOrigin, Register } from 'claude-code'
+import type { CommandRunResult, EngineInterface, PromptOrigin, Register, Timer } from 'claude-code'
 
 import type { DictateBatch } from '../types'
 
@@ -10,6 +10,16 @@ import type { DictateBatch } from '../types'
 // them as one numbered prompt. `/pack` is registered `immediate`, so it
 // switches batching on mid-turn too. (Not /batch: that name is a built-in the
 // engine refuses to re-register, and it stays untouched.)
+//
+// Cuts: Claude Code's voice mode in `tap` setting stops a recording by itself
+// 120 s after the tap (hard-coded, no setting) and 15 s after the last
+// recognised word, and submits what it heard at once. The person dictating
+// with his eyes on another window keeps talking into nothing. While a batch is
+// open the prompt box is read once a second (voice mode writes its interim
+// transcript there), so the mod knows when a recording started and when it
+// last moved: a chime ~15 s before the 2-minute cap, and on a stop the person
+// did not make a falling tone plus the last words spoken aloud — where to pick
+// up. A capped chunk is marked in the batch so the model expects a repeat.
 //
 // Terms: every person's prompt has misheard phrases from
 // ~/.claude/dictate-terms.json replaced before the model reads it.
@@ -22,8 +32,38 @@ const RELEASE = /^\s*(?:всё|все|готово|отправляй|поеха
 const HELD = (count: number) =>
   `📥 в пачке ${count} — «всё» или /pack, чтобы отправить; /pack cancel — сбросить`
 
+// Voice mode's own limits (Claude Code 2.1.289, tap mode): 120 s cap, 15 s
+// silence. The box shows the first words a second or two after the tap, so the
+// thresholds below are measured from then and sit a little under the limits.
+const POLL_MS = 1000
+const WARN_AFTER_MS = 103_000
+const CAP_SEEN_MS = 108_000
+const SILENCE_SEEN_MS = 12_000
+const NEW_BURST_MS = 16_000
+const TAIL_WORDS = 6
+// Two minutes of speech is well over this; a typed note rarely is.
+const CAP_TEXT_CHARS = 500
+const SPEECH_VOICE = 'Milena'
+const CUT_MARK = ' ⟨запись оборвалась здесь — следующее сообщение может повторять конец⟩'
+const ENDS_SENTENCE = /[.!?…»")\]]\s*$/u
+// Keys that move or send rather than type; space is voice mode's tap key.
+const NOT_TYPING: ReadonlySet<string> = new Set([' ', 'space', 'return', 'escape', 'up', 'down', 'left', 'right', 'tab'])
+
 type Dollar = EngineInterface
 type Taken = { value: DictateBatch | null }
+type Stop = 'own' | 'cap' | 'silence'
+type Recording = {
+  startedAt: number
+  lastText: string
+  lastChangeAt: number
+  isWarned: boolean
+}
+
+// Module state: a hot reload empties it; session.start re-arms the watch.
+let watcher: Timer | undefined
+let recording: Recording | undefined
+// A key was typed into the draft since the last send: that send is the person's own.
+let isTyped = false
 
 // ---------------------------------------------------------------- batch state
 
@@ -40,6 +80,7 @@ async function liveBatch($: Dollar): Promise<DictateBatch | null> {
     return isStale ? null : value
   })
   if (dropped.value !== null) {
+    unwatch()
     $.ui.toast(`пачка из ${dropped.value.messages.length} сообщ. старше 12 ч — сброшена`, {
       timeoutMs: 8000,
     })
@@ -49,6 +90,7 @@ async function liveBatch($: Dollar): Promise<DictateBatch | null> {
 
 /** Clears the batch and returns what it held (null when there was none). */
 async function take($: Dollar): Promise<DictateBatch | null> {
+  unwatch()
   const taken: Taken = { value: null }
   await update($, batch, value => {
     taken.value = value
@@ -67,6 +109,7 @@ async function hold($: Dollar, text: string): Promise<number> {
 
 /** Puts released messages back in front of whatever was held since. */
 async function restore($: Dollar, taken: DictateBatch): Promise<void> {
+  watch($)
   await update($, batch, value =>
     value === null ? taken : { ...value, messages: [...taken.messages, ...value.messages] },
   )
@@ -101,7 +144,13 @@ async function toggle($: Dollar, arg: string): Promise<CommandRunResult> {
   if (current === null) {
     const now = await $.clock.now()
     await update($, batch, value => value ?? { startedAt: now, messages: [] })
-    return { text: '📥 пачка включена — диктуй; «всё» или /pack — отправить, /pack cancel — сбросить' }
+    watch($)
+    return {
+      text:
+        '📥 пачка включена — диктуй; «всё» или /pack — отправить, /pack cancel — сбросить\n' +
+        'голос сам рвёт запись через 2 мин и после 15 с тишины: за ~15 с до обрыва — двойной писк, ' +
+        'на обрыве — гудок и последние слова вслух, с них продолжай',
+    }
   }
   const taken = await take($)
   if (taken === null || taken.messages.length === 0) {
@@ -116,6 +165,86 @@ async function toggle($: Dollar, arg: string): Promise<CommandRunResult> {
     }),
   )
   return { text: `📤 пачка из ${taken.messages.length} сообщ. отправлена` }
+}
+
+// ---------------------------------------------------------------- voice cuts
+
+/** Starts the once-a-second read of the prompt box (no-op when running). */
+function watch($: Dollar): void {
+  if (watcher !== undefined) return
+  recording = undefined
+  isTyped = false
+  watcher = $.clock.every(POLL_MS, () => {
+    void observe($).catch(() => undefined)
+  })
+}
+
+function unwatch(): void {
+  watcher?.cancel()
+  watcher = undefined
+  recording = undefined
+  isTyped = false
+}
+
+/** One look at the box: when the dictated text started and last moved. */
+async function observe($: Dollar): Promise<void> {
+  const box = await $.prompt.read()
+  const now = await $.clock.now()
+  const text = box.text.trim()
+  if (text === '') {
+    recording = undefined
+    return
+  }
+  const isNewBurst = recording === undefined || now - recording.lastChangeAt > NEW_BURST_MS
+  if (isNewBurst && text !== recording?.lastText) {
+    recording = { startedAt: now, lastText: text, lastChangeAt: now, isWarned: false }
+    return
+  }
+  if (recording === undefined) return
+  if (text !== recording.lastText) recording = { ...recording, lastText: text, lastChangeAt: now }
+  const isMoving = now - recording.lastChangeAt < SILENCE_SEEN_MS
+  if (!recording.isWarned && !isTyped && isMoving && now - recording.startedAt >= WARN_AFTER_MS) {
+    recording = { ...recording, isWarned: true }
+    await $.audio.play({ asset: 'sounds/warn.wav' }).catch(() => undefined)
+  }
+}
+
+/** Who stopped the recording that just arrived, judged at its arrival. */
+function classifyStop(seen: Recording | undefined, now: number, text: string): Stop {
+  if (isTyped) return 'own'
+  // Nothing seen in the box (a chunk under a second, or a box voice mode does
+  // not write to): only a long chunk stopped mid-sentence reads as the cap.
+  if (seen === undefined) return text.length >= CAP_TEXT_CHARS && !ENDS_SENTENCE.test(text) ? 'cap' : 'own'
+  if (now - seen.lastChangeAt >= SILENCE_SEEN_MS) return 'silence'
+  if (now - seen.startedAt >= CAP_SEEN_MS) return 'cap'
+  return 'own'
+}
+
+/** The last few words, punctuation dropped, for speech and the drop line. */
+function tail(text: string): string {
+  const words = text.replace(/[^\p{L}\p{N}\s'-]/gu, ' ').trim().split(/\s+/u)
+  return words.slice(-TAIL_WORDS).join(' ')
+}
+
+/** A falling tone and the last words aloud, off the hook's clock. */
+function announce($: Dollar, stop: Exclude<Stop, 'own'>, text: string): void {
+  const lead = stop === 'cap' ? 'Обрыв.' : 'Пауза, запись стоп.'
+  const phrase = `${lead} Конец: ${tail(text)}`
+  $.clock.after(0, () => {
+    void (async () => {
+      await $.audio.play({ asset: 'sounds/cut.wav' }).catch(() => undefined)
+      await $.audio
+        .speak(phrase, { voice: SPEECH_VOICE })
+        .catch(() => $.audio.speak(phrase))
+        .catch(err => $.ui.log(`dictate: speech failed: ${String(err)}`, { to: 'debug' }))
+    })()
+  })
+}
+
+function heldLine(count: number, stop: Stop, text: string): string {
+  if (stop === 'own') return HELD(count)
+  const why = stop === 'cap' ? '✂ запись оборвалась (лимит 2 мин)' : '⏸ запись остановилась на паузе'
+  return `${HELD(count)} · ${why} на «…${tail(text)}» — продолжай с этого места`
 }
 
 // ---------------------------------------------------------------- term dictionary
@@ -210,7 +339,7 @@ export const register: Register = on => {
         immediate: true,
       })
       .catch(err => $.ui.log(`dictate: /pack not registered: ${String(err)}`, { to: 'debug' }))
-    await liveBatch($)
+    if ((await liveBatch($)) !== null) watch($)
     return next(e)
   })
 
@@ -234,8 +363,20 @@ export const register: Register = on => {
       )
       return next(await withTerms($, e))
     }
-    const count = await hold($, e.text)
-    return count === 0 ? next(await withTerms($, e)) : { drop: HELD(count) }
+    const stop = classifyStop(recording, await $.clock.now(), e.text)
+    recording = undefined
+    isTyped = false
+    const count = await hold($, stop === 'cap' ? `${e.text.trimEnd()}${CUT_MARK}` : e.text)
+    if (count === 0) return next(await withTerms($, e))
+    if (stop !== 'own') announce($, stop, e.text)
+    return { drop: heldLine(count, stop, e.text) }
+  })
+
+  // Typing into the draft makes the next send the person's own, not a voice cut.
+  // Hot event: a flag and nothing else, and only while a batch is watched.
+  on('prompt.edit', (_$, e, next) => {
+    if (watcher !== undefined && e.key !== undefined && !NOT_TYPING.has(e.key.key)) isTyped = true
+    return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {

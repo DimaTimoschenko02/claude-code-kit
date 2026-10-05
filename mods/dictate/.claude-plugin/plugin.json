@@ -1,7 +1,7 @@
 {
   "name": "dictate",
-  "version": "0.1.0",
-  "description": "Voice dictation helpers: hold several prompts as one batch (/pack) and fix misheard project terms from ~/.claude/dictate-terms.json",
+  "version": "0.2.0",
+  "description": "Voice dictation helpers: hold several prompts as one batch (/pack), say aloud where voice mode cut a recording, and fix misheard project terms from ~/.claude/dictate-terms.json",
   "author": {
     "name": "Dima Timoschenko"
   },

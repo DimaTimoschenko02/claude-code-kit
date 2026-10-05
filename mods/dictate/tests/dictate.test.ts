@@ -221,7 +221,9 @@ describe('batch', () => {
     const w = world(on)
     await run($, 'pack')
     await say($, 'старое')
-    await w.clock.advance(12 * HOUR + 1)
+    // The open pack reads the prompt box every second: move in hours, under the mock clock's 10 000 waits.
+    for (let hour = 0; hour < 12; hour++) await w.clock.advance(HOUR)
+    await w.clock.advance(1)
     expect((await say($, 'новое')).text).toBe('новое')
     expect(w.toasts.some(t => t.includes('старше 12 ч'))).toBe(true)
   })
