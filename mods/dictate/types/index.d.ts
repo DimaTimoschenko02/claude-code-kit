@@ -9,9 +9,19 @@ export type DictateBatch = {
   messages: string[]
 }
 
+/**
+ * Where voice mode last stopped a recording by itself, shown above the prompt
+ * until the next chunk: `cap` = its 2-minute limit, `silence` = 15 s pause;
+ * `excerpt` = the chunk's last sentences.
+ */
+export type DictateCut = {
+  stop: 'cap' | 'silence'
+  excerpt: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    /** `batch` is null while batch mode is off. */
-    dictate: { batch: DictateBatch | null }
+    /** `batch` is null while batch mode is off; `cut` null when the last chunk was not cut. */
+    dictate: { batch: DictateBatch | null; cut: DictateCut | null }
   }
 }

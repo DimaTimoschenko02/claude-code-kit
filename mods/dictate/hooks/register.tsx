@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CommandRunResult, EngineInterface, PromptOrigin, Register, Timer } from 'claude-code'
 
-import type { DictateBatch } from '../types'
+import type { DictateBatch, DictateCut } from '../types'
 
 // Voice dictation helpers.
 //
@@ -17,14 +17,16 @@ import type { DictateBatch } from '../types'
 // with his eyes on another window keeps talking into nothing. While a batch is
 // open the prompt box is read once a second (voice mode writes its interim
 // transcript there), so the mod knows when a recording started and when it
-// last moved: a chime ~15 s before the 2-minute cap, and on a stop the person
-// did not make a falling tone plus the last words spoken aloud — where to pick
-// up. A capped chunk is marked in the batch so the model expects a repeat.
+// last moved: a double beep ~15 s before the 2-minute cap, one beep on a stop
+// the person did not make, and the last sentences of the stopped chunk in the
+// band above the prompt until the next chunk — where to pick up. A capped
+// chunk is marked in the batch so the model expects a repeat.
 //
 // Terms: every person's prompt has misheard phrases from
 // ~/.claude/dictate-terms.json replaced before the model reads it.
 
 const batch = atom({ plugin: 'dictate', key: 'batch' } as const, null)
+const cut = atom({ plugin: 'dictate', key: 'cut' } as const, null)
 
 const MAX_AGE_MS = 12 * 60 * 60 * 1000
 const PERSON_ORIGINS: ReadonlySet<PromptOrigin['kind']> = new Set(['composer', 'bridge', 'sdk'])
@@ -40,10 +42,10 @@ const WARN_AFTER_MS = 103_000
 const CAP_SEEN_MS = 108_000
 const SILENCE_SEEN_MS = 12_000
 const NEW_BURST_MS = 16_000
-const TAIL_WORDS = 6
+const EXCERPT_SENTENCES = 3
+const EXCERPT_CHARS = 320
 // Two minutes of speech is well over this; a typed note rarely is.
 const CAP_TEXT_CHARS = 500
-const SPEECH_VOICE = 'Milena'
 const CUT_MARK = ' ⟨запись оборвалась здесь — следующее сообщение может повторять конец⟩'
 const ENDS_SENTENCE = /[.!?…»")\]]\s*$/u
 // Keys that move or send rather than type; space is voice mode's tap key.
@@ -51,7 +53,7 @@ const NOT_TYPING: ReadonlySet<string> = new Set([' ', 'space', 'return', 'escape
 
 type Dollar = EngineInterface
 type Taken = { value: DictateBatch | null }
-type Stop = 'own' | 'cap' | 'silence'
+type Stop = 'own' | DictateCut['stop']
 type Recording = {
   startedAt: number
   lastText: string
@@ -144,12 +146,13 @@ async function toggle($: Dollar, arg: string): Promise<CommandRunResult> {
   if (current === null) {
     const now = await $.clock.now()
     await update($, batch, value => value ?? { startedAt: now, messages: [] })
+    await update($, cut, () => null)
     watch($)
     return {
       text:
         '📥 пачка включена — диктуй; «всё» или /pack — отправить, /pack cancel — сбросить\n' +
         'голос сам рвёт запись через 2 мин и после 15 с тишины: за ~15 с до обрыва — двойной писк, ' +
-        'на обрыве — гудок и последние слова вслух, с них продолжай',
+        'на обрыве — один писк, а над полем ввода — последние фразы записи, с них продолжай',
     }
   }
   const taken = await take($)
@@ -220,31 +223,37 @@ function classifyStop(seen: Recording | undefined, now: number, text: string): S
   return 'own'
 }
 
-/** The last few words, punctuation dropped, for speech and the drop line. */
-function tail(text: string): string {
-  const words = text.replace(/[^\p{L}\p{N}\s'-]/gu, ' ').trim().split(/\s+/u)
-  return words.slice(-TAIL_WORDS).join(' ')
+/** The last sentences of a chunk (up to 3, about 320 chars): where it stopped. */
+function excerpt(text: string): string {
+  const flat = text.replace(/\s+/gu, ' ').trim()
+  const sentences = flat.match(/[^.!?…]+(?:[.!?…]+|$)/gu) ?? [flat]
+  let out = ''
+  for (let i = sentences.length - 1, n = 0; i >= 0 && n < EXCERPT_SENTENCES; i--, n++) {
+    const sentence = (sentences[i] ?? '').trim()
+    const longer = out === '' ? sentence : `${sentence} ${out}`
+    if (out !== '' && longer.length > EXCERPT_CHARS) break
+    out = longer
+  }
+  if (out.length > EXCERPT_CHARS) return `…${out.slice(-EXCERPT_CHARS).trimStart()}`
+  return out.length < flat.length ? `…${out}` : out
 }
 
-/** A falling tone and the last words aloud, off the hook's clock. */
-function announce($: Dollar, stop: Exclude<Stop, 'own'>, text: string): void {
-  const lead = stop === 'cap' ? 'Обрыв.' : 'Пауза, запись стоп.'
-  const phrase = `${lead} Конец: ${tail(text)}`
+/** One beep, off the hook's clock: no words, the band shows where it stopped. */
+function beep($: Dollar): void {
   $.clock.after(0, () => {
-    void (async () => {
-      await $.audio.play({ asset: 'sounds/cut.wav' }).catch(() => undefined)
-      await $.audio
-        .speak(phrase, { voice: SPEECH_VOICE })
-        .catch(() => $.audio.speak(phrase))
-        .catch(err => $.ui.log(`dictate: speech failed: ${String(err)}`, { to: 'debug' }))
-    })()
+    void $.audio.play({ asset: 'sounds/cut.wav' }).catch(() => undefined)
   })
 }
 
-function heldLine(count: number, stop: Stop, text: string): string {
+const CUT_LABEL: Record<DictateCut['stop'], string> = {
+  cap: '✂ запись оборвалась (лимит 2 мин), конец:',
+  silence: '⏸ запись встала на паузе 15 с, конец:',
+}
+
+function heldLine(count: number, stop: Stop): string {
   if (stop === 'own') return HELD(count)
-  const why = stop === 'cap' ? '✂ запись оборвалась (лимит 2 мин)' : '⏸ запись остановилась на паузе'
-  return `${HELD(count)} · ${why} на «…${tail(text)}» — продолжай с этого места`
+  const why = stop === 'cap' ? '✂ запись оборвалась (лимит 2 мин)' : '⏸ запись встала на паузе'
+  return `${HELD(count)} · ${why} — где, видно над полем ввода`
 }
 
 // ---------------------------------------------------------------- term dictionary
@@ -368,8 +377,9 @@ export const register: Register = on => {
     isTyped = false
     const count = await hold($, stop === 'cap' ? `${e.text.trimEnd()}${CUT_MARK}` : e.text)
     if (count === 0) return next(await withTerms($, e))
-    if (stop !== 'own') announce($, stop, e.text)
-    return { drop: heldLine(count, stop, e.text) }
+    await update($, cut, () => (stop === 'own' ? null : { stop, excerpt: excerpt(e.text) }))
+    if (stop !== 'own') beep($)
+    return { drop: heldLine(count, stop) }
   })
 
   // Typing into the draft makes the next send the person's own, not a voice cut.
@@ -382,12 +392,18 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const current = await read($, batch)
     if (current === null || e.props.hasSurvey) return next(e)
+    const stopped = await read($, cut)
     const { Box, Text } = $.ui.resolve(e)
     return (
-      <Box>
+      <Box flexDirection="column">
         <Text color="yellow" wrap="truncate">
           {`пачка: ${current.messages.length} · всё — отправить · /pack cancel`}
         </Text>
+        {stopped === null ? null : (
+          <Text color="yellow" wrap="wrap">
+            {`${CUT_LABEL[stopped.stop]} ${stopped.excerpt}`}
+          </Text>
+        )}
       </Box>
     )
   })
