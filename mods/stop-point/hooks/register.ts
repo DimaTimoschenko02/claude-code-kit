@@ -33,7 +33,12 @@ import {
   parseReply,
   reaskIssues,
   reaskPrompt,
-  restoreAnchors,
+  isLive,
+  linesWith,
+  mentionedIn,
+  restoreWithin,
+  seenAfter,
+  seenAt,
   utf8Bytes,
   releaseRun,
   renderDelta,
@@ -173,6 +178,10 @@ type Outcome = {
   reask?: boolean
   /** Anchors put back mechanically after the second answer still lacked them. */
   restored?: number
+  /** Live anchors the writer dropped that did not fit the size bound, so stayed out. */
+  dropped?: number
+  /** Dropped anchors the transcript had not named for SILENT_AFTER writes: no longer protected. */
+  silent?: number
   /** The written file's size in UTF-8 bytes. */
   bytes?: number
 }
@@ -245,27 +254,43 @@ async function writeOnce(
   let reply = parseReply(r.text)
   if (reply.kind === 'empty') return { ...(await fail('пустой ответ', now - t0)), usage }
 
-  // Checks in code, not in the prompt alone: the previous point's anchors survive unless the delta closed them, and
-  // the file stays near the template's 3 KB. One re-ask for both; what is still dropped is put back mechanically.
-  // The file is never cut: an oversize second answer is written as it is and logged.
-  const extra = { reask: false, restored: 0 }
+  // Checks in code, not in the prompt alone, with an explicit precedence: the size bound first, then the carry-over of
+  // the previous point's live anchors within it (logic.ts, «what the carry-over may protect»). One re-ask — to cut, or
+  // to bring back anchors that would fit; what is still dropped and live goes back mechanically while it fits.
+  // The writer's own text is never cut: an oversize second answer is written as it is and logged.
+  const extra = { reask: false, restored: 0, dropped: 0, silent: 0 }
+  // No grandfathering: a point already over the bound is not left as it is by «unchanged» — it goes through the cut.
+  if (reply.kind === 'unchanged' && previous !== null && utf8Bytes(previous.text) > SIZE_SOFT)
+    reply = { kind: 'written', body: previous.text }
   if (reply.kind === 'written') {
     const prevText = previous?.text ?? ''
-    const issues = reaskIssues(lostAnchors(prevText, reply.body, rendered.text), utf8Bytes(reply.body))
+    const delta = rendered.text
+    const rank = (a: string): number => (mentionedIn(delta, a) ? gen : seenAt(s.anchorSeen, a, gen))
+    const split = (body: string) => {
+      const lost = lostAnchors(prevText, body, delta)
+      const live = lost.filter(a => isLive(s.anchorSeen, a, gen, delta))
+      return { live, silent: lost.length - live.length }
+    }
+    const first = split(reply.body)
+    const plan = restoreWithin(reply.body, prevText, first.live, rank)
+    const issues = reaskIssues(plan.restored, utf8Bytes(reply.body))
     const left = timeoutMs - (now - t0)
     if (issues.length > 0 && left >= REASK_MIN_MS) {
       extra.reask = true
-      const r2 = await ask(reaskPrompt(prompt, reply.body, issues), left)
+      const back = utf8Bytes(reply.body) > SIZE_SOFT ? [] : linesWith(prevText, plan.restored)
+      const r2 = await ask(reaskPrompt(c, reply.body, issues, back), left)
       usage = addUsage(usage, r2.usage)
       now = await $.clock.now()
       const second = r2.isAnswered ? parseReply(r2.text) : null
       if (second !== null && second.kind === 'written') reply = second
     }
-    const still = lostAnchors(prevText, reply.body, rendered.text)
-    if (still.length > 0) {
-      reply = { kind: 'written', body: restoreAnchors(reply.body, prevText, still) }
-      extra.restored = still.length
-    }
+    const body = reply.kind === 'written' ? reply.body : ''
+    const still = split(body)
+    const r = restoreWithin(body, prevText, still.live, rank)
+    reply = { kind: 'written', body: r.body }
+    extra.restored = r.restored.length
+    extra.dropped = r.dropped.length
+    extra.silent = still.silent
   }
   const ms = now - t0
   const bytes = reply.kind === 'written' ? utf8Bytes(reply.body) : undefined
@@ -284,7 +309,10 @@ async function writeOnce(
   await change($, v => {
     out.applied = gen > v.appliedGen
     if (!out.applied) return v
-    return { ...v, appliedGen: gen, cursor, last, error: null }
+    // «unchanged» keeps the file, so its anchors' record moves on only by the mentions in this delta
+    const final = reply.kind === 'written' ? reply.body : (previous?.text ?? '')
+    const anchorSeen = seenAfter(v.anchorSeen, final, rendered.text, gen)
+    return { ...v, appliedGen: gen, cursor, last, error: null, anchorSeen }
   })
   if (!out.applied) return { kind: 'discarded', ms, ...base, usage }
   if (reply.kind === 'written') {
@@ -307,7 +335,9 @@ async function logRun($: EngineInterface, c: Config, where: 'reply' | 'compact',
   const checks =
     (o.bytes === undefined ? '' : ` bytes=${o.bytes}${o.bytes > SIZE_SOFT ? ' oversize' : ''}`) +
     (o.reask === true ? ' reask' : '') +
-    (o.restored !== undefined && o.restored > 0 ? ` restored=${o.restored}` : '')
+    (o.restored !== undefined && o.restored > 0 ? ` restored=${o.restored}` : '') +
+    (o.dropped !== undefined && o.dropped > 0 ? ` dropped=${o.dropped}` : '') +
+    (o.silent !== undefined && o.silent > 0 ? ` silent=${o.silent}` : '')
   const line = `${where} ${what} ${(o.ms / 1000).toFixed(1)}s msgs=${o.count} chars=${o.chars}${checks}${cost}`
   $.ui.log(`stop-point: ${line}`, { to: 'debug' })
   try {

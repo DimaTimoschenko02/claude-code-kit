@@ -54,6 +54,11 @@ export type StopPointSession = {
    * The mod stands down in it for good: no write, no status, no error.
    */
   noTranscript: boolean
+  /**
+   * The generation each anchor of the point (path, URL, hash) was last named in the transcript, or entered the point.
+   * Only the current file's anchors are kept; one silent for SILENT_AFTER writes is no longer put back.
+   */
+  anchorSeen: Record<string, number>
 }
 
 declare module 'claude-code' {

@@ -6,8 +6,12 @@ import {
   INITIAL,
   UNCHANGED,
   WRITER_SYSTEM,
+  SILENT_AFTER,
+  SIZE_SOFT,
+  anchorKey,
   anchors,
   lostAnchors,
+  restoreWithin,
   utf8Bytes,
   clockTime,
   cursorAt,
@@ -835,5 +839,180 @@ describe('a host without a transcript (Agent SDK, headless)', () => {
     await compact($, 'auto', [...EXCHANGE, owner('ещё')])
     expect(w.calls).toHaveLength(0)
     expect(w.compactions).toBe(1)
+  })
+})
+
+/**
+ * A real-shaped oversize point (the 22 KB one that grew write after write): sections of anchor lines, and the block
+ * the old restore appended. Paths are fixtures; the shape — 6 sections, ~120 anchored lines, ~20 KB — is the real one.
+ */
+const BIG_POINT = (() => {
+  const line = (s: string, i: number) =>
+    `- ${s} ${i}: /home/fake/repo/apps/api/src/modules/m${i}/file${i}.service.ts:${10 + i} — что там лежит и какой вывод на этом держится, ` +
+    `коммит ${(0xabc0000 + i).toString(16)}f, https://example.org/pull/${100 + i}`
+  const sec = (h: string, from: number, n: number) => [`## ${h}`, ...Array.from({ length: n }, (_, k) => line(h, from + k)), '']
+  return [
+    '# Точка останова',
+    '',
+    ...sec('Опоры', 0, 20),
+    ...sec('Значения', 20, 15),
+    ...sec('Рецепты', 35, 15),
+    ...sec('Вердикты', 50, 10),
+    '## Из прежней версии (не закрыто в транскрипте)',
+    ...Array.from({ length: 50 }, (_, k) => line('Старое', 60 + k)),
+    '',
+  ].join('\n')
+})()
+
+/** What the writer answers when asked to cut: a 3 KB file of new facts, none of the old anchors. */
+const SMALL_DRAFT = `# Точка останова\n\n## Сейчас\n${Array.from({ length: 12 }, (_, i) => `- новый факт ${i}: короткая строка о работе`).join('\n')}\n`
+
+describe('the size bound wins over the carry-over (no ratchet)', () => {
+  const log = (w: World) => w.files.get(`${HOME}/.claude/state/stop-point/writes.log`)?.text ?? ''
+
+  test('a 20 KB point the transcript is silent about comes back within the bound, the rest dropped and counted', async ($, on) => {
+    const w = world(on)
+    expect(utf8Bytes(BIG_POINT)).toBeGreaterThan(18_000)
+    expect(anchors(BIG_POINT).length).toBeGreaterThan(300)
+    w.files.set(POINT, { text: BIG_POINT, mtimeMs: START - 60_000 })
+    w.reply = () => answered(SMALL_DRAFT)
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    const file = w.files.get(POINT)?.text ?? ''
+    expect(utf8Bytes(file)).toBeLessThanOrEqual(SIZE_SOFT)
+    expect(file).toContain('- новый факт 11')
+    // what came back is the newest: the last lines of the old file, not its first
+    expect(file).toContain('Старое 109')
+    expect(file).not.toContain('Опоры 0:')
+    expect(log(w)).toMatch(/reply written .* bytes=\d+ (reask )?restored=\d+ dropped=\d+ /)
+    const dropped = Number(/dropped=(\d+)/.exec(log(w))?.[1])
+    expect(dropped).toBeGreaterThan(250)
+    // a draft within the bound is asked only for anchors that fit back; the re-ask does not re-send the transcript
+    expect(w.calls).toHaveLength(2)
+    const second = w.calls[1]?.req.prompt ?? ''
+    expect(second).toContain('=== ТВОЙ ЧЕРНОВИК ===')
+    expect(second).not.toContain('=== ЧТО ПРОИЗОШЛО ПОСЛЕ')
+    expect(second).not.toContain('price_row')
+    expect(utf8Bytes(second)).toBeLessThan(10_000)
+  })
+
+  test('the next write does not grow it again: the file stays within the bound write after write', async ($, on) => {
+    const w = world(on)
+    w.files.set(POINT, { text: BIG_POINT, mtimeMs: START - 60_000 })
+    w.reply = () => answered(SMALL_DRAFT)
+    await start($)
+    const sizes: number[] = []
+    for (let i = 0; i < 4; i++) {
+      w.messages = [...w.messages, owner(`шаг ${i}`), said(`сделано ${i}`)]
+      await reply($)
+      await w.clock.settle()
+      sizes.push(utf8Bytes(w.files.get(POINT)?.text ?? ''))
+    }
+    for (const n of sizes) expect(n).toBeLessThanOrEqual(SIZE_SOFT)
+    expect(log(w)).not.toMatch(/oversize/)
+  })
+
+  test('an oversize point the writer calls unchanged is still cut on its next write — no grandfathering', async ($, on) => {
+    const w = world(on)
+    w.files.set(POINT, { text: BIG_POINT, mtimeMs: START - 60_000 })
+    w.reply = n => answered(n === 1 ? UNCHANGED : SMALL_DRAFT)
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    expect(w.calls).toHaveLength(2)
+    expect(w.calls[1]?.req.prompt).toContain('сократи до 3072 байт по правилу шаблона')
+    expect(utf8Bytes(w.files.get(POINT)?.text ?? '')).toBeLessThanOrEqual(SIZE_SOFT)
+  })
+
+  test('an oversize draft is asked only to cut, never in the same breath to bring anchors back', async ($, on) => {
+    const w = world(on)
+    w.files.set(POINT, { text: BIG_POINT, mtimeMs: START - 60_000 })
+    const long = `# Точка останова\n\n${Array.from({ length: 80 }, (_, i) => `- новый пересказ ${i}: длинная строка о работе`).join('\n')}`
+    w.reply = n => answered(n === 1 ? long : SMALL_DRAFT)
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    const second = w.calls[1]?.req.prompt ?? ''
+    expect(second).toContain('сократи до 3072 байт')
+    expect(second).not.toContain('верни каждую')
+    expect(second).not.toContain('=== СТРОКИ ПРЕЖНЕЙ ВЕРСИИ')
+  })
+})
+
+describe('which dropped anchors are still protected', () => {
+  const log = (w: World) => w.files.get(`${HOME}/.claude/state/stop-point/writes.log`)?.text ?? ''
+  const OLD = '# Точка останова\n\n## Значения\n- Лог: /home/fake/proj/var/run/writer.log — где писатель пишет.\n'
+  const keeps = (n: number) => answered(`${OLD}- шаг ${n}\n`)
+  const drops = (n: number) => answered(`# Точка останова\n\n## Сейчас\n- шаг ${n}\n`)
+
+  test('a closed anchor is neither re-asked nor put back, a live one beside it is', async ($, on) => {
+    const w = world(on)
+    w.files.set(POINT, { text: PREVIOUS, mtimeMs: START - 60_000 })
+    w.reply = () => answered('# Точка останова\n\n## Сейчас\n- новое')
+    await start($)
+    w.messages = [owner('коммит ec17ce7 откатили, он больше не нужен'), said('ок')]
+    await reply($)
+    await w.clock.settle()
+    const file = w.files.get(POINT)?.text ?? ''
+    expect(file).not.toContain('ec17ce7')
+    expect(file).toContain('mods/stop-point/hooks/logic.ts:215')
+    expect(w.calls[1]?.req.prompt).not.toMatch(/верни каждую[^\n]*ec17ce7/)
+    expect(log(w)).toMatch(/restored=2 /)
+  })
+
+  test('an anchor re-spelt by the writer (alias prefix, relative path) is kept, not lost', () => {
+    const prev = '- Схема: /home/fake/repo/docs/design/PH-102-schema.md; PR https://github.com/acme/repo/pull/110'
+    const next = 'P=/home/fake/repo; G=https://github.com/acme/repo\n- Схема: `P/docs/design/PH-102-schema.md`; PR G/pull/110'
+    expect(lostAnchors(prev, next, '')).toEqual([])
+    expect(anchorKey('/home/fake/repo/docs/design/PH-102-schema.md')).toBe('design/PH-102-schema.md')
+    expect(anchorKey('ec17ce7')).toBe('ec17ce7')
+  })
+
+  test(`an anchor the transcript has not named for ${SILENT_AFTER} writes is no longer put back`, async ($, on) => {
+    const w = world(on)
+    w.files.set(POINT, { text: OLD, mtimeMs: START - 60_000 })
+    await start($)
+    for (let i = 1; i <= SILENT_AFTER + 1; i++) {
+      w.reply = i <= SILENT_AFTER ? keeps : drops
+      w.messages = [...w.messages, owner(`шаг ${i}`), said(`сделано ${i}`)]
+      await reply($)
+      await w.clock.settle()
+    }
+    const file = w.files.get(POINT)?.text ?? ''
+    expect(file).not.toContain('writer.log')
+    expect(log(w).trimEnd().split('\n').at(-1)).toMatch(/ silent=1 /)
+    expect(log(w)).not.toMatch(/reask/)
+  })
+
+  test('named in the transcript within the window, the same anchor is still put back', async ($, on) => {
+    const w = world(on)
+    w.files.set(POINT, { text: OLD, mtimeMs: START - 60_000 })
+    await start($)
+    for (let i = 1; i <= SILENT_AFTER + 1; i++) {
+      w.reply = i <= SILENT_AFTER ? keeps : drops
+      const extra = i === 6 ? [said('смотрю лог', `tu${i}`, { name: 'Bash', input: { command: 'tail /home/fake/proj/var/run/writer.log' }, out: 'ok' })] : []
+      w.messages = [...w.messages, owner(`шаг ${i}`), ...extra, said(`сделано ${i}`)]
+      await reply($)
+      await w.clock.settle()
+    }
+    expect(w.files.get(POINT)?.text).toContain('/home/fake/proj/var/run/writer.log')
+    expect(log(w).trimEnd().split('\n').at(-1)).toMatch(/ restored=1 /)
+  })
+
+  test('restore: newest anchors first, merged under one heading, never past the budget', () => {
+    const prev = ['# Т', '## А', '- a /home/fake/x/one.ts', '- b /home/fake/x/two.ts', '- c /home/fake/x/three.ts'].join('\n')
+    const live = anchors(prev)
+    const rank = (a: string) => (a.includes('one') ? 9 : a.includes('two') ? 1 : 5)
+    const base = '# Т\n\n## Из прежней версии (не закрыто в транскрипте)\n- old\n\n## Б\n- x\n'
+    const r = restoreWithin(base, prev, live, rank, utf8Bytes(base) + 60)
+    expect(r.restored.sort()).toEqual(['/home/fake/x/one.ts', '/home/fake/x/three.ts'])
+    expect(r.dropped).toEqual(['/home/fake/x/two.ts'])
+    expect(r.body.match(/## Из прежней версии/g)).toHaveLength(1)
+    expect(r.body).toContain('- old\n- a /home/fake/x/one.ts\n- c /home/fake/x/three.ts\n\n## Б')
+    expect(restoreWithin('x'.repeat(5000), prev, live, rank).restored).toEqual([])
   })
 })
