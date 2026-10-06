@@ -32,6 +32,37 @@ export function shouldWarm(mode: WarmMode, kind: ReplyKind): boolean {
   return mode === 'on' || kind === 'waits' || kind === 'needs-input'
 }
 
+/**
+ * The mod checks the wall clock this often instead of trusting one long timer: a timer counts the process's awake
+ * time, so a laptop asleep with its lid closed fires a 50 min timer long after the cache it was meant to keep died.
+ */
+export const TICK_MS = 60_000
+/** Two ticks further apart than this mean the process was frozen in between (the Mac slept). */
+export const PAUSE_MS = 3 * TICK_MS
+/** A warm the API refused is tried again this much later, while the cache it is meant to keep is still alive. */
+export const RETRY_MS = 2 * 60_000
+
+/**
+ * What a tick does with a planned warm: nothing yet, send it (late too, while the cache lives), or record it as
+ * missed — the cache already expired, so a fork would rewrite the whole prefix instead of keeping it.
+ */
+export function dueAction(now: number, nextAt: number | null, cacheEnd: number | null): 'wait' | 'warm' | 'missed' {
+  if (nextAt === null || now < nextAt) return 'wait'
+  return cacheEnd !== null && now < cacheEnd ? 'warm' : 'missed'
+}
+
+/** A fork's request reached the API when the cache served or stored any of it; only then did it renew the entry. */
+export function reachedCache(usage: { cache_read_input_tokens: number; cache_creation_input_tokens: number } | undefined): boolean {
+  return usage !== undefined && usage.cache_read_input_tokens + usage.cache_creation_input_tokens > 0
+}
+
+/** `2026-10-06 20:21` in the owner's zone: the warm log is read by the owner, next to his own clock. */
+export function localStamp(ms: number, tzOffsetMin: number): string {
+  const d = new Date(ms + tzOffsetMin * 60_000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`
+}
+
 export function stepMs(ttlMin: number): number | null {
   const step = ttlMin - MARGIN_MIN
   return step >= 30 ? step * 60_000 : null

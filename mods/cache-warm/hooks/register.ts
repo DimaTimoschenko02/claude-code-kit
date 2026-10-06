@@ -7,20 +7,31 @@
 // the cache dies — and carries stop-point's part on the same line: `кэш до 20:15 · точка 19:42`. stop-point's own
 // `$.ui.status` calls pass through this module's `ui.status` hook, which takes their text and clears stop-point's own
 // row; without this mod loaded stop-point's row shows as it is.
-import type { EngineInterface, Register } from 'claude-code'
+//
+// Time is read off the wall clock once a minute, never trusted to one long timer: a timer counts the process's awake
+// time, and a Mac with its lid closed sends nothing at all. A warm whose moment passed while the cache still lives is
+// sent late; one whose cache already expired is recorded as missed, not sent (a fork then rewrites the whole prefix).
+// Every arming, warm, failure and miss is a line in ~/.claude/state/cache-warm/warms.log, so the owner can check later.
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { SessionWarm } from '../types'
 import type { ReplyKind } from './logic'
 import {
   MODE_TEXT,
+  PAUSE_MS,
+  RETRY_MS,
+  TICK_MS,
   aliveUntil,
   classify,
+  dueAction,
   effective,
   hhmm,
   hoursText,
+  localStamp,
   nextWarm,
   parse,
   parseTzOffset,
+  reachedCache,
   shouldWarm,
   stepMs,
   tokensText,
@@ -36,30 +47,46 @@ const DEFAULT = 'default'
 const TTL_MS = 60 * 86_400_000
 /** The fork's own question: the shortest answer the model gives, so a warm costs the cache read and little else. */
 const FORK_PROMPT = 'Cache keep-alive ping. Reply with the single word: ok'
+/** The warm log, under $HOME; `/warm` names it in this spelling. */
+export const LOG_PATH = '~/.claude/state/cache-warm/warms.log'
+const LOG_KEEP = 2000
 
 type Config = { defaultHours: number; ttlMin: number }
 let cfg: Config = { defaultHours: 2, ttlMin: 60 }
 let tzOffsetMin = 0
 let sid = ''
+/** $HOME, for the warm log; null when unknown (the log is then skipped, the warms are not). */
+let home: string | null = null
 /** The reply the window runs from, or null while the owner is here or nothing is armed. */
 let replyAt: number | null = null
 /** The last main-thread reply and what it left the owner with: a `/warm` typed later arms from it. */
 let lastReplyAt: number | null = null
 let lastKind: ReplyKind = 'other'
 let isTurnRunning = false
-let timer: { cancel: () => void } | null = null
-/** When the armed timer fires the next warm; null while none is due. `/warm` shows it, so the owner sees the mod alive. */
+/** When the next warm is due by the wall clock; null while none is. `/warm` shows it, so the owner sees the mod alive. */
 let nextAt: number | null = null
+let isWarmInFlight = false
 let warms = 0
-/** The last fork of this window and what it read, the proof that the warm reached the cache. */
-let lastWarm: { at: number; cacheRead?: number; reason?: string } | null = null
+/** The last warm of this window: what it read and wrote, why it failed, or that it was missed and why. */
+type LastWarm = {
+  at: number
+  cacheRead?: number
+  cacheWrite?: number
+  /** How long after its due moment it went out, when the process was paused in between. */
+  lateMs?: number
+  reason?: string
+  missed?: { dueAt: number; expiredAt: number | null; pause: { from: number; to: number } | null }
+}
+let lastWarm: LastWarm | null = null
 /** The last moment a request renewed the cache: a reply, a warm that read it, a turn that started. */
 let refreshedAt: number | null = null
 /** The end of the warmed window while warms are planned and none has failed; null otherwise. */
 let windowUntil: number | null = null
-/** Clears the cache part when the cache lapses; `lapseAt` is the moment it is armed for. */
-let lapseTimer: { cancel: () => void } | null = null
-let lapseAt: number | null = null
+/** The minute tick: runs while the line shows a live cache or a warm is planned. */
+let tick: Timer | null = null
+let lastTickAt: number | null = null
+/** The last stretch the tick did not run (the process frozen, the Mac asleep), seen when it resumed. */
+let lastPause: { from: number; to: number } | null = null
 /** stop-point's part of the line, as its last `$.ui.status` call gave it. */
 let pointText: string | undefined
 /** The line as last set, so an unchanged one is not set again. */
@@ -85,10 +112,15 @@ async function settings($: Engine) {
   return effective(await own($), await defaultHours($))
 }
 
-/** The cache's end as the line shows it, or null when nothing renewed it in this process. */
+/** The cache's own end: a TTL after the last request that renewed it, or null when none did in this process. */
+function cacheEnd(): number | null {
+  return refreshedAt === null ? null : refreshedAt + cfg.ttlMin * 60_000
+}
+
+/** The cache's end as the line shows it: its own end, or the warmed window's while warms are planned. */
 function cacheUntil(): number | null {
-  if (refreshedAt === null) return null
-  const fromLast = refreshedAt + cfg.ttlMin * 60_000
+  const fromLast = cacheEnd()
+  if (fromLast === null) return null
   return windowUntil !== null && windowUntil > fromLast ? windowUntil : fromLast
 }
 
@@ -97,7 +129,7 @@ export function composeStatus(cache: string | undefined, point: string | undefin
   return parts.length === 0 ? undefined : parts.join(' · ')
 }
 
-/** Sets the line from the cache's end and stop-point's part, and arms the clear for the moment the cache lapses. */
+/** Sets the line from the cache's end and stop-point's part; keeps the minute tick running while there is time to watch. */
 async function show($: Engine, force = false): Promise<void> {
   const now = await $.clock.now()
   const until = cacheUntil()
@@ -110,29 +142,55 @@ async function show($: Engine, force = false): Promise<void> {
     shown = text
     void $.ui.status(text)
   }
-  if (!isAlive) {
-    lapseTimer?.cancel()
-    lapseTimer = null
-    lapseAt = null
-  } else if (lapseAt !== until) {
-    lapseTimer?.cancel()
-    lapseAt = until
-    lapseTimer = $.clock.after(until - now, () => void lapse($))
+  if (isAlive || nextAt !== null) {
+    if (tick === null) {
+      lastTickAt = now
+      tick = $.clock.every(TICK_MS, () => void onTick($))
+    }
+  } else {
+    tick?.cancel()
+    tick = null
+    lastTickAt = null
   }
 }
 
-/** The cache's end came: a running turn keeps renewing it with its requests; otherwise the cache part goes. */
-async function lapse($: Engine): Promise<void> {
-  lapseTimer = null
-  lapseAt = null
-  if (isTurnRunning) refreshedAt = await $.clock.now()
+/**
+ * Once a minute by the wall clock: a running turn keeps renewing the cache with its requests; otherwise a due warm
+ * goes out (late too, while the cache lives) or is recorded as missed, and the line follows the cache's real end.
+ */
+async function onTick($: Engine): Promise<void> {
+  const now = await $.clock.now()
+  if (lastTickAt !== null && now - lastTickAt > PAUSE_MS) lastPause = { from: lastTickAt, to: now }
+  lastTickAt = now
+  if (isTurnRunning) {
+    const until = cacheUntil()
+    if (until !== null && until <= now) refreshedAt = now
+  } else if (!isWarmInFlight) {
+    const action = dueAction(now, nextAt, cacheEnd())
+    if (action === 'warm') await warm($, now)
+    else if (action === 'missed') await missed($, now)
+  }
   await show($)
+}
+
+/** One line in the warm log (and the debug log). The log is for the owner to check later; a warm never waits on it. */
+async function record($: Engine, text: string): Promise<void> {
+  $.ui.log(`cache-warm: ${text}`, { to: 'debug' })
+  if (home === null) return
+  try {
+    const path = `${home}${LOG_PATH.slice(1)}`
+    const line = `${localStamp(await $.clock.now(), tzOffsetMin)} ${sid.slice(0, 8)} ${text}`
+    const old = await $.fs.read(path).catch(() => '')
+    const lines = typeof old === 'string' && old !== '' ? old.replace(/\n$/, '').split('\n') : []
+    lines.push(line)
+    await $.fs.write(path, `${lines.slice(-LOG_KEEP).join('\n')}\n`)
+  } catch {
+    // an unwritable log must not stop the warms
+  }
 }
 
 /** Ends the warm window: no more forks for it. The line keeps the cache's end that requests already bought. */
 function disarm(): void {
-  timer?.cancel()
-  timer = null
   nextAt = null
   replyAt = null
   windowUntil = null
@@ -140,80 +198,141 @@ function disarm(): void {
 
 /** Arms, re-plans or disarms from the last reply, the session's mode and window; every change ends here. */
 async function evaluate($: Engine): Promise<void> {
-  const { mode } = await settings($)
+  const { mode, hours } = await settings($)
   if (isTurnRunning) return
-  if (lastReplyAt === null || stepMs(cfg.ttlMin) === null || !shouldWarm(mode, lastKind)) {
+  const end = cacheEnd()
+  // A cache that already lapsed has nothing left to keep: a fork would rewrite the prefix, as the owner's message will.
+  const isLapsed = end === null || end <= (await $.clock.now())
+  if (lastReplyAt === null || stepMs(cfg.ttlMin) === null || !shouldWarm(mode, lastKind) || isLapsed) {
     disarm()
     await show($)
     return
   }
-  timer?.cancel()
-  timer = null
-  if (replyAt !== lastReplyAt) {
+  const isNew = replyAt !== lastReplyAt
+  if (isNew) {
     warms = 0
     lastWarm = null
   }
   replyAt = lastReplyAt
   await plan($)
+  if (isNew && nextAt !== null) {
+    await record($, `armed: reply ${lastKind}, mode ${mode}, window ${hoursText(hours)}, first warm ${hhmm(nextAt, tzOffsetMin)}`)
+  }
 }
 
-/** Sets the timer for the next warm and the window's end the line shows. */
+/** Sets the next warm's moment and the window's end the line shows. */
 async function plan($: Engine): Promise<void> {
   if (replyAt === null) return
   const { hours } = await settings($)
   const now = await $.clock.now()
-  windowUntil = lastWarm?.reason === undefined ? aliveUntil(replyAt, hours, cfg.ttlMin) : null
-  const at = nextWarm(replyAt, now, hours, cfg.ttlMin)
-  const from = replyAt
-  nextAt = at
-  if (at !== null) {
-    timer = $.clock.after(Math.max(0, at - now), () => {
-      void warm($, from)
-    })
-  }
+  windowUntil = lastWarm?.reason === undefined && lastWarm?.missed === undefined ? aliveUntil(replyAt, hours, cfg.ttlMin) : null
+  nextAt = nextWarm(replyAt, now, hours, cfg.ttlMin)
   await show($)
 }
 
-async function warm($: Engine, from: number): Promise<void> {
-  timer = null
-  // The owner came back, or a newer reply re-armed: this tick belongs to a window that is over.
-  if (replyAt !== from) return
-  if (!isTurnRunning) {
-    const at = await $.clock.now()
-    const r = await $.model.fork({ prompt: FORK_PROMPT })
-    if (r.isAnswered) {
-      warms++
-      lastWarm = { at, cacheRead: r.usage.cache_read_input_tokens }
-      refreshedAt = at
-      await $.ui.log(`cache-warm: warm ${warms}, ${r.usage.cache_read_input_tokens} tokens read from cache`, { to: 'debug' })
-    } else {
-      lastWarm = { at, reason: r.reason }
-      await $.ui.log(`cache-warm: warm failed (${r.reason})`, { to: 'debug' })
-      if (r.reason === 'nothing-to-fork') {
-        disarm()
-        await show($)
-        return
-      }
-    }
+function lateText(ms: number): string {
+  return ms >= 2 * 60_000 ? `, ${hoursText(Math.round(ms / 60_000) / 60)} late` : ''
+}
+
+async function warm($: Engine, now: number): Promise<void> {
+  const from = replyAt
+  const due = nextAt ?? now
+  isWarmInFlight = true
+  let r: Awaited<ReturnType<Engine['model']['fork']>> | null = null
+  let thrown = ''
+  try {
+    r = await $.model.fork({ prompt: FORK_PROMPT })
+  } catch (err) {
+    thrown = String(err).slice(0, 200)
+  } finally {
+    isWarmInFlight = false
   }
+  const usage = r !== null && 'usage' in r ? r.usage : undefined
+  const lateMs = Math.max(0, now - due)
+  if (usage !== undefined && (r?.isAnswered === true || reachedCache(usage))) {
+    warms++
+    refreshedAt = now
+    lastWarm = { at: now, cacheRead: usage.cache_read_input_tokens, cacheWrite: usage.cache_creation_input_tokens, lateMs }
+    const cold = usage.cache_read_input_tokens < usage.cache_creation_input_tokens
+    await record(
+      $,
+      `warm ${warms} ${cold ? 'cold' : 'ok'}: read ${usage.cache_read_input_tokens} from cache, wrote ${usage.cache_creation_input_tokens}, ` +
+        `in ${usage.input_tokens}, out ${usage.output_tokens}${lateText(lateMs)}`,
+    )
+  } else {
+    const reason =
+      r === null
+        ? `threw ${thrown}`
+        : r.isAnswered
+          ? 'no usage'
+          : r.reason === 'api-error'
+            ? `api-error ${r.status ?? 'no response'} ${r.error}`
+            : r.reason
+    lastWarm = { at: now, reason }
+    if (r !== null && !r.isAnswered && r.reason === 'nothing-to-fork') {
+      await record($, `warm failed: ${reason}, window ended`)
+      disarm()
+      return
+    }
+    if (replyAt !== from) return
+    const end = cacheEnd()
+    if (end !== null && now + RETRY_MS < end) {
+      nextAt = now + RETRY_MS
+      windowUntil = null
+      await record($, `warm failed: ${reason}, retry ${hhmm(nextAt, tzOffsetMin)}`)
+      return
+    }
+    await record($, `warm failed: ${reason}, no retry before the cache ends`)
+  }
+  // The owner came back, or a newer reply re-armed, while the fork ran: this window is over.
   if (replyAt === from) await plan($)
 }
 
-/** The next warm as the timer holds it: due, running now, overdue (the timer did not fire), or none left. */
+/** The due moment passed while the process did not run, and the cache died meanwhile: say so, warm no more. */
+async function missed($: Engine, now: number): Promise<void> {
+  const dueAt = nextAt ?? now
+  const expiredAt = cacheEnd()
+  const pause = lastPause !== null && lastPause.to === now ? lastPause : null
+  lastWarm = { at: now, missed: { dueAt, expiredAt, pause } }
+  const why =
+    pause !== null
+      ? `process paused ${hhmm(pause.from, tzOffsetMin)}–${hhmm(pause.to, tzOffsetMin)} (Mac asleep)`
+      : 'the process did not run in time'
+  await record(
+    $,
+    `warm missed: due ${hhmm(dueAt, tzOffsetMin)}, cache expired ${expiredAt === null ? '?' : hhmm(expiredAt, tzOffsetMin)}, ${why}; window ended`,
+  )
+  disarm()
+}
+
+/** The next warm as the clock holds it: due, running now, overdue (the process stood), or none left. */
 function nextText(now: number): string {
   if (nextAt === null) return 'прогревы этого окна сделаны'
   if (nextAt > now) return `следующий прогрев в ${hhmm(nextAt, tzOffsetMin)} (через ${hoursText(Math.ceil((nextAt - now) / 60_000) / 60)})`
-  if (timer === null) return 'прогрев идёт сейчас'
-  return `прогрев опаздывает: был нужен в ${hhmm(nextAt, tzOffsetMin)}, таймер не сработал`
+  if (isWarmInFlight) return 'прогрев идёт сейчас'
+  return `прогрев опаздывает: был нужен в ${hhmm(nextAt, tzOffsetMin)}`
+}
+
+/** What happened to a warm that did not go out: the owner reads it after coming back to a cold cache. */
+function missedText(m: NonNullable<LastWarm['missed']>): string {
+  const why =
+    m.pause !== null
+      ? `Mac спал (процесс стоял) с ${hhmm(m.pause.from, tzOffsetMin)} до ${hhmm(m.pause.to, tzOffsetMin)}`
+      : 'процесс не работал в это время'
+  const expired = m.expiredAt === null ? '' : `, кэш истёк в ${hhmm(m.expiredAt, tzOffsetMin)}`
+  return `Прогрев в ${hhmm(m.dueAt, tzOffsetMin)} пропущен: ${why}${expired}.`
 }
 
 function warmsText(): string {
   if (lastWarm === null) return 'Прогревов в этом окне ещё не было.'
-  const last =
-    lastWarm.reason === undefined
-      ? `${tokensText(lastWarm.cacheRead ?? 0)} токенов из кэша`
-      : `не удался: ${lastWarm.reason}`
-  return `Прогревов в этом окне: ${warms}, последний в ${hhmm(lastWarm.at, tzOffsetMin)} — ${last}.`
+  if (lastWarm.missed !== undefined) return missedText(lastWarm.missed)
+  let last: string
+  if (lastWarm.reason !== undefined) last = `не удался: ${lastWarm.reason}`
+  else if ((lastWarm.cacheRead ?? 0) < (lastWarm.cacheWrite ?? 0)) {
+    last = `кэш уже истёк, записан заново: ${tokensText(lastWarm.cacheWrite ?? 0)} токенов`
+  } else last = `${tokensText(lastWarm.cacheRead ?? 0)} токенов из кэша`
+  const late = (lastWarm.lateMs ?? 0) >= 2 * 60_000 ? ` (опоздал на ${hoursText(Math.round((lastWarm.lateMs ?? 0) / 60_000) / 60)})` : ''
+  return `Прогревов в этом окне: ${warms}, последний в ${hhmm(lastWarm.at, tzOffsetMin)} — ${last}${late}.`
 }
 
 async function statusText($: Engine): Promise<string> {
@@ -231,18 +350,24 @@ async function statusText($: Engine): Promise<string> {
     const until = replyAt === null ? null : aliveUntil(replyAt, s.hours, cfg.ttlMin)
     if (until === null || until <= now) {
       const cache = cacheUntil()
+      if (lastWarm?.missed !== undefined) lines.push(missedText(lastWarm.missed))
+      const isLapsed = lastReplyAt !== null && !isTurnRunning && (cache === null || cache <= now)
       lines.push(
         (lastReplyAt !== null && !isTurnRunning && !shouldWarm(s.mode, lastKind)
           ? 'Сейчас не греет: последний ответ не ждёт тебя (`/warm on` — греть и такие).'
-          : 'Сейчас не греет: ждёт следующего ответа.') +
+          : isLapsed && lastWarm?.missed === undefined
+            ? 'Сейчас не греет: кэш последнего ответа уже истёк, держать нечего — ждёт следующего ответа.'
+            : 'Сейчас не греет: ждёт следующего ответа.') +
           (cache !== null && cache > now ? ` Кэш жив до ${hhmm(cache, tzOffsetMin)}.` : ''),
       )
     } else {
       lines.push(`Греет: ${nextText(now)}, кэш жив до ${hhmm(until, tzOffsetMin)}.`)
       lines.push(warmsText())
+      lines.push('Греет, только пока Mac не спит: с закрытой крышкой запросы не уходят, кэш умрёт через час после последнего.')
     }
   }
   lines.push(`По умолчанию для новых сессий: ${hoursText(def)}.`)
+  lines.push(`Журнал прогревов (все сессии, строка на попытку): ${LOG_PATH}`)
   lines.push('`/warm 3` или `/warm 1h 30m` — окно этой сессии · `/warm off` · `/warm on` (после каждого ответа) · `/warm auto` · `/warm default 2`')
   return lines.join('\n')
 }
@@ -259,6 +384,11 @@ export const register: Register = (on, options) => {
     refreshedAt = null
     isTurnRunning = false
     sid = await $.session.id()
+    try {
+      home = (await $.env.get('HOME')) ?? null
+    } catch {
+      home = null
+    }
     await $.command.register({
       name: COMMAND,
       description: 'Прогрев кэша сессии: статус, окно в часах, off / on / auto, default <часы>',
@@ -335,7 +465,8 @@ export const register: Register = (on, options) => {
     } else if (c.kind === 'default') {
       await $.store.set(DEFAULT, c.hours)
     }
-    if (!isTurnRunning) await evaluate($)
+    // A bare `/warm` only reads: re-planning would drop a retry the clock holds.
+    if (c.kind !== 'status' && !isTurnRunning) await evaluate($)
     return { text: await statusText($) }
   })
 }

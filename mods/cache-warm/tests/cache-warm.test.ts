@@ -25,6 +25,10 @@ const MID_WORK = 'Тесты прошли, дальше подключаю мо�
 type World = {
   store: Map<string, unknown>
   forks: number
+  /** Files the mod wrote, by path. */
+  files: Map<string, string>
+  /** What the next forks answer, in order; an empty list answers with a cache read. */
+  forkAnswers: unknown[]
   /** Every line cache-warm set, in order. */
   statuses: (string | undefined)[]
   /** The row each plugin holds on screen now: the engine keeps one per plugin. */
@@ -37,7 +41,22 @@ type World = {
 const onScreen = (w: World) => [...w.rows.values()].filter(t => t !== undefined)
 
 function world(on: On): World {
-  const w: World = { store: new Map(), forks: 0, statuses: [], rows: new Map(), sid: { value: 'sess-1' }, clock: mock.clock(on, { now: T0 }) }
+  const w: World = {
+    store: new Map(),
+    forks: 0,
+    files: new Map(),
+    forkAnswers: [],
+    statuses: [],
+    rows: new Map(),
+    sid: { value: 'sess-1' },
+    clock: mock.clock(on, { now: T0 }),
+  }
+  mock.env(on, { HOME: '/home/fake' })
+  on('fs.read', (_$, e) => ({ value: w.files.get(e.path) ?? '' }))
+  on('fs.write', (_$, e) => {
+    w.files.set(e.path, e.text)
+    return { value: undefined }
+  })
   on('store.get', (_$, e) => ({ value: w.store.get(e.key) }))
   on('store.set', (_$, e) => {
     w.store.set(e.key, JSON.parse(JSON.stringify(e.value)))
@@ -53,6 +72,8 @@ function world(on: On): World {
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('model.fork', () => {
     w.forks++
+    const planned = w.forkAnswers.shift()
+    if (planned !== undefined) return { value: planned } as never
     return {
       value: {
         isAnswered: true,
@@ -161,7 +182,7 @@ describe('session', () => {
     expect(text).toContain('Греет: прогревы этого окна сделаны, кэш жив до 15:40.')
     expect(text).toContain('Прогревов в этом окне: 2, последний в 14:40')
     await w.clock.advance(60 * MIN)
-    expect(textOf(await warm($, ''))).toContain('Сейчас не греет: ждёт следующего ответа.')
+    expect(textOf(await warm($, ''))).toContain('Сейчас не греет: кэш последнего ответа уже истёк')
   })
 
   test('/warm after a reply that waits for nothing says why it is cold', async ($, on) => {
@@ -171,15 +192,22 @@ describe('session', () => {
     expect(textOf(await warm($, ''))).toContain('Сейчас не греет: последний ответ не ждёт тебя')
   })
 
-  test('a result-only reply stays cold until /warm on', async ($, on) => {
+  test('a result-only reply stays cold until /warm on; once its cache lapsed there is nothing to keep', async ($, on) => {
     const w = world(on)
     await start($)
     await reply($, NOTHING)
-    await w.clock.advance(60 * MIN)
+    await w.clock.advance(30 * MIN)
     expect(w.forks).toBe(0)
-    // The reply is 60 min old: the next warm on its 50 min grid is at 100 min.
-    expect(textOf(await warm($, 'on'))).toContain('после каждого ответа')
-    await w.clock.advance(40 * MIN)
+    expect(textOf(await warm($, 'on'))).toContain('следующий прогрев в 13:50')
+    await w.clock.advance(20 * MIN)
+    expect(w.forks).toBe(1)
+
+    await reply($, NOTHING)
+    await warm($, 'auto')
+    await w.clock.advance(61 * MIN)
+    // The reply's cache died a minute ago: `/warm on` now would only rewrite it, so nothing is planned.
+    expect(textOf(await warm($, 'on'))).toContain('кэш последнего ответа уже истёк, держать нечего')
+    await w.clock.advance(120 * MIN)
     expect(w.forks).toBe(1)
   })
 
@@ -314,5 +342,106 @@ describe('status line', () => {
     await start($)
     await reply($, WAITS)
     expect(onScreen(w)).toEqual(['🔥 кэш до 15:40'])
+  })
+})
+
+/**
+ * A closed lid: the process stops, so no timer fires until it opens. A stand-in plugin holds every clock wait that
+ * comes due while the lid is closed and lets it go when the lid opens, at whatever the wall clock says then. It runs
+ * in its own environment, so the test moves the lid through its command.
+ */
+const LID_PLUGIN = {
+  name: 'lid',
+  register(on: On) {
+    let isClosed = false
+    const waiters: (() => void)[] = []
+    on('command.run', { command: 'lid' }, (_$, e) => {
+      isClosed = e.args === 'close'
+      if (!isClosed) for (const wake of waiters.splice(0)) wake()
+      return { text: e.args }
+    })
+    const hold = async <T>(r: T): Promise<T> => {
+      while (isClosed) await new Promise<void>(resolve => waiters.push(resolve))
+      return r
+    }
+    on('clock.every', async (_$, e, next) => hold(await next(e)))
+    on('clock.after', async (_$, e, next) => hold(await next(e)))
+  },
+}
+const moveLid = ($: Engine, args: 'close' | 'open') =>
+  $.command.run({ command: 'lid', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as never)
+/** The Mac sleeps for `ms`: the wall clock moves, no timer runs; then the lid opens. */
+async function sleepFor($: Engine, w: World, ms: number): Promise<void> {
+  await moveLid($, 'close')
+  await w.clock.advance(ms)
+  await moveLid($, 'open')
+  await w.clock.settle()
+}
+const LOG = '/home/fake/.claude/state/cache-warm/warms.log'
+const logLines = (w: World) => (w.files.get(LOG) ?? '').trim().split('\n').filter(l => l !== '')
+
+describe('a sleeping Mac and the warm log', () => {
+  test('the lid closed over the warm and the expiry: no fork on a dead cache, the miss is logged, the line and /warm say so', { plugins: [LID_PLUGIN] }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    // The incident: a waiting reply, the owner awake 35 min more, then the lid shut until after the cache expired.
+    await reply($, WAITS)
+    expect(w.statuses.at(-1)).toBe('🔥 кэш до 15:40')
+    await w.clock.advance(35 * MIN)
+    await sleepFor($, w, 29 * MIN)
+    expect(w.forks).toBe(0)
+    // The cache died at 14:00 while the lid was shut: the line no longer promises 15:40.
+    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(logLines(w)).toEqual([
+      '2026-10-04 13:00 sess-1 armed: reply waits, mode auto, window 2 ч, first warm 13:50',
+      '2026-10-04 14:04 sess-1 warm missed: due 13:50, cache expired 14:00, process paused 13:35–14:04 (Mac asleep); window ended',
+    ])
+    const text = textOf(await warm($, ''))
+    expect(text).toContain('Прогрев в 13:50 пропущен: Mac спал (процесс стоял) с 13:35 до 14:04, кэш истёк в 14:00.')
+    expect(text).toContain('Журнал прогревов (все сессии, строка на попытку): ~/.claude/state/cache-warm/warms.log')
+    await w.clock.advance(120 * MIN)
+    expect(w.forks).toBe(0)
+  })
+
+  test('a short nap past the due moment: the warm goes out late on waking while the cache lives, and the window goes on', { plugins: [LID_PLUGIN] }, async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, WAITS)
+    await w.clock.advance(45 * MIN)
+    await sleepFor($, w, 10 * MIN)
+    expect(w.forks).toBe(1)
+    expect(logLines(w).at(-1)).toBe('2026-10-04 13:55 sess-1 warm 1 ok: read 180000 from cache, wrote 0, in 3, out 1, 5 мин late')
+    expect(textOf(await warm($, ''))).toContain('последний в 13:55 — 180 000 токенов из кэша (опоздал на 5 мин)')
+    // The grid stays the reply's: the next warm at 14:40.
+    await w.clock.advance(45 * MIN)
+    expect(w.forks).toBe(2)
+    expect(w.statuses.at(-1)).toBe('кэш до 15:40')
+  })
+
+  test('every attempt is one line: a refused warm is retried in 2 min, a cold one says it rewrote the cache', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.forkAnswers.push(
+      { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+      { isAnswered: true, text: 'ok', usage: { input_tokens: 3, output_tokens: 1, cache_read_input_tokens: 26_540, cache_creation_input_tokens: 139_564 } },
+    )
+    await reply($, WAITS)
+    await w.clock.advance(50 * MIN)
+    expect(w.forks).toBe(1)
+    expect(textOf(await warm($, ''))).toContain('не удался: api-error 529 overloaded')
+    await w.clock.advance(2 * MIN)
+    expect(w.forks).toBe(2)
+    expect(logLines(w).slice(1)).toEqual([
+      '2026-10-04 13:50 sess-1 warm failed: api-error 529 overloaded, retry 13:52',
+      '2026-10-04 13:52 sess-1 warm 1 cold: read 26540 from cache, wrote 139564, in 3, out 1',
+    ])
+    expect(textOf(await warm($, ''))).toContain('кэш уже истёк, записан заново: 139 564 токенов')
+  })
+
+  test('/warm while warming says the warms stop while the Mac sleeps', async ($, on) => {
+    world(on)
+    await start($)
+    await reply($, WAITS)
+    expect(textOf(await warm($, ''))).toContain('Греет, только пока Mac не спит')
   })
 })
