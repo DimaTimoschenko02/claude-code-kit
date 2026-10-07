@@ -4,8 +4,10 @@
 /** One run of a line: plain, a code span, bold, italic, or a link's label. */
 export type Run = { text: string; code?: true; bold?: true; italic?: true; href?: string }
 
+/** Schemes a link may carry: web, the vault, the IDE. Not `file:` from text — a click on an app bundle would run it. */
+export const SCHEMES = '(?:https?|obsidian|webstorm|jetbrains)'
 // One left-to-right scan: a code span or a markdown link is atomic (no marks inside count), `**` toggles bold.
-const TOKEN = /`([^`\n]+)`|\[([^\]\n]+)\]\(((?:https?|obsidian):\/\/[^)\s]+)\)|\*\*/g
+const TOKEN = new RegExp(`\`([^\`\\n]+)\`|\\[([^\\]\\n]+)\\]\\((${SCHEMES}:\\/\\/[^)\\s]+)\\)|\\*\\*`, 'g')
 // `*word*` italic only when flanked like emphasis, so `a * b` and `snake*case` stay as written.
 const ITALIC = /(?<![\w*])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?![\w*])/g
 

@@ -12,6 +12,7 @@ import {
   cardTasks,
   edit,
   emptyPanel,
+  isCard,
   isDoneCard,
   merge,
   remove,
@@ -20,8 +21,10 @@ import {
   toggle,
   view,
 } from './logic'
-import { runs, withLead } from './markup'
+import { plain, runs, withLead } from './markup'
 import type { Run } from './markup'
+import { NO_REFS, candidates, githubRepo, linked, repoOfLinks } from './refs'
+import type { Refs } from './refs'
 
 type Engine = EngineInterface
 
@@ -38,6 +41,7 @@ const CODE_COLOR = 'permission'
 const panelAtom = atom({ plugin: 'session-panel', key: 'panel' } as const, emptyPanel(0))
 const editingAtom = atom({ plugin: 'session-panel', key: 'editing' } as const, null)
 const doneAtom = atom({ plugin: 'session-panel', key: 'doneTasks' } as const, [])
+const refsAtom = atom({ plugin: 'session-panel', key: 'refs' } as const, NO_REFS)
 
 function isPanel(value: unknown): value is Panel {
   if (typeof value !== 'object' || value === null) return false
@@ -62,6 +66,75 @@ async function sync($: Engine): Promise<void> {
   await update($, panelAtom, () => (isPanel(stored) ? stored : emptyPanel(0)))
   await update($, editingAtom, () => null)
   await refreshCards($)
+  await resolveRefs($)
+}
+
+// Where the places a line names are looked up: the session's folder, its repo's top, the owner's home, the GitHub repo.
+let where = { cwd: '', top: '', home: '', repo: '' }
+// What this load already looked up: a sha → a commit or not, a path → what exists there or nothing.
+let seenShas = new Map<string, boolean>()
+let seenPaths = new Map<string, Refs['files'][string] | null>()
+/** New paths looked up per pass; a long stored panel is checked over a few replies instead of all at start. */
+const PATHS_PER_PASS = 200
+
+async function git($: Engine, cwd: string, args: string[], stdin?: string): Promise<string | null> {
+  const r = await $.process
+    .run(['git', ...args], { cwd, timeoutMs: 5_000, ...(stdin === undefined ? {} : { stdin }) })
+    .catch(() => null)
+  return r === null || r.exitCode !== 0 ? null : r.stdout
+}
+
+async function locate($: Engine, cwd: string): Promise<void> {
+  const top = (await git($, cwd, ['rev-parse', '--show-toplevel']))?.trim() ?? ''
+  const remote = top === '' ? '' : ((await git($, cwd, ['remote', 'get-url', 'origin'])) ?? '')
+  const home = (await $.env.get('HOME').catch(() => undefined)) ?? ''
+  where = { cwd, top, home, repo: githubRepo(remote) }
+  seenShas = new Map()
+  seenPaths = new Map()
+}
+
+function absolute(path: string): string[] {
+  if (path.startsWith('~/')) return where.home === '' ? [] : [`${where.home}${path.slice(1)}`]
+  if (path.startsWith('/')) return [path]
+  return [...new Set([where.cwd, where.top].filter(d => d !== '').map(d => `${d}/${path}`))]
+}
+
+/** Checks what the panel's lines name — shas with git, paths on disk — so the pane links only what leads somewhere. */
+async function resolveRefs($: Engine): Promise<void> {
+  const panel = await read($, panelAtom)
+  const shas = new Set<string>()
+  const paths = new Set<string>()
+  for (const item of panel.items) {
+    if (item.href !== undefined) continue
+    const c = candidates(plain(item.text))
+    for (const s of c.shas) shas.add(s)
+    for (const p of c.paths) paths.add(p)
+  }
+  const fresh = where.top === '' ? [] : [...shas].filter(s => !seenShas.has(s))
+  if (fresh.length > 0) {
+    const out = await git($, where.top, ['cat-file', '--batch-check'], `${fresh.map(s => `${s}^{commit}`).join('\n')}\n`)
+    const lines = out?.split('\n') ?? []
+    fresh.forEach((s, n) => seenShas.set(s, / commit /.test(lines[n] ?? '')))
+  }
+  for (const p of [...paths].filter(x => !seenPaths.has(x)).slice(0, PATHS_PER_PASS)) {
+    let found: Refs['files'][string] | null = null
+    for (const abs of absolute(p)) {
+      const st = await $.fs.stat(abs).catch(() => null)
+      if (st !== null && st.kind !== 'other') {
+        found = { abs, dir: st.kind === 'dir' }
+        break
+      }
+    }
+    seenPaths.set(p, found)
+  }
+  const files: Record<string, Refs['files'][string]> = {}
+  for (const [p, f] of seenPaths) if (f !== null) files[p] = f
+  const refs: Refs = {
+    repo: where.repo !== '' ? where.repo : repoOfLinks(panel.items.flatMap(i => (i.href === undefined ? [] : [i.href]))),
+    commits: [...seenShas].filter(([, ok]) => ok).map(([s]) => s),
+    files,
+  }
+  await update($, refsAtom, () => refs)
 }
 
 async function change($: Engine, fn: (p: Panel) => Panel): Promise<void> {
@@ -72,6 +145,7 @@ async function change($: Engine, fn: (p: Panel) => Panel): Promise<void> {
   const stamped = { ...after, at: await $.clock.now() }
   await update($, panelAtom, () => stamped)
   await $.store.set(`${KEY}${sid}`, stamped)
+  if (after.items !== before.items) await resolveRefs($)
 }
 
 async function refreshCards($: Engine): Promise<void> {
@@ -135,6 +209,7 @@ export const register: Register = (on, options) => {
     }
 
     sid = ''
+    await locate($, e.cwd)
     await sync($)
     const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
     const job = jobDir?.replace(/\/+$/, '').split('/').pop()
@@ -196,6 +271,12 @@ export const register: Register = (on, options) => {
     const panel = await read($, panelAtom)
     const editing = await read($, editingAtom)
     const v = view(panel, await read($, doneAtom))
+    // Every place a line names — `#140`, a sha, a path, an address, a task with its card here — is a link where it stands.
+    const places = {
+      ...(await read($, refsAtom)),
+      cards: new Map(panel.items.filter(isCard).map(i => [i.task!, i.href!] as const)),
+      task: cfg.pattern,
+    }
 
     // A line's markdown drawn as styled runs; inside a link item a run's own link is drawn as its label alone.
     const inline = (list: Run[], id: string, linkable: boolean) =>
@@ -231,7 +312,7 @@ export const register: Register = (on, options) => {
           <Button key={`t-${item.id}`} plain label={item.checked ? '☑' : '☐'} onPress={() => change($, p => toggle(p, item.id))} />
           <Text key={`s-${item.id}`}> </Text>
           {item.href === undefined
-            ? <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap" dimColor={item.checked && item.kind !== 'done'}>{inline(withLead(runs(item.text)), item.id, true)}</Text></Box>
+            ? <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap" dimColor={item.checked && item.kind !== 'done'}>{inline(withLead(linked(runs(item.text), places)), item.id, true)}</Text></Box>
             : <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap"><Link href={item.href}>{inline(runs(item.text), item.id, false)}</Link></Text></Box>}
           <Text key={`g-${item.id}`}> </Text>
           {Input === null ? null : <Button key={`e-${item.id}`} plain dimColor label="✎" onPress={() => update($, editingAtom, () => item.id)} />}

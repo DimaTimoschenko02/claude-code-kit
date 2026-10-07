@@ -20,8 +20,15 @@ export type Panel = {
   at: number
 }
 
+/** What the session knows about the places its lines name (see hooks/refs.ts). */
+export type Refs = {
+  repo: string
+  commits: readonly string[]
+  files: Readonly<Record<string, { abs: string; dir: boolean }>>
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    'session-panel': { panel: Panel; editing: string | null; doneTasks: string[] }
+    'session-panel': { panel: Panel; editing: string | null; doneTasks: string[]; refs: Refs }
   }
 }
