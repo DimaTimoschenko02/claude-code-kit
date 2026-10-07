@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { emptyPanel, taskRegex } from '../hooks/logic'
 import { plain, runs } from '../hooks/markup'
 import type { Run } from '../hooks/markup'
-import { candidates, githubRepo, linked, repoOfLinks } from '../hooks/refs'
+import { blocked, candidates, executable, gate, githubRepo, linked, placeByName, repoOfLinks } from '../hooks/refs'
 import type { Places } from '../hooks/refs'
 import type { Panel } from '../types'
 
@@ -67,13 +67,14 @@ describe('every place a line names is a link where it stands', () => {
     expect(links(out)).toEqual([
       ['/home/fake/proj/hooks/markup.ts:42', 'webstorm://open?file=/home/fake/proj/hooks/markup.ts&line=42'],
       ['hooks/refs.ts', 'webstorm://open?file=/home/fake/proj/hooks/refs.ts'],
-      ['~/claude-code-kit/mods', 'file:///home/fake/claude-code-kit/mods'],
+      ['~/claude-code-kit/mods', 'file:///home/fake/claude-code-kit/mods/'],
     ])
   })
 
-  test('a markdown link into the IDE draws as its label, not raw', () => {
-    const out = runs('Дебет без транзакции — [bonus.ts:290](webstorm://open?file=/a/bonus.ts&line=290)')
-    expect(links(out)).toEqual([['bonus.ts:290', 'webstorm://open?file=/a/bonus.ts&line=290']])
+  test('a markdown link into the IDE to a checked file links, rebuilt from the check; its file is a candidate too', () => {
+    const line = 'Дебет без транзакции — [markup.ts:290](webstorm://open?file=/home/fake/proj/hooks/markup.ts&line=290)'
+    expect(candidates(line).paths).toEqual(['/home/fake/proj/hooks/markup.ts'])
+    expect(links(draw(line))).toEqual([['markup.ts:290', 'webstorm://open?file=/home/fake/proj/hooks/markup.ts&line=290']])
   })
 
   test('without a known repo #N and shas stay text; another repo named with its number still links', () => {
@@ -106,6 +107,56 @@ describe('every place a line names is a link where it stands', () => {
   })
 })
 
+describe('one gate for every address: what fails it draws as plain text', () => {
+  // Each line is a hole the text could open; every one must draw with no link at all.
+  const HOLES = [
+    '[x](javascript:alert(1))',
+    '[Calc](file:///Applications/Calc.app) и file:///Applications/Calc.app',
+    '[проект](jetbrains://idea/navigate/reference?project=a&path=b)',
+    '[passwd](webstorm://open?file=/etc/passwd) и webstorm://open?file=/etc/passwd',
+    '[markup](webstorm://open?file=/home/fake/proj/hooks/markup.ts&line=1&run=1)',
+    '[cmd](obsidian://advanced-uri?vault=v&commandid=x) и obsidian://advanced-uri?commandid=x',
+    'x-apple.systempreferences:com.apple.preference и vscode://file/etc/passwd и [s](ssh://host)',
+    'приложение /Applications/Calc.app и ~/claude-code-kit/mods/x.app/Contents/MacOS/x',
+  ]
+  test('a crafted line per hole links nothing', () => {
+    const at: Places = {
+      ...AT,
+      files: { ...AT.files, '~/claude-code-kit/mods/x.app/Contents/MacOS/x': { abs: '/home/fake/claude-code-kit/mods/x.app/Contents/MacOS/x', dir: false } },
+    }
+    for (const line of HOLES) expect([line, links(draw(line, at))]).toEqual([line, []])
+  })
+
+  test('the web and the vault open pass; a task card behind an unsafe address stays text', () => {
+    expect(gate('https://example.com/a', {})).toBe('https://example.com/a')
+    expect(gate('http://localhost:3000/x', {})).toBe('http://localhost:3000/x')
+    expect(gate('obsidian://open?vault=v&file=b', {})).toBe('obsidian://open?vault=v&file=b')
+    expect(links(draw('PH-95 готово', { ...AT, cards: new Map([['PH-95', 'obsidian://advanced-uri?commandid=x']]) }))).toEqual([])
+  })
+
+  test('a path is placed by spelling inside a root before the disk is asked; dots and other places are refused', () => {
+    const roots = ['/home/fake/proj', '/home/fake/vault']
+    expect(placeByName('hooks/refs.ts', ['/home/fake/proj'], '/home/fake', roots)).toEqual(['/home/fake/proj/hooks/refs.ts'])
+    expect(placeByName('../../etc/passwd', ['/home/fake/proj'], '/home/fake', roots)).toEqual([])
+    expect(placeByName('/home/fake/proj/../.ssh/id_rsa', [], '/home/fake', roots)).toEqual([])
+    expect(placeByName('/net/evil.example/share/x', [], '/home/fake', roots)).toEqual([])
+    expect(placeByName('/home/fake/projector/x', [], '/home/fake', roots)).toEqual([])
+    expect(placeByName('~/vault/PH-95.md', [], '/home/fake', roots)).toEqual(['/home/fake/vault/PH-95.md'])
+  })
+
+  test('bundles anywhere on the path and files a launcher runs are blocked; an execute bit counts as runnable', () => {
+    for (const p of ['/a/Calc.app', '/a/Calc.app/Contents/MacOS/Calc', '/a/x.workflow', '/a/x.prefPane']) expect([p, blocked(p, true)]).toEqual([p, true])
+    for (const p of ['/a/run.command', '/a/deploy.sh', '/a/x.webloc', '/a/x.dmg', '/a/x.pkg', '/a/x.terminal', '/a/x.fileloc', '/a/x.inetloc', '/a/x.tool']) {
+      expect([p, blocked(p, false)]).toEqual([p, true])
+    }
+    expect(blocked('/a/docs/design.md', false)).toBe(false)
+    expect(blocked('/a/src', true)).toBe(false)
+    expect(executable('100755')).toBe(true)
+    expect(executable('100644')).toBe(false)
+    expect(executable('junk')).toBe(true)
+  })
+})
+
 const SID = 'sess-1'
 const PANE = { plugin: 'session-panel', component: 'Pane', requestId: 'session-panel', props: { title: 'Сессия', isFocused: true, bodyColumns: 48, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} } } as const
 
@@ -133,21 +184,36 @@ function world(on: On, panel: Panel): Calls {
   on('ui.open', () => ({ value: { opened: true } }) as never)
   on('ui.log', () => ({ value: undefined }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.repo', () => ({ value: { root: '/home/fake/proj', remote: 'git@github.com:acme/app.git', internal: false, name: null } }))
   on('process.run', (_$, e) => {
     calls.git.push([...e.argv])
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     const args = e.argv.slice(1).join(' ')
-    if (args === 'rev-parse --show-toplevel') return ok('/home/fake/proj\n')
-    if (args === 'remote get-url origin') return ok('git@github.com:acme/app.git\n')
+    if (e.argv[0] === '/usr/bin/stat') {
+      const files = e.argv.slice(e.argv.indexOf('--') + 1)
+      return ok(files.map(f => `${f.endsWith('/bin/run') ? '100755' : '100644'}\t${f}`).join('\n') + '\n')
+    }
     if (args === 'cat-file --batch-check') {
       const asked = (e.init?.stdin ?? '').split('\n').filter(Boolean)
       return ok(asked.map(a => (a.startsWith('d658d491') ? 'd658d4910000 commit 250' : `${a} missing`)).join('\n') + '\n')
     }
     return { value: { exitCode: 1, stdout: '', stderr: 'unknown', isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  // What is on the fake disk: a file, an executable, a link out of the project, a folder, and a file outside every root.
+  const disk: Record<string, { kind: 'file' | 'dir'; realPath: string; isLink?: boolean }> = {
+    '/home/fake/proj': { kind: 'dir', realPath: '/home/fake/proj' },
+    '/home/fake/proj/hooks/refs.ts': { kind: 'file', realPath: '/home/fake/proj/hooks/refs.ts' },
+    '/home/fake/proj/bin/run': { kind: 'file', realPath: '/home/fake/proj/bin/run' },
+    '/home/fake/proj/docs/out.md': { kind: 'file', realPath: '/etc/hosts', isLink: true },
+    '/home/fake/proj/docs': { kind: 'dir', realPath: '/home/fake/proj/docs' },
+    '/home/fake/other/x.ts': { kind: 'file', realPath: '/home/fake/other/x.ts' },
+  }
   on('fs.stat', (_$, e) => {
     calls.stats.push(e.path)
-    return e.path === '/home/fake/proj/hooks/refs.ts' ? { value: { kind: 'file', size: 1, mtimeMs: 0, isLink: false } } : { deny: `ENOENT ${e.path}` }
+    const f = disk[e.path]
+    return f === undefined
+      ? { deny: `ENOENT ${e.path}` }
+      : { value: { kind: f.kind, size: 1, mtimeMs: 0, isLink: f.isLink === true, ...(e.resolve ? { realPath: f.realPath } : {}) } }
   })
   return calls
 }
@@ -162,6 +228,8 @@ describe('the pane links in place', () => {
       { id: 'i1', kind: 'link', text: 'PR #139', href: `${REPO}/pull/139`, checked: false, by: 'auto' },
       { id: 'i2', kind: 'done', text: MICRO_PR, checked: true, by: 'auto' },
       { id: 'i3', kind: 'done', text: `${SHA_LINE}; правка в hooks/refs.ts`, checked: true, by: 'auto' },
+      { id: 'i4', kind: 'done', text: 'скрипт bin/run, заметка docs/out.md, папка /home/fake/proj/docs, чужое /home/fake/other/x.ts и /net/evil.example/share/x', checked: true, by: 'auto' },
+      { id: 'i5', kind: 'link', text: 'команда', href: 'obsidian://advanced-uri?commandid=x', checked: false, by: 'tool' },
     ],
   }
 
@@ -176,8 +244,16 @@ describe('the pane links in place', () => {
     expect(await href('d658d491')).toBe(`${REPO}/commit/d658d491`)
     expect(await href('hooks/refs.ts')).toBe('webstorm://open?file=/home/fake/proj/hooks/refs.ts')
     expect(await href('549ced52')).toBeUndefined()
-    // The links section stays as it was.
+    // The links section stays as it was, behind the same gate.
     expect(await href('PR #139')).toBe(`${REPO}/pull/139`)
+    expect(await href('команда')).toBeUndefined()
+    expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'команда')).toBe(true)
+    // An executable and a link out of every root stay text; a folder opens in Finder.
+    expect(await href('bin/run')).toBeUndefined()
+    expect(await href('docs/out.md')).toBeUndefined()
+    expect(await href('/home/fake/proj/docs')).toBe('file:///home/fake/proj/docs/')
+    // A path spelt outside every root is never asked about on disk.
+    expect(calls.stats.some(p => p.includes('/other/') || p.startsWith('/net/'))).toBe(false)
     // Git is asked once for both shas, the disk once per path.
     expect(calls.git.filter(a => a.includes('cat-file')).length).toBe(1)
     await ui.unmount()

@@ -27,6 +27,13 @@
       "title": "Task id pattern",
       "description": "Regular expression a task id matches, searched in a link's address and label.",
       "default": "\\b[A-Z]{2,}-\\d+\\b"
+    },
+    "linkRoots": {
+      "type": "string",
+      "multiple": true,
+      "title": "Link roots",
+      "description": "Absolute (or ~/) folders, besides the session's folder, its repository and the cards folder, whose files a panel line may link to; a path outside every root stays plain text.",
+      "default": []
     }
   }
 }

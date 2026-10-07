@@ -21,9 +21,9 @@ import {
   toggle,
   view,
 } from './logic'
-import { plain, runs, withLead } from './markup'
+import { runs, withLead } from './markup'
 import type { Run } from './markup'
-import { NO_REFS, candidates, githubRepo, linked, repoOfLinks } from './refs'
+import { NO_REFS, blocked, candidates, executable, gate, githubRepo, linked, placeByName, repoOfLinks, within } from './refs'
 import type { Refs } from './refs'
 
 type Engine = EngineInterface
@@ -49,8 +49,8 @@ function isPanel(value: unknown): value is Panel {
   return Array.isArray(v.items) && Array.isArray(v.dropped) && Array.isArray(v.report) && typeof v.seq === 'number'
 }
 
-type Config = { pattern: RegExp; cardsDir: string; doneStatuses: string[] }
-let cfg: Config = { pattern: taskRegex(undefined), cardsDir: '', doneStatuses: ['Done'] }
+type Config = { pattern: RegExp; cardsDir: string; doneStatuses: string[]; linkRoots: string[] }
+let cfg: Config = { pattern: taskRegex(undefined), cardsDir: '', doneStatuses: ['Done'], linkRoots: [] }
 // Bumped per owner line so the add field empties; an auto capture mid-typing leaves it alone.
 let addRound = 0
 // The session the atom holds; `/clear` starts a new id, whose panel is loaded fresh.
@@ -69,34 +69,60 @@ async function sync($: Engine): Promise<void> {
   await resolveRefs($)
 }
 
-// Where the places a line names are looked up: the session's folder, its repo's top, the owner's home, the GitHub repo.
-let where = { cwd: '', top: '', home: '', repo: '' }
-// What this load already looked up: a sha → a commit or not, a path → what exists there or nothing.
+// Where the places a line names are looked up: the session's folder and repo, the owner's home, the GitHub repo, and
+// the roots a path must lie in to be linked — as spelt (checked before any disk access) and as they really are.
+let where = { cwd: '', top: '', home: '', repo: '', spelt: [] as string[], real: [] as string[] }
+// What this load already looked up: a sha → a commit or not, a path → its checked target or nothing.
 let seenShas = new Map<string, boolean>()
 let seenPaths = new Map<string, Refs['files'][string] | null>()
 /** New paths looked up per pass; a long stored panel is checked over a few replies instead of all at start. */
 const PATHS_PER_PASS = 200
+const HEX = /^[0-9a-f]{7,40}$/
 
-async function git($: Engine, cwd: string, args: string[], stdin?: string): Promise<string | null> {
+/** A command by its argument vector, never a shell; its output, or null when it failed or exited non-zero. */
+async function run($: Engine, argv: string[], cwd: string, stdin?: string): Promise<string | null> {
   const r = await $.process
-    .run(['git', ...args], { cwd, timeoutMs: 5_000, ...(stdin === undefined ? {} : { stdin }) })
+    .run(argv, { cwd, timeoutMs: 5_000, ...(stdin === undefined ? {} : { stdin }) })
     .catch(() => null)
   return r === null || r.exitCode !== 0 ? null : r.stdout
 }
 
+async function realDir($: Engine, path: string): Promise<string | undefined> {
+  const st = await $.fs.stat(path, { resolve: true }).catch(() => null)
+  return st?.kind === 'dir' ? st.realPath : undefined
+}
+
 async function locate($: Engine, cwd: string): Promise<void> {
-  const top = (await git($, cwd, ['rev-parse', '--show-toplevel']))?.trim() ?? ''
-  const remote = top === '' ? '' : ((await git($, cwd, ['remote', 'get-url', 'origin'])) ?? '')
+  const repo = await $.session.repo().catch(() => null)
+  const top = repo?.root ?? ''
   const home = (await $.env.get('HOME').catch(() => undefined)) ?? ''
-  where = { cwd, top, home, repo: githubRepo(remote) }
+  const expand = (p: string) => (p.startsWith('~/') && home !== '' ? `${home}${p.slice(1)}` : p)
+  const spelt = [cwd, top, cfg.cardsDir, ...cfg.linkRoots.map(expand)]
+    .map(p => p.replace(/\/+$/, ''))
+    .filter(p => p.startsWith('/') && p.length > 1 && !p.split('/').some(s => s === '.' || s === '..'))
+  const real: string[] = []
+  for (const p of spelt) {
+    const r = await realDir($, p)
+    if (r !== undefined && r !== '/') real.push(r)
+  }
+  where = { cwd, top, home, repo: githubRepo(repo?.remote ?? ''), spelt: [...new Set([...spelt, ...real])], real }
   seenShas = new Map()
   seenPaths = new Map()
 }
 
-function absolute(path: string): string[] {
-  if (path.startsWith('~/')) return where.home === '' ? [] : [`${where.home}${path.slice(1)}`]
-  if (path.startsWith('/')) return [path]
-  return [...new Set([where.cwd, where.top].filter(d => d !== '').map(d => `${d}/${path}`))]
+/**
+ * Where a path the text names really is, when a click there is safe: spelt inside a root, landing inside a root once
+ * every link is followed, no bundle along the way, no runnable file. The exec bit is checked after, in one batch.
+ */
+async function place($: Engine, path: string): Promise<Refs['files'][string] | null> {
+  for (const abs of placeByName(path, [where.cwd, where.top], where.home, where.spelt)) {
+    const st = await $.fs.stat(abs, { resolve: true }).catch(() => null)
+    if (st === null || st.kind === 'other' || st.realPath === undefined) continue
+    const dir = st.kind === 'dir'
+    if (!within(st.realPath, where.real) || blocked(abs, dir) || blocked(st.realPath, dir)) continue
+    return { abs: st.realPath, dir }
+  }
+  return null
 }
 
 /** Checks what the panel's lines name — shas with git, paths on disk — so the pane links only what leads somewhere. */
@@ -106,33 +132,36 @@ async function resolveRefs($: Engine): Promise<void> {
   const paths = new Set<string>()
   for (const item of panel.items) {
     if (item.href !== undefined) continue
-    const c = candidates(plain(item.text))
-    for (const s of c.shas) shas.add(s)
+    const c = candidates(item.text)
+    for (const s of c.shas) if (HEX.test(s)) shas.add(s)
     for (const p of c.paths) paths.add(p)
   }
   const fresh = where.top === '' ? [] : [...shas].filter(s => !seenShas.has(s))
   if (fresh.length > 0) {
-    const out = await git($, where.top, ['cat-file', '--batch-check'], `${fresh.map(s => `${s}^{commit}`).join('\n')}\n`)
+    // Only hex reaches git, on its standard input: nothing the text says can become an option or a revision range.
+    const out = await run($, ['git', 'cat-file', '--batch-check'], where.top, `${fresh.map(s => `${s}^{commit}`).join('\n')}\n`)
     const lines = out?.split('\n') ?? []
     fresh.forEach((s, n) => seenShas.set(s, / commit /.test(lines[n] ?? '')))
   }
-  for (const p of [...paths].filter(x => !seenPaths.has(x)).slice(0, PATHS_PER_PASS)) {
-    let found: Refs['files'][string] | null = null
-    for (const abs of absolute(p)) {
-      const st = await $.fs.stat(abs).catch(() => null)
-      if (st !== null && st.kind !== 'other') {
-        found = { abs, dir: st.kind === 'dir' }
-        break
-      }
+  const placed = new Map<string, Refs['files'][string] | null>()
+  for (const p of [...paths].filter(x => !seenPaths.has(x)).slice(0, PATHS_PER_PASS)) placed.set(p, await place($, p))
+  // A file with an execute bit runs when a launcher opens it: one stat for the pass, and a failed one links none.
+  const files = [...new Set([...placed.values()].flatMap(f => (f === null || f.dir ? [] : [f.abs])))]
+  const runnable = new Set<string>(files)
+  if (files.length > 0 && files.every(f => f.startsWith('/'))) {
+    const out = await run($, ['/usr/bin/stat', '-f', '%p%t%N', '--', ...files], where.cwd)
+    for (const line of out?.split('\n') ?? []) {
+      const tab = line.indexOf('\t')
+      if (tab > 0 && !executable(line.slice(0, tab))) runnable.delete(line.slice(tab + 1))
     }
-    seenPaths.set(p, found)
   }
-  const files: Record<string, Refs['files'][string]> = {}
-  for (const [p, f] of seenPaths) if (f !== null) files[p] = f
+  for (const [p, f] of placed) seenPaths.set(p, f === null || (!f.dir && runnable.has(f.abs)) ? null : f)
+  const known: Record<string, Refs['files'][string]> = {}
+  for (const [p, f] of seenPaths) if (f !== null) known[p] = f
   const refs: Refs = {
     repo: where.repo !== '' ? where.repo : repoOfLinks(panel.items.flatMap(i => (i.href === undefined ? [] : [i.href]))),
     commits: [...seenShas].filter(([, ok]) => ok).map(([s]) => s),
-    files,
+    files: known,
   }
   await update($, refsAtom, () => refs)
 }
@@ -175,6 +204,7 @@ export const register: Register = (on, options) => {
     doneStatuses: Array.isArray(options.doneStatuses)
       ? options.doneStatuses.filter((s): s is string => typeof s === 'string')
       : ['Done'],
+    linkRoots: Array.isArray(options.linkRoots) ? options.linkRoots.filter((s): s is string => typeof s === 'string') : [],
   }
   const pattern = cfg.pattern
 
@@ -290,6 +320,12 @@ export const register: Register = (on, options) => {
         return r.href !== undefined && linkable ? <Link key={`l-${id}-${n}`} href={r.href}>{text}</Link> : text
       })
 
+    // A link item's own address passes the same gate as a line's: one that fails draws as its label, plain.
+    const linkTo = (href: string, label: RenderChildren[]) => {
+      const safe = gate(href, places.files)
+      return safe === undefined ? label : <Link href={safe}>{label}</Link>
+    }
+
     const row = (item: Item, indent = 0) => {
       if (editing === item.id && Input !== null) {
         return (
@@ -313,7 +349,7 @@ export const register: Register = (on, options) => {
           <Text key={`s-${item.id}`}> </Text>
           {item.href === undefined
             ? <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap" dimColor={item.checked && item.kind !== 'done'}>{inline(withLead(linked(runs(item.text), places)), item.id, true)}</Text></Box>
-            : <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap"><Link href={item.href}>{inline(runs(item.text), item.id, false)}</Link></Text></Box>}
+            : <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap">{linkTo(item.href, inline(runs(item.text), item.id, false))}</Text></Box>}
           <Text key={`g-${item.id}`}> </Text>
           {Input === null ? null : <Button key={`e-${item.id}`} plain dimColor label="✎" onPress={() => update($, editingAtom, () => item.id)} />}
           <Button key={`d-${item.id}`} plain dimColor label="✕" onPress={() => change($, p => remove(p, item.id))} />
