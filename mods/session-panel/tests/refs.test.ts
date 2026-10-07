@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { emptyPanel, taskRegex } from '../hooks/logic'
 import { plain, runs } from '../hooks/markup'
 import type { Run } from '../hooks/markup'
-import { blocked, candidates, executable, gate, githubRepo, linked, placeByName, repoOfLinks } from '../hooks/refs'
+import { blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks } from '../hooks/refs'
 import type { Places } from '../hooks/refs'
 import type { Panel } from '../types'
 
@@ -144,16 +144,13 @@ describe('one gate for every address: what fails it draws as plain text', () => 
     expect(placeByName('~/vault/PH-95.md', [], '/home/fake', roots)).toEqual(['/home/fake/vault/PH-95.md'])
   })
 
-  test('bundles anywhere on the path and files a launcher runs are blocked; an execute bit counts as runnable', () => {
+  test('bundles anywhere on the path and launcher files are blocked; a script is not — it only opens in the editor', () => {
     for (const p of ['/a/Calc.app', '/a/Calc.app/Contents/MacOS/Calc', '/a/x.workflow', '/a/x.prefPane']) expect([p, blocked(p, true)]).toEqual([p, true])
-    for (const p of ['/a/run.command', '/a/deploy.sh', '/a/x.webloc', '/a/x.dmg', '/a/x.pkg', '/a/x.terminal', '/a/x.fileloc', '/a/x.inetloc', '/a/x.tool']) {
+    for (const p of ['/a/run.command', '/a/x.webloc', '/a/x.dmg', '/a/x.pkg', '/a/x.terminal', '/a/x.fileloc', '/a/x.inetloc', '/a/x.tool']) {
       expect([p, blocked(p, false)]).toEqual([p, true])
     }
-    expect(blocked('/a/docs/design.md', false)).toBe(false)
+    for (const p of ['/a/infra/deploy.sh', '/a/bin/kdb', '/a/docs/design.md']) expect([p, blocked(p, false)]).toEqual([p, false])
     expect(blocked('/a/src', true)).toBe(false)
-    expect(executable('100755')).toBe(true)
-    expect(executable('100644')).toBe(false)
-    expect(executable('junk')).toBe(true)
   })
 })
 
@@ -189,10 +186,6 @@ function world(on: On, panel: Panel): Calls {
     calls.git.push([...e.argv])
     const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
     const args = e.argv.slice(1).join(' ')
-    if (e.argv[0] === '/usr/bin/stat') {
-      const files = e.argv.slice(e.argv.indexOf('--') + 1)
-      return ok(files.map(f => `${f.endsWith('/bin/run') ? '100755' : '100644'}\t${f}`).join('\n') + '\n')
-    }
     if (args === 'cat-file --batch-check') {
       const asked = (e.init?.stdin ?? '').split('\n').filter(Boolean)
       return ok(asked.map(a => (a.startsWith('d658d491') ? 'd658d4910000 commit 250' : `${a} missing`)).join('\n') + '\n')
@@ -207,6 +200,15 @@ function world(on: On, panel: Panel): Calls {
     '/home/fake/proj/docs/out.md': { kind: 'file', realPath: '/etc/hosts', isLink: true },
     '/home/fake/proj/docs': { kind: 'dir', realPath: '/home/fake/proj/docs' },
     '/home/fake/other/x.ts': { kind: 'file', realPath: '/home/fake/other/x.ts' },
+    '/home/fake/proj/infra/deploy.sh': { kind: 'file', realPath: '/home/fake/proj/infra/deploy.sh' },
+    '/home/fake/proj/bin/go.command': { kind: 'file', realPath: '/home/fake/proj/bin/go.command' },
+    '/home/fake/proj/Calc.app': { kind: 'dir', realPath: '/home/fake/proj/Calc.app' },
+    '/home/fake/claude-code-kit': { kind: 'dir', realPath: '/home/fake/claude-code-kit' },
+    '/home/fake/claude-code-kit/mods/bin/mod-check': { kind: 'file', realPath: '/home/fake/claude-code-kit/mods/bin/mod-check' },
+    '/home/fake/mind': { kind: 'dir', realPath: '/home/fake/mind' },
+    '/home/fake/mind/notes/plan.md': { kind: 'file', realPath: '/home/fake/mind/notes/plan.md' },
+    // A project folder linked into the vault: a note reached through it is still the vault's.
+    '/home/fake/proj/brain/tasks/PH-95.md': { kind: 'file', realPath: '/home/fake/mind/tasks/PH-95.md', isLink: true },
   }
   on('fs.stat', (_$, e) => {
     calls.stats.push(e.path)
@@ -229,6 +231,7 @@ describe('the pane links in place', () => {
       { id: 'i2', kind: 'done', text: MICRO_PR, checked: true, by: 'auto' },
       { id: 'i3', kind: 'done', text: `${SHA_LINE}; правка в hooks/refs.ts`, checked: true, by: 'auto' },
       { id: 'i4', kind: 'done', text: 'скрипт bin/run, заметка docs/out.md, папка /home/fake/proj/docs, чужое /home/fake/other/x.ts и /net/evil.example/share/x', checked: true, by: 'auto' },
+      { id: 'i6', kind: 'done', text: 'деплой infra/deploy.sh, запуск bin/go.command, приложение Calc.app/x и /home/fake/proj/Calc.app, кит ~/claude-code-kit/mods/bin/mod-check, план ~/mind/notes/plan.md, карточка brain/tasks/PH-95.md', checked: true, by: 'auto' },
       { id: 'i5', kind: 'link', text: 'команда', href: 'obsidian://advanced-uri?commandid=x', checked: false, by: 'tool' },
     ],
   }
@@ -248,8 +251,16 @@ describe('the pane links in place', () => {
     expect(await href('PR #139')).toBe(`${REPO}/pull/139`)
     expect(await href('команда')).toBeUndefined()
     expect((await ui.findAll({ type: 'Text' })).some(t => t.text === 'команда')).toBe(true)
-    // An executable and a link out of every root stay text; a folder opens in Finder.
-    expect(await href('bin/run')).toBeUndefined()
+    // A script and an executable open in the editor, never in Finder; a launcher file and a bundle stay text.
+    expect(await href('bin/run')).toBe('webstorm://open?file=/home/fake/proj/bin/run')
+    expect(await href('infra/deploy.sh')).toBe('webstorm://open?file=/home/fake/proj/infra/deploy.sh')
+    expect(await href('bin/go.command')).toBeUndefined()
+    expect(await href('/home/fake/proj/Calc.app')).toBeUndefined()
+    // The owner's kit and vault link from any session: a kit file in the editor, a vault note in the vault.
+    expect(await href('~/claude-code-kit/mods/bin/mod-check')).toBe('webstorm://open?file=/home/fake/claude-code-kit/mods/bin/mod-check')
+    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://open?vault=mind&file=notes%2Fplan')
+    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://open?vault=mind&file=tasks%2FPH-95')
+    // A link out of every root stays text; a folder opens in Finder.
     expect(await href('docs/out.md')).toBeUndefined()
     expect(await href('/home/fake/proj/docs')).toBe('file:///home/fake/proj/docs/')
     // A path spelt outside every root is never asked about on disk.

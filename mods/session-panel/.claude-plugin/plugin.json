@@ -32,8 +32,17 @@
       "type": "string",
       "multiple": true,
       "title": "Link roots",
-      "description": "Absolute (or ~/) folders, besides the session's folder, its repository and the cards folder, whose files a panel line may link to; a path outside every root stays plain text.",
-      "default": []
+      "description": "Absolute (or ~/) folders, besides the session's folder, its repository, the cards folder and the vault, whose files a panel line may link to; a path outside every root stays plain text.",
+      "default": [
+        "~/claude-code-kit",
+        "~/mind"
+      ]
+    },
+    "vault": {
+      "type": "string",
+      "title": "Obsidian vault",
+      "description": "Absolute (or ~/) folder of the Obsidian vault: a .md file inside it links as obsidian://open with the folder's name as the vault; '' links every file to the editor.",
+      "default": "~/mind"
     }
   }
 }

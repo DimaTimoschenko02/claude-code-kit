@@ -23,7 +23,7 @@ import {
 } from './logic'
 import { runs, withLead } from './markup'
 import type { Run } from './markup'
-import { NO_REFS, blocked, candidates, executable, gate, githubRepo, linked, placeByName, repoOfLinks, within } from './refs'
+import { NO_REFS, blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
 import type { Refs } from './refs'
 
 type Engine = EngineInterface
@@ -49,8 +49,11 @@ function isPanel(value: unknown): value is Panel {
   return Array.isArray(v.items) && Array.isArray(v.dropped) && Array.isArray(v.report) && typeof v.seq === 'number'
 }
 
-type Config = { pattern: RegExp; cardsDir: string; doneStatuses: string[]; linkRoots: string[] }
-let cfg: Config = { pattern: taskRegex(undefined), cardsDir: '', doneStatuses: ['Done'], linkRoots: [] }
+type Config = { pattern: RegExp; cardsDir: string; doneStatuses: string[]; linkRoots: string[]; vault: string }
+/** The owner's own repos and vault: their files link from any session. */
+const LINK_ROOTS = ['~/claude-code-kit', '~/mind']
+const VAULT = '~/mind'
+let cfg: Config = { pattern: taskRegex(undefined), cardsDir: '', doneStatuses: ['Done'], linkRoots: LINK_ROOTS, vault: VAULT }
 // Bumped per owner line so the add field empties; an auto capture mid-typing leaves it alone.
 let addRound = 0
 // The session the atom holds; `/clear` starts a new id, whose panel is loaded fresh.
@@ -71,7 +74,7 @@ async function sync($: Engine): Promise<void> {
 
 // Where the places a line names are looked up: the session's folder and repo, the owner's home, the GitHub repo, and
 // the roots a path must lie in to be linked — as spelt (checked before any disk access) and as they really are.
-let where = { cwd: '', top: '', home: '', repo: '', spelt: [] as string[], real: [] as string[] }
+let where = { cwd: '', top: '', home: '', repo: '', spelt: [] as string[], real: [] as string[], vault: '' }
 // What this load already looked up: a sha → a commit or not, a path → its checked target or nothing.
 let seenShas = new Map<string, boolean>()
 let seenPaths = new Map<string, Refs['files'][string] | null>()
@@ -97,7 +100,7 @@ async function locate($: Engine, cwd: string): Promise<void> {
   const top = repo?.root ?? ''
   const home = (await $.env.get('HOME').catch(() => undefined)) ?? ''
   const expand = (p: string) => (p.startsWith('~/') && home !== '' ? `${home}${p.slice(1)}` : p)
-  const spelt = [cwd, top, cfg.cardsDir, ...cfg.linkRoots.map(expand)]
+  const spelt = [cwd, top, cfg.cardsDir, expand(cfg.vault), ...cfg.linkRoots.map(expand)]
     .map(p => p.replace(/\/+$/, ''))
     .filter(p => p.startsWith('/') && p.length > 1 && !p.split('/').some(s => s === '.' || s === '..'))
   const real: string[] = []
@@ -105,14 +108,15 @@ async function locate($: Engine, cwd: string): Promise<void> {
     const r = await realDir($, p)
     if (r !== undefined && r !== '/') real.push(r)
   }
-  where = { cwd, top, home, repo: githubRepo(repo?.remote ?? ''), spelt: [...new Set([...spelt, ...real])], real }
+  const vault = cfg.vault === '' ? undefined : await realDir($, expand(cfg.vault))
+  where = { cwd, top, home, repo: githubRepo(repo?.remote ?? ''), spelt: [...new Set([...spelt, ...real])], real, vault: vault ?? '' }
   seenShas = new Map()
   seenPaths = new Map()
 }
 
 /**
  * Where a path the text names really is, when a click there is safe: spelt inside a root, landing inside a root once
- * every link is followed, no bundle along the way, no runnable file. The exec bit is checked after, in one batch.
+ * every link is followed, no bundle along the way, no launcher file. A vault note carries its vault and note path.
  */
 async function place($: Engine, path: string): Promise<Refs['files'][string] | null> {
   for (const abs of placeByName(path, [where.cwd, where.top], where.home, where.spelt)) {
@@ -120,7 +124,8 @@ async function place($: Engine, path: string): Promise<Refs['files'][string] | n
     if (st === null || st.kind === 'other' || st.realPath === undefined) continue
     const dir = st.kind === 'dir'
     if (!within(st.realPath, where.real) || blocked(abs, dir) || blocked(st.realPath, dir)) continue
-    return { abs: st.realPath, dir }
+    const note = dir ? undefined : vaultNote(st.realPath, where.vault)
+    return { abs: st.realPath, dir, ...(note === undefined ? {} : { vault: note }) }
   }
   return null
 }
@@ -145,17 +150,7 @@ async function resolveRefs($: Engine): Promise<void> {
   }
   const placed = new Map<string, Refs['files'][string] | null>()
   for (const p of [...paths].filter(x => !seenPaths.has(x)).slice(0, PATHS_PER_PASS)) placed.set(p, await place($, p))
-  // A file with an execute bit runs when a launcher opens it: one stat for the pass, and a failed one links none.
-  const files = [...new Set([...placed.values()].flatMap(f => (f === null || f.dir ? [] : [f.abs])))]
-  const runnable = new Set<string>(files)
-  if (files.length > 0 && files.every(f => f.startsWith('/'))) {
-    const out = await run($, ['/usr/bin/stat', '-f', '%p%t%N', '--', ...files], where.cwd)
-    for (const line of out?.split('\n') ?? []) {
-      const tab = line.indexOf('\t')
-      if (tab > 0 && !executable(line.slice(0, tab))) runnable.delete(line.slice(tab + 1))
-    }
-  }
-  for (const [p, f] of placed) seenPaths.set(p, f === null || (!f.dir && runnable.has(f.abs)) ? null : f)
+  for (const [p, f] of placed) seenPaths.set(p, f)
   const known: Record<string, Refs['files'][string]> = {}
   for (const [p, f] of seenPaths) if (f !== null) known[p] = f
   const refs: Refs = {
@@ -204,7 +199,8 @@ export const register: Register = (on, options) => {
     doneStatuses: Array.isArray(options.doneStatuses)
       ? options.doneStatuses.filter((s): s is string => typeof s === 'string')
       : ['Done'],
-    linkRoots: Array.isArray(options.linkRoots) ? options.linkRoots.filter((s): s is string => typeof s === 'string') : [],
+    linkRoots: Array.isArray(options.linkRoots) ? options.linkRoots.filter((s): s is string => typeof s === 'string') : LINK_ROOTS,
+    vault: typeof options.vault === 'string' ? options.vault : VAULT,
   }
   const pattern = cfg.pattern
 

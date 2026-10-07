@@ -6,13 +6,13 @@
 // The text comes from model replies, and through them from pages and tool output: it is untrusted. Every address the
 // pane draws passes one gate, `gate()`: the web, the vault's `open`, and an editor link only to a file this mod found
 // inside an allowed root and judged unable to run. Anything else draws as plain text.
-import type { Refs } from '../types'
+import type { Refs, Target } from '../types'
 import { runs, SCHEMES } from './markup'
 import type { Run } from './markup'
 
 // Refs (kept in state, filled by git and the disk): `repo` is `https://github.com/<owner>/<name>` or '' when unknown,
 // `commits` the shas as written that git has as commits, `files` a path as written (no `:line`) → where it really is,
-// for a path that passed every check of `blocked`, `within` and the exec bit.
+// for a path that passed `placeByName`, `within` once resolved, and `blocked`.
 export type { Refs }
 
 export type Places = Refs & {
@@ -37,8 +37,11 @@ const IDE = /^(?:webstorm|jetbrains):\/\/open\?file=([^&#\s]+)(?:&line=(\d{1,7})
 
 /** A folder macOS opens by running it, anywhere along a path. */
 const BUNDLE = /\.(?:app|appex|bundle|framework|plugin|kext|pkg|mpkg|workflow|xpc|prefpane|saver|qlgenerator|mdimporter|action|component|scptd)$/i
-/** A file a click could run, install or hand to a launcher, whatever app opens it. */
-const RUNNABLE = /\.(?:command|sh|bash|zsh|csh|ksh|fish|tool|terminal|webloc|inetloc|fileloc|workflow|pkg|mpkg|dmg|app|scpt|applescript|jar)$/i
+/**
+ * A file whose whole point is to be launched or to hand an address or an installer to the OS. A script or an
+ * executable is not here: it only ever gets an editor link, and the editor opens, it never runs.
+ */
+const LAUNCHER = /\.(?:command|tool|terminal|webloc|inetloc|fileloc|workflow|pkg|mpkg|dmg|app)$/i
 
 /** A sha candidate has a digit and a letter: `1234567` is a number, `defaced` a word. */
 function shaLike(text: string): boolean {
@@ -106,28 +109,34 @@ export function placeByName(path: string, bases: readonly string[], home: string
   return [...new Set(spelled)].filter(p => within(p, roots))
 }
 
-/** A target a click must never reach: a bundle anywhere along the path, or a file a launcher would run. */
+/** A target a click must never reach: a bundle anywhere along the path, or a launcher file. Both stay text. */
 export function blocked(path: string, dir: boolean): boolean {
   const parts = path.split('/')
   if (parts.some(s => BUNDLE.test(s))) return true
-  return !dir && RUNNABLE.test(parts.at(-1) ?? '')
-}
-
-/** A unix mode (`%p` of stat, octal) with any execute bit: a file that runs when a launcher opens it. */
-export function executable(mode: string): boolean {
-  const n = Number.parseInt(mode, 8)
-  return Number.isNaN(n) || (n & 0o111) !== 0
+  return !dir && LAUNCHER.test(parts.at(-1) ?? '')
 }
 
 function encodePath(abs: string): string {
   return abs.split('/').map(s => encodeURIComponent(s)).join('/')
 }
 
-/** A checked file opens in the editor at its line; a checked folder in Finder. Nothing else is built here. */
-export function fileHref(file: { abs: string; dir: boolean }, line?: string): string | undefined {
+/**
+ * A checked vault note opens in the vault, any other checked file in the editor at its line — scripts and
+ * executables included, since the editor never runs them; a checked folder opens in Finder. Nothing else is built.
+ */
+export function fileHref(file: Target, line?: string): string | undefined {
   if (blocked(file.abs, file.dir)) return undefined
   if (file.dir) return `file://${encodePath(file.abs)}/`
+  if (file.vault !== undefined) {
+    return `obsidian://open?vault=${encodeURIComponent(file.vault.name)}&file=${encodeURIComponent(file.vault.note)}`
+  }
   return `webstorm://open?file=${encodePath(file.abs)}${line === undefined ? '' : `&line=${line}`}`
+}
+
+/** A file under the vault's real folder, as Obsidian names it: the vault's folder name and the note's path, no `.md`. */
+export function vaultNote(real: string, vault: string): Target['vault'] {
+  if (vault === '' || !/\.md$/i.test(real) || !within(real, [vault]) || real === vault) return undefined
+  return { name: vault.split('/').pop() ?? '', note: real.slice(vault.length + 1).replace(/\.md$/i, '') }
 }
 
 /**

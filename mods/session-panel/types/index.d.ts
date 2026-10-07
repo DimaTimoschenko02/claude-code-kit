@@ -20,11 +20,14 @@ export type Panel = {
   at: number
 }
 
+/** A checked place on disk: where it really is, a folder or a file, and for a vault note its vault and note path. */
+export type Target = { abs: string; dir: boolean; vault?: { name: string; note: string } }
+
 /** What the session knows about the places its lines name (see hooks/refs.ts). */
 export type Refs = {
   repo: string
   commits: readonly string[]
-  files: Readonly<Record<string, { abs: string; dir: boolean }>>
+  files: Readonly<Record<string, Target>>
 }
 
 declare module 'claude-code' {
