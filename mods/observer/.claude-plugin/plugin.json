@@ -1,0 +1,9 @@
+{
+  "name": "observer",
+  "version": "0.1.0",
+  "author": {
+    "name": "Dima Timoschenko"
+  },
+  "description": "Side observer of the main session: after every reply a background Sonnet check finds what the owner should know (band above the prompt) and repeats or snags a tool would fix (findings file, the main model's next prompt); repeats are counted by code",
+  "types": "./types/index.d.ts"
+}
