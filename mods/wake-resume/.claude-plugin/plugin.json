@@ -1,0 +1,9 @@
+{
+  "name": "wake-resume",
+  "version": "0.1.0",
+  "author": {
+    "name": "Dima Timoschenko"
+  },
+  "description": "Continues a turn the Mac's sleep cut («went to sleep mid-response») once the Mac is fully awake: one framed continuation per cut, carrying the sleep's cause from pmset -g log",
+  "types": "./types/index.d.ts"
+}
