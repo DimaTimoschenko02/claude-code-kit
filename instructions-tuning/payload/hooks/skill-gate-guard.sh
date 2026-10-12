@@ -72,6 +72,10 @@ gated=""   # "skill<TAB>path" per governed target
 while IFS= read -r fp; do
   [ -z "$fp" ] && continue
   r="${fp#"$ROOT"/}"
+  # A Claude Code worktree (`.claude/worktrees/<name>/`) is another checkout of the same repo: its `apps/x.ts` is
+  # governed like the root's. Without this cut the path keeps the worktree prefix, no gate matches, and the edit
+  # passes ungated.
+  r="${r#*.claude/worktrees/*/}"
   s=$(owner "$r")
   [ -n "$s" ] && gated+="$s"$'\t'"$r"$'\n'
 done <<< "$targets"
