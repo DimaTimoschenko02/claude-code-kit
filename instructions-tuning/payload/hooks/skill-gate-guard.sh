@@ -13,8 +13,9 @@
 # Why this boundary: a skill's text persists in context across turns, so per-turn
 # re-invocation is overkill — and unworkable, because tool_result entries are
 # recorded as type:user, so a "last user message" boundary would advance past the
-# invocation on every tool call. But /compact summarizes the skill text OUT of
-# context, so a pre-compact invocation no longer counts.
+# invocation on every tool call. /compact summarizes the conversation, so a
+# pre-compact invocation counts only if Claude Code re-attached the skill whole
+# after that compaction (see `restored` below).
 #
 # FAIL-OPEN: any missing input / unparseable state -> exit 0. The gate fires only
 # when it can prove the required skill was NOT invoked since the boundary.
@@ -98,6 +99,23 @@ if [ -n "$transcript" ] && [ -f "$transcript" ]; then
 fi
 [ -z "$boundary" ] && exit 0   # can't locate boundary -> fail-open
 
+# After a compaction Claude Code re-attaches the text of every skill invoked in the session (attachment
+# `invoked_skills`, each cut at 20 000 chars). A skill re-attached whole is still in context, so that compaction did not
+# reset it — denying it only made the session re-load the skill and resend the write (31 bounces in 4 sessions,
+# 06–11.10). Only the attachment that follows the last compact summary in file order counts (both carry the same
+# second), and only for the main thread: the attachment is the main context, not a subagent's.
+restored=""   # one skill name per line, as invoked ("pricehub:code-style" or "code-style")
+aid_early=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
+if [ -z "$aid_early" ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
+  compact_line=$(grep -n '"isCompactSummary":true' "$transcript" 2>/dev/null | tail -1 | cut -d: -f1)
+  skills_hit=$(grep -n '"type":"invoked_skills"' "$transcript" 2>/dev/null | tail -1)
+  skills_line=${skills_hit%%:*}
+  if [ -n "$compact_line" ] && [ -n "$skills_line" ] && [ "$skills_line" -gt "$compact_line" ]; then
+    restored=$(printf '%s' "${skills_hit#*:}" \
+      | jq -r '.attachment.skills[]? | select((.content // "" | length) < 20000) | .name' 2>/dev/null)
+  fi
+fi
+
 # Most recent invocation ts of the required skill (ISO8601 UTC -> lexicographic compare valid).
 # Directory-scoped skills are logged with a scope prefix ("myrepo:vault-write"), so accept "<scope>:<skill>" too.
 # Only this session's invocations count: parallel sessions share the log, and another window's /skill must not open
@@ -109,6 +127,9 @@ aid=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
 req="" rel=""
 while IFS=$'\t' read -r s r; do
   [ -z "$s" ] && continue
+  if [ -n "$restored" ] && printf '%s\n' "$restored" | grep -qxE "([^:]+:)?${s}"; then
+    continue   # re-attached whole after the last compaction, under either name
+  fi
   invoked=$(jq -r --arg s "$s" --arg sid "$sid" --arg aid "$aid" \
     'select(.skill==$s or (.skill|endswith(":"+$s))) | select($sid == "" or (.session_id // "") == "" or .session_id == $sid)
      | select((.agent_id // "") == $aid) | .ts' \
