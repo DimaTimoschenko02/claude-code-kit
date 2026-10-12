@@ -22,6 +22,14 @@ import type { DictateBatch, DictateCut } from '../types'
 // band above the prompt until the next chunk — where to pick up. A capped
 // chunk is marked in the batch so the model expects a repeat.
 //
+// The box: the engine puts a dropped prompt back into the prompt box (as the
+// draft, or after it on a new line — read from 2.1.296). Every held chunk is a
+// drop, so without care the whole chunk stayed in the box: voice mode would not
+// start a fresh recording over it, and the next send carried it into the pack
+// again. Each drop therefore takes its text back out of the box once it lands,
+// the band shows the tail of the last held chunk instead, and a chunk already in
+// the pack is never held twice.
+//
 // Terms: every person's prompt has misheard phrases from
 // ~/.claude/dictate-terms.json replaced before the model reads it.
 
@@ -47,13 +55,19 @@ const EXCERPT_CHARS = 320
 // Two minutes of speech is well over this; a typed note rarely is.
 const CAP_TEXT_CHARS = 500
 const CUT_MARK = ' ⟨запись оборвалась здесь — следующее сообщение может повторять конец⟩'
+// A dropped prompt lands back in the box a moment after the hook answers.
+const LAND_POLL_MS = 100
+const LAND_TRIES = 30
+// A held chunk this long that opens the next one is the old box text sent again.
+const REPEAT_PREFIX_CHARS = 40
 const ENDS_SENTENCE = /[.!?…»")\]]\s*$/u
 // Keys that move or send rather than type; space is voice mode's tap key.
 const NOT_TYPING: ReadonlySet<string> = new Set([' ', 'space', 'return', 'escape', 'up', 'down', 'left', 'right', 'tab'])
 
 type Dollar = EngineInterface
 type Taken = { value: DictateBatch | null }
-type Stop = 'own' | DictateCut['stop']
+type Stop = DictateCut['stop']
+type Held = { count: number; text: string | null }
 type Recording = {
   startedAt: number
   lastText: string
@@ -101,12 +115,75 @@ async function take($: Dollar): Promise<DictateBatch | null> {
   return taken.value
 }
 
-/** Appends a held prompt; 0 when the batch was closed meanwhile. */
-async function hold($: Dollar, text: string): Promise<number> {
-  const written = await update($, batch, value =>
-    value === null ? null : { ...value, messages: [...value.messages, text] },
-  )
-  return written?.messages.length ?? 0
+const unmarked = (message: string) =>
+  (message.endsWith(CUT_MARK) ? message.slice(0, -CUT_MARK.length) : message).trim()
+
+/**
+ * What of `text` is new to the pack: null for a chunk already held, the part
+ * after the last held chunk when the chunk opens with it (old box text sent
+ * again with a new recording after it), else the text itself.
+ */
+export function fresh(messages: readonly string[], text: string): string | null {
+  const said = text.trim()
+  if (said === '' || messages.some(m => unmarked(m) === said)) return null
+  const last = unmarked(messages.at(-1) ?? '')
+  if (last.length >= REPEAT_PREFIX_CHARS && said.startsWith(last)) {
+    const rest = said.slice(last.length).trim()
+    return rest === '' ? null : rest
+  }
+  return said
+}
+
+/**
+ * Appends a held prompt, the repeat of a held one left out: `count` 0 when the
+ * batch was closed meanwhile, `text` what was added (null for a repeat).
+ */
+async function hold($: Dollar, text: string, isCap: boolean): Promise<Held> {
+  const held: Held = { count: 0, text: null }
+  await update($, batch, value => {
+    held.text = null
+    held.count = value?.messages.length ?? 0
+    if (value === null) return null
+    const added = fresh(value.messages, text)
+    if (added === null) return value
+    held.text = added
+    held.count += 1
+    return { ...value, messages: [...value.messages, isCap ? `${added}${CUT_MARK}` : added] }
+  })
+  return held
+}
+
+/**
+ * The rest of the box once a dropped prompt `sent` landed at its end; undefined
+ * while it has not landed (or the box holds something else).
+ */
+export function withoutLanded(box: string, sent: string): string | undefined {
+  const text = box.trimEnd()
+  const flat = (s: string) => s.replace(/\s+/gu, ' ').trim()
+  if (text.endsWith(sent)) return text.slice(0, text.length - sent.length).trimEnd()
+  return flat(text) === flat(sent) ? '' : undefined
+}
+
+/** Takes a dropped prompt back out of the box once the engine put it there. */
+function unland($: Dollar, dropped: string): void {
+  const sent = dropped.trim()
+  if (sent === '') return
+  $.clock.after(0, async () => {
+    for (let i = 0; i < LAND_TRIES; i++) {
+      const rest = withoutLanded((await $.prompt.read()).text, sent)
+      if (rest !== undefined) {
+        await $.prompt.fill({ text: rest, mode: 'replace' }).catch(() => undefined)
+        return
+      }
+      await $.clock.sleep(LAND_POLL_MS)
+    }
+  })
+}
+
+/** Drops a person's prompt and clears it from the box the engine puts it back in. */
+function drop($: Dollar, text: string, reason: string): { drop: string } {
+  unland($, text)
+  return { drop: reason }
 }
 
 /** Puts released messages back in front of whatever was held since. */
@@ -246,11 +323,13 @@ function beep($: Dollar): void {
 }
 
 const CUT_LABEL: Record<DictateCut['stop'], string> = {
+  own: '✓ в пачке, конец:',
   cap: '✂ запись оборвалась (лимит 2 мин), конец:',
   silence: '⏸ запись встала на паузе 15 с, конец:',
 }
 
-function heldLine(count: number, stop: Stop): string {
+function heldLine(count: number, stop: Stop, isRepeat: boolean): string {
+  if (isRepeat) return `${HELD(count)} · это уже было в пачке — не добавлено`
   if (stop === 'own') return HELD(count)
   const why = stop === 'cap' ? '✂ запись оборвалась (лимит 2 мин)' : '⏸ запись встала на паузе'
   return `${HELD(count)} · ${why} — где, видно над полем ввода`
@@ -362,7 +441,7 @@ export const register: Register = on => {
 
     if (RELEASE.test(e.text)) {
       const taken = await take($)
-      if (taken === null || taken.messages.length === 0) return { drop: 'пачка пуста — выключена' }
+      if (taken === null || taken.messages.length === 0) return drop($, e.text, 'пачка пуста — выключена')
       return next(await withTerms($, { ...e, text: compose(taken.messages) }))
     }
     if (e.attachments !== undefined && e.attachments.length > 0) {
@@ -375,11 +454,12 @@ export const register: Register = on => {
     const stop = classifyStop(recording, await $.clock.now(), e.text)
     recording = undefined
     isTyped = false
-    const count = await hold($, stop === 'cap' ? `${e.text.trimEnd()}${CUT_MARK}` : e.text)
-    if (count === 0) return next(await withTerms($, e))
-    await update($, cut, () => (stop === 'own' ? null : { stop, excerpt: excerpt(e.text) }))
+    const held = await hold($, e.text, stop === 'cap')
+    if (held.count === 0) return next(await withTerms($, e))
+    const added = held.text
+    if (added !== null) await update($, cut, () => ({ stop, excerpt: excerpt(added) }))
     if (stop !== 'own') beep($)
-    return { drop: heldLine(count, stop) }
+    return drop($, e.text, heldLine(held.count, stop, added === null))
   })
 
   // Typing into the draft makes the next send the person's own, not a voice cut.

@@ -5,7 +5,8 @@ import type { On, PromptEditInput, PromptSubmitInput } from 'claude-code'
 // Claude Code's voice mode (tap) stops a recording 120 s after the tap and 15 s
 // after the last word, and submits what it heard. These tests replay that on
 // the prompt box: voice mode writes its interim transcript there while it
-// records, and the submit clears it.
+// records, the submit clears it, and a prompt a hook dropped lands back in it
+// (after the draft on a new line, as the engine's 2.1.296 REPL does).
 
 const ME = { kind: 'composer' } as const
 const PRESENTATION = { isFullscreen: true, columns: 120 }
@@ -33,6 +34,7 @@ type World = {
   played: string[]
   spoken: { text: string; voice?: string }[]
   submitted: PromptSubmitInput[]
+  fills: string[]
 }
 
 function world(on: On): World {
@@ -43,6 +45,7 @@ function world(on: On): World {
     played: [],
     spoken: [],
     submitted: [],
+    fills: [],
   }
   mock.env(on, { HOME: '/home/fake' })
   on('fs.stat', ($, e) => ({ deny: `ENOENT: ${e.path}` }))
@@ -60,6 +63,11 @@ function world(on: On): World {
   on('audio.speak', ($, e) => {
     w.spoken.push({ text: e.text, voice: e.voice })
     return { value: { via: 'system' as const } }
+  })
+  on('prompt.fill', ($, e) => {
+    w.fills.push(e.text)
+    w.draft = e.mode === 'replace' ? e.text : `${w.draft}${e.text}`
+    return { isFilled: true }
   })
   on('prompt.edit', ($, e) => ({
     text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end),
@@ -106,10 +114,17 @@ async function dictate(w: World, text: string, ms: number): Promise<void> {
   }
 }
 
-/** Voice mode finishing: the box clears and the transcript is submitted. */
-async function send($: Engine, w: World, text: string) {
-  const out = await $.prompt.submit({ text, wait: false, origin: ME })
+/** The engine putting a dropped prompt back in the box (REPL `hI`/`gI`). */
+const land = (draft: string, text: string) => (draft.trim() === '' ? text : `${draft}\n${text}`)
+
+/**
+ * Voice mode finishing: the box clears and the transcript is submitted; a drop
+ * lands back in the box, after whatever `typedMeanwhile` is there by then.
+ */
+async function send($: Engine, w: World, text: string, typedMeanwhile = '') {
   w.draft = ''
+  const out = await $.prompt.submit({ text, wait: false, origin: ME })
+  if (out.drop !== undefined) w.draft = land(typedMeanwhile, text)
   await w.clock.settle()
   return out
 }
@@ -225,7 +240,10 @@ describe('voice cuts in a pack', () => {
 
     await dictate(w, 'Функция create в tag-сервисе. Дальше.', 10 * SEC)
     await send($, w, 'Функция create в tag-сервисе. Дальше.')
-    expect(await bandLines($)).toEqual(['пачка: 2 · всё — отправить · /pack cancel'])
+    expect(await bandLines($)).toEqual([
+      'пачка: 2 · всё — отправить · /pack cancel',
+      '✓ в пачке, конец: Функция create в tag-сервисе. Дальше.',
+    ])
 
     await dictate(w, CAPPED, 119 * SEC)
     await send($, w, CAPPED)
@@ -233,6 +251,63 @@ describe('voice cuts in a pack', () => {
     await send($, w, 'всё')
     expect(await bandLines($)).toEqual([])
   })
+  test('a held chunk leaves the box empty for the next recording, its end shown above', async ($, on) => {
+    const w = world(on)
+    await run($)
+    await dictate(w, CAPPED, 119 * SEC)
+    await send($, w, CAPPED)
+    expect(w.draft).toBe('')
+    expect((await bandLines($))[1]).toBe(`✂ запись оборвалась (лимит 2 мин), конец: ${CAPPED}`)
+
+    const own = 'Контроллер модуль, ну, окей. Дальше смотрим сервисы.'
+    await dictate(w, own, 20 * SEC)
+    await send($, w, own)
+    expect(w.draft).toBe('')
+    expect((await bandLines($))[1]).toBe(`✓ в пачке, конец: ${own}`)
+  })
+
+  test('a note typed into the box before the chunk landed stays', async ($, on) => {
+    const w = world(on)
+    await run($)
+    await dictate(w, CHUNK_5, 119 * SEC)
+    await send($, w, CHUNK_5, 'и ещё про color')
+    expect(w.draft).toBe('и ещё про color')
+  })
+
+  test('the release word on an empty pack does not stay in the box', async ($, on) => {
+    const w = world(on)
+    await run($)
+    expect(await send($, w, 'всё')).toEqual({ drop: 'пачка пуста — выключена' })
+    expect(w.draft).toBe('')
+  })
+
+  test('a chunk left in the box and sent again is not held twice (the 7-message pack of 2026-10-12)', async ($, on) => {
+    const w = world(on)
+    await run($)
+    await dictate(w, CHUNK_5, 119 * SEC)
+    await send($, w, CHUNK_5)
+    // The old box text sent again, alone and with a new recording after it.
+    expect((await send($, w, CHUNK_5)).drop).toBe(`${HELD(1)} · это уже было в пачке — не добавлено`)
+    await send($, w, `${CHUNK_5} И в контроллерах то же самое.`)
+    expect((await bandLines($))[1]).toBe('✓ в пачке, конец: И в контроллерах то же самое.')
+    const released = await send($, w, 'всё')
+    expect(released.text).toBe(
+      'Пачка из 2 сообщений, надиктованных подряд — одна задача:\n\n' +
+        `1. ${CHUNK_5}${CUT_MARK}\n\n` +
+        '2. И в контроллерах то же самое.',
+    )
+  })
+
+  test('an earlier chunk sent again is not held twice either', async ($, on) => {
+    const w = world(on)
+    await run($)
+    const first = 'Смотрим на helper tag SQL. Вот нахуя нам этот helper.'
+    await send($, w, first)
+    await send($, w, 'Контроллер модуль, ну, окей. Дальше смотрим сервисы.')
+    expect((await send($, w, first)).drop).toBe(`${HELD(2)} · это уже было в пачке — не добавлено`)
+    expect((await bandLines($))[1]).toBe('✓ в пачке, конец: Контроллер модуль, ну, окей. Дальше смотрим сервисы.')
+  })
+
   test('the excerpt is the last three sentences, whole ones only within 320 chars', async ($, on) => {
     const w = world(on)
     await run($)
