@@ -1,3 +1,5 @@
 # laid by Claude Code at every load of the mod; regenerated, never edited
 .claude-plugin/types/
 tsconfig.json
+# per-project addenda name the owner's own paths and work: local only, never in the public repo
+projects/

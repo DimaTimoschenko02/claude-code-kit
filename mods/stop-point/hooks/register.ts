@@ -11,6 +11,7 @@
 import type { EngineInterface, Register, SessionMessage, Settings, SettingsSource } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { StopPointSession } from '../types'
+import type { Addendum } from './logic'
 import {
   COMPACT_WAIT_MS,
   SIZE_SOFT,
@@ -19,7 +20,12 @@ import {
   WRITER_MODEL,
   WRITER_SYSTEM,
   WRITE_TIMEOUT_MS,
+  GIT_DELTA_SCRIPT,
   afterCompactText,
+  formatGitDelta,
+  parseAddendum,
+  pickAddendum,
+  withAddendum,
   claimForCompaction,
   claimOnReply,
   clockTime,
@@ -66,6 +72,7 @@ type Config = {
   pointPath: string
   templatePath: string
   templateBody: string
+  addendumPath: string | null
   logPath: string
   /** The points folder with every symbolic link followed; null while it does not exist. Pruned by its real path. */
   pointsReal: string | null
@@ -101,7 +108,7 @@ async function load($: EngineInterface): Promise<Config> {
   ])
   // A repo keeps its points in its own .claude/state/resume only where that folder really lies inside the repo: the
   // folder is pruned with find -delete, and a repo cloned from anywhere could link it to any folder of the owner's.
-  // The template is always the mod's own — a repo's text in the writer's prompt would be a prompt from a stranger.
+  // The template and its per-project addenda (projects/*.md) are always the mod's own — a repo's text in the writer's prompt would be a prompt from a stranger.
   const isInsideRoot =
     resumeStat?.kind === 'dir' &&
     resumeStat.realPath !== undefined &&
@@ -118,6 +125,10 @@ async function load($: EngineInterface): Promise<Config> {
     $.fs.stat(pointsDir, { resolve: true }).catch(() => null),
   ])
   const hooks = (s: Settings): string => JSON.stringify(s['hooks'] ?? {})
+  const addendum = pickAddendum(
+    [root, ...(rootStat?.realPath === undefined ? [] : [rootStat.realPath])],
+    await readAddenda($, `${$.plugin.root}/projects`),
+  )
   return {
     standDown: standDownReason(`${hooks(project)}\n${hooks(local)}`, hooks(user), ownShell),
     sid,
@@ -125,10 +136,18 @@ async function load($: EngineInterface): Promise<Config> {
     home,
     pointPath: `${pointsDir}/${sid}.md`,
     templatePath,
-    templateBody: templateBody(templateText),
+    templateBody: withAddendum(templateBody(templateText), addendum),
+    addendumPath: addendum?.file ?? null,
     logPath: `${home}/.claude/state/stop-point/writes.log`,
     pointsReal: dir?.kind === 'dir' && dir.realPath !== undefined ? dir.realPath : null,
   }
+}
+
+async function readAddenda($: EngineInterface, dir: string): Promise<Addendum[]> {
+  const entries = await $.fs.list(dir).catch(() => [])
+  const names = entries.filter(e => e.kind === 'file' && e.name.endsWith('.md')).map(e => e.name).sort().slice(0, 50)
+  const texts = await Promise.all(names.map(n => $.fs.read(`${dir}/${n}`).catch(() => '')))
+  return names.flatMap((n, i) => parseAddendum(`${dir}/${n}`, texts[i] ?? '') ?? [])
 }
 
 const readState = async ($: EngineInterface): Promise<StopPointSession> => norm(await read($, SESSION))
@@ -411,7 +430,10 @@ async function commandText($: EngineInterface): Promise<string> {
   const c = await config($)
   if (c.standDown !== null) return `Точка останова: мод в этой сессии не работает — ${c.standDown}.`
   const [s, file, now] = await Promise.all([readState($), pointFile($, c), $.clock.now()])
-  const lines = [`Точка останова этой сессии: ${c.pointPath}`]
+  const lines = [
+    `Точка останова этой сессии: ${c.pointPath}`,
+    `Дополнение к формату для проекта: ${c.addendumPath ?? 'нет (ни один projects/*.md мода не подходит к корню сессии)'}`,
+  ]
   if (file === null) lines.push('Файла ещё нет: первая запись — после первого ответа.')
   else {
     const age = Math.max(0, Math.round((now - file.mtimeMs) / 60_000))
@@ -626,16 +648,10 @@ export const register: Register = on => {
   })
 }
 
-/** What changed in the repository since the point was written: branch, uncommitted files, commits after it. */
+/** What changed since the point was written: the root's repository, or each repository one level below it. */
 async function gitDelta($: EngineInterface, root: string, since: number): Promise<string> {
-  const script =
-    'git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0; ' +
-    'b=$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null); ' +
-    'd=$(git -C "$1" status --porcelain 2>/dev/null | wc -l | tr -d " "); ' +
-    'n=$(git -C "$1" log --since="@$2" --oneline 2>/dev/null | wc -l | tr -d " "); ' +
-    'echo "ветка: $b; незакоммиченных файлов: $d; коммитов после записи: $n"'
   const run = await $.process
-    .run(['sh', '-c', script, 'sh', root, String(Math.floor(since / 1000))], { timeoutMs: 5000 })
+    .run(['sh', '-c', GIT_DELTA_SCRIPT, 'sh', root, String(Math.floor(since / 1000))], { timeoutMs: 5000 })
     .catch(() => null)
-  return run === null || run.exitCode !== 0 ? '' : run.stdout.trim()
+  return run === null || run.exitCode !== 0 ? '' : formatGitDelta(run.stdout)
 }

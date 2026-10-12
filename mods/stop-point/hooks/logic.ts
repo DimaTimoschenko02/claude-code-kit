@@ -525,6 +525,71 @@ export const dateTime = (ms: number): string => {
 /** The template body for inline embedding: its H1 is the file's title, not part of the format. */
 export const templateBody = (text: string): string => text.replace(/^# [^\n]*\n/, '').trim()
 
+export type Addendum = { file: string; root: string; body: string }
+
+export function parseAddendum(file: string, text: string): Addendum | null {
+  const m = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text)
+  if (m === null) return null
+  const line = /^root:[ \t]*(.*?)[ \t]*$/m.exec(m[1] ?? '')
+  const raw = (line?.[1] ?? '').replace(/^(['"])(.*)\1$/, '$2')
+  if (!raw.startsWith('/')) return null
+  const root = raw.replace(/\/+$/, '') || '/'
+  const body = text.slice(m[0].length).trim()
+  return body === '' ? null : { file, root, body }
+}
+
+export function pickAddendum(roots: readonly string[], list: readonly Addendum[]): Addendum | null {
+  const holds = (a: Addendum, r: string): boolean => r === a.root || r.startsWith(a.root === '/' ? '/' : `${a.root}/`)
+  let best: Addendum | null = null
+  for (const a of list) if (roots.some(r => holds(a, r)) && (best === null || a.root.length > best.root.length)) best = a
+  return best
+}
+
+export const withAddendum = (template: string, a: Addendum | null): string =>
+  a === null ? template : `${template}\n\n${a.body}`
+
+export const GIT_REPOS_MAX = 12
+
+/** Run as `sh -c SCRIPT sh <root> <since s>`: rows `name\tbranch\tdirty\tcommits`, the root itself as `.`, else its sub-repos. */
+export const GIT_DELTA_SCRIPT = [
+  'tree() { [ "$(git -C "$1" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; }',
+  'row() { b=$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null); ' +
+    'd=$(git -C "$1" status --porcelain 2>/dev/null | wc -l | tr -d " "); ' +
+    'n=$(git -C "$1" log --since="@$3" --oneline 2>/dev/null | wc -l | tr -d " "); ' +
+    'printf "%s\\t%s\\t%s\\t%s\\n" "$2" "$b" "$d" "$n"; }',
+  'if tree "$1"; then row "$1" . "$2"; exit 0; fi',
+  'i=0; for r in "$1"/*/; do r=${r%/}; [ -d "$r" ] || continue; tree "$r" || continue; i=$((i+1)); ' +
+    '[ $i -gt 40 ] && break; row "$r" "${r##*/}" "$2" & done; wait; exit 0',
+].join('\n')
+
+const flat = (s: string): string => s.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 60)
+
+type RepoRow = { name: string; branch: string; dirty: number; commits: number }
+
+const repoFacts = (r: RepoRow): string =>
+  `ветка ${r.branch || '?'}; незакоммиченных файлов: ${r.dirty}; коммитов после записи: ${r.commits}`
+
+export function formatGitDelta(stdout: string): string {
+  const rows: RepoRow[] = stdout
+    .split('\n')
+    .map(l => l.split('\t'))
+    .filter(p => p.length === 4)
+    .map(([name = '', branch = '', dirty = '', commits = '']) => ({
+      name: flat(name),
+      branch: flat(branch),
+      dirty: Number(dirty) || 0,
+      commits: Number(commits) || 0,
+    }))
+  const own = rows.find(r => r.name === '.')
+  if (own !== undefined) return repoFacts(own).replace(/^ветка /, 'ветка: ')
+  const idle = (r: RepoRow): number => (r.dirty + r.commits > 0 ? 0 : 1)
+  const sorted = [...rows].sort((a, b) => idle(a) - idle(b) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  const shown = sorted.slice(0, GIT_REPOS_MAX).map(r => `${r.name}: ${repoFacts(r)}`)
+  const rest = sorted.slice(GIT_REPOS_MAX)
+  const quiet = rest.every(r => idle(r) === 1) ? ' (без изменений)' : ''
+  return [...shown, ...(rest.length > 0 ? [`не показано репо: ${rest.length}${quiet}`] : [])].join('\n')
+}
+
 export function afterCompactText(point: string, body: string, mtimeMs: number, now: number): string {
   const age = Math.max(0, Math.floor((now - mtimeMs) / 60_000))
   return [

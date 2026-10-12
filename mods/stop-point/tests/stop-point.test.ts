@@ -17,6 +17,9 @@ import {
   cursorAt,
   deltaFrom,
   parseReply,
+  parseAddendum,
+  formatGitDelta,
+  GIT_REPOS_MAX,
   renderDelta,
   statusText,
   writerPrompt,
@@ -56,7 +59,14 @@ type World = {
   sid: string
   /** The host keeps no transcript for plugins (an Agent SDK run). */
   noTranscript: boolean
+  addenda: Map<string, string>
+  gitOut: string
   clock: MockClock
+}
+
+const promptText = (c: Call | undefined): string => {
+  const p = c?.req.prompt ?? ''
+  return typeof p === 'string' ? p : p.map(b => b.text).join('')
 }
 
 const answered = (text: string): ModelCompleteResult => ({ isAnswered: true, text, usage: USAGE })
@@ -85,6 +95,8 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
     commands: [],
     sid: SID,
     noTranscript: false,
+    addenda: new Map(),
+    gitOut: '',
     clock: mock.clock(on, { now: START }),
   }
   mock.env(on, { HOME })
@@ -109,7 +121,13 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
     if (f !== undefined) return { value: f.text }
     // the mod's own template, shipped beside plugin.json (nothing real is read beneath a test)
     if (e.path.endsWith('/stop-point/template.md')) return { value: '# Точка останова — формат\n\nMOD FORMAT BODY' }
+    const addendum = /\/stop-point\/projects\/([^/]+)$/.exec(e.path)?.[1]
+    if (addendum !== undefined && w.addenda.has(addendum)) return { value: w.addenda.get(addendum) as string }
     return { deny: `ENOENT ${e.path}` }
+  })
+  on('fs.list', (_$, e) => {
+    if (!e.path.endsWith('/stop-point/projects') || w.addenda.size === 0) return { deny: `ENOENT ${e.path}` }
+    return { value: [...w.addenda.keys()].map(name => ({ name, kind: 'file' as const, size: 1, mtimeMs: START, isLink: false })) }
   })
   on('fs.write', (_$, e) => {
     w.files.set(e.path, { text: e.text, mtimeMs: w.clock.now() })
@@ -124,7 +142,8 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
       w.files.delete(from as string)
       w.files.set(to, f)
     }
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    const stdout = e.argv[0] === 'sh' ? w.gitOut : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('model.complete', (_$, e) => {
     const n = w.calls.length + 1
@@ -278,7 +297,7 @@ describe('a write after every reply', () => {
     w.messages.push(owner('ок, а в supplier_item?'), said('9 812 строк.'))
     await reply($)
     await w.clock.settle()
-    const p = w.calls[1]?.req.prompt ?? ''
+    const p = promptText(w.calls[1])
     expect(p).toContain('- запись 1')
     expect(p).toContain('[владелец] ок, а в supplier_item?')
     expect(p).not.toContain('сколько строк в price_row')
@@ -342,7 +361,7 @@ describe('single flight', () => {
     w.calls[0]?.resolve(w.reply(1))
     await w.clock.settle()
     expect(w.calls).toHaveLength(2) // one more, for both replies
-    const p = w.calls[1]?.req.prompt ?? ''
+    const p = promptText(w.calls[1])
     expect(p).toContain('[владелец] второй')
     expect(p).toContain('[владелец] третий')
     expect(p).not.toContain('сколько строк')
@@ -438,7 +457,7 @@ describe('compaction', () => {
     w.messages = [...w.summary, owner('продолжаем')]
     await reply($)
     await w.clock.settle()
-    const p = w.calls[1]?.req.prompt ?? ''
+    const p = promptText(w.calls[1])
     expect(p).toContain('[владелец] продолжаем')
     expect(p).not.toContain('This session is being continued')
   })
@@ -763,7 +782,7 @@ describe('the previous point\'s anchors and the size, checked in code', () => {
     await reply($)
     await w.clock.settle()
     expect(w.calls).toHaveLength(2)
-    const second = w.calls[1]?.req.prompt ?? ''
+    const second = promptText(w.calls[1])
     expect(second).toContain('=== ТВОЙ ЧЕРНОВИК ===')
     expect(second).toContain('ec17ce7')
     const file = w.files.get(POINT)?.text ?? ''
@@ -891,7 +910,7 @@ describe('the size bound wins over the carry-over (no ratchet)', () => {
     expect(dropped).toBeGreaterThan(250)
     // a draft within the bound is asked only for anchors that fit back; the re-ask does not re-send the transcript
     expect(w.calls).toHaveLength(2)
-    const second = w.calls[1]?.req.prompt ?? ''
+    const second = promptText(w.calls[1])
     expect(second).toContain('=== ТВОЙ ЧЕРНОВИК ===')
     expect(second).not.toContain('=== ЧТО ПРОИЗОШЛО ПОСЛЕ')
     expect(second).not.toContain('price_row')
@@ -936,7 +955,7 @@ describe('the size bound wins over the carry-over (no ratchet)', () => {
     w.messages = [...EXCHANGE]
     await reply($)
     await w.clock.settle()
-    const second = w.calls[1]?.req.prompt ?? ''
+    const second = promptText(w.calls[1])
     expect(second).toContain('сократи до 3072 байт')
     expect(second).not.toContain('верни каждую')
     expect(second).not.toContain('=== СТРОКИ ПРЕЖНЕЙ ВЕРСИИ')
@@ -1014,5 +1033,110 @@ describe('which dropped anchors are still protected', () => {
     expect(r.body.match(/## Из прежней версии/g)).toHaveLength(1)
     expect(r.body).toContain('- old\n- a /home/fake/x/one.ts\n- c /home/fake/x/three.ts\n\n## Б')
     expect(restoreWithin('x'.repeat(5000), prev, live, rank).restored).toEqual([])
+  })
+})
+
+describe('a per-project addendum to the format, from the mod\'s own projects/*.md', () => {
+  const addendum = (root: string, body: string) => `---\nroot: ${root}\n---\n${body}\n`
+  const firstPrompt = async ($: Engine, w: World): Promise<string> => {
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    return promptText(w.calls[0])
+  }
+
+  test('the session root itself: the body follows the template, the frontmatter stays out', async ($, on) => {
+    const w = world(on)
+    w.addenda.set('proj.md', addendum(ROOT, '## Проект\n- PROJECT ADDENDUM'))
+    const p = await firstPrompt($, w)
+    expect(p).toContain('MOD FORMAT BODY\n\n## Проект\n- PROJECT ADDENDUM\n\nПроект: /proj.')
+    expect(p).not.toContain('root: /proj')
+    expect(p).not.toMatch(/^---$/m)
+  })
+
+  test('a session under the root, by its real path; a root that only shares a prefix does not match', async ($, on) => {
+    const w = world(on)
+    w.links.set(ROOT, '/work/aggregator')
+    w.addenda.set('work.md', addendum('/work/', 'WORK ADDENDUM'))
+    w.addenda.set('wor.md', addendum('/wor', 'PREFIX ONLY'))
+    const p = await firstPrompt($, w)
+    expect(p).toContain('WORK ADDENDUM')
+    expect(p).not.toContain('PREFIX ONLY')
+  })
+
+  test('the longest root wins and only one applies', async ($, on) => {
+    const w = world(on)
+    w.links.set(ROOT, '/work/aggregator')
+    w.addenda.set('a-work.md', addendum('/work', 'WHOLE WORKSPACE'))
+    w.addenda.set('b-agg.md', addendum('/work/aggregator', 'AGGREGATOR ONLY'))
+    const p = await firstPrompt($, w)
+    expect(p).toContain('AGGREGATOR ONLY')
+    expect(p).not.toContain('WHOLE WORKSPACE')
+    const r = await $.command.run({ command: 'stop-point', args: '', origin: { kind: 'composer' } } as never)
+    expect(r.text).toMatch(/Дополнение к формату для проекта: \S*\/stop-point\/projects\/b-agg\.md$/m)
+  })
+
+  test('no match: the prompt is the template alone and /stop-point says none', async ($, on) => {
+    const w = world(on)
+    w.addenda.set('other.md', addendum('/other', 'OTHER ADDENDUM'))
+    w.addenda.set('rel.md', addendum('proj', 'RELATIVE ROOT'))
+    w.addenda.set('pr.md', addendum('/pr', 'PREFIX ONLY'))
+    const p = await firstPrompt($, w)
+    expect(p).toContain('MOD FORMAT BODY\n\nПроект: /proj.')
+    expect(p).not.toContain('ADDENDUM')
+    expect(p).not.toContain('RELATIVE ROOT')
+    expect(p).not.toContain('PREFIX ONLY')
+    const r = await $.command.run({ command: 'stop-point', args: '', origin: { kind: 'composer' } } as never)
+    expect(r.text).toContain('Дополнение к формату для проекта: нет')
+  })
+
+  test('the compaction write and the re-ask carry it too', async ($, on) => {
+    const w = world(on)
+    w.addenda.set('proj.md', addendum(ROOT, 'PROJECT ADDENDUM'))
+    const long = `# Точка останова\n\n${Array.from({ length: 60 }, (_, i) => `- факт номер ${i}: подробный пересказ работы`).join('\n')}`
+    w.reply = () => answered(long)
+    await firstPrompt($, w)
+    expect(w.calls).toHaveLength(2)
+    expect(w.calls[1]?.req.prompt).toContain('сократи до 3072')
+    expect(w.calls[1]?.req.prompt).toContain('PROJECT ADDENDUM')
+    w.reply = n => answered(`# Точка останова\n\n- запись ${n}`)
+    await compact($, 'manual', [...w.messages, owner('сжимаю')])
+    expect(w.calls).toHaveLength(3)
+    expect(w.calls[2]?.req.prompt).toContain('PROJECT ADDENDUM')
+  })
+
+  test('parse: frontmatter stripped, quoted and trailing-slash roots, nothing without an absolute root or a body', () => {
+    expect(parseAddendum('f', '---\nroot: "/a/b/"\n---\n## X\n- y\n')).toEqual({ file: 'f', root: '/a/b', body: '## X\n- y' })
+    expect(parseAddendum('f', '## no frontmatter')).toBeNull()
+    expect(parseAddendum('f', '---\nroot: a/b\n---\nbody')).toBeNull()
+    expect(parseAddendum('f', '---\nroot: /a\n---\n\n')).toBeNull()
+  })
+})
+
+describe('the freshness check on resume', () => {
+  test('a workspace that is no repository lists the repositories one level below it', async ($, on) => {
+    const w = world(on)
+    w.files.set(POINT, { text: '# Stop point\n- resume me', mtimeMs: START - 30 * 60_000 })
+    w.gitOut = 'games-service\tGAM-1\t0\t0\naggregator\tmain\t2\t3\n'
+    await start($)
+    const r = await $.classic.SessionStart({ source: 'resume' })
+    const text = (r.additionalContext ?? []).join('\n')
+    expect(text).toContain('aggregator: ветка main; незакоммиченных файлов: 2; коммитов после записи: 3\ngames-service: ветка GAM-1;')
+    const run = w.runs.find(a => a[0] === 'sh')
+    expect(run?.slice(3)).toEqual(['sh', ROOT, String(Math.floor((START - 30 * 60_000) / 1000))])
+  })
+
+  test('a repository root keeps its one line; nothing at all gives no line', () => {
+    expect(formatGitDelta('.\tmain\t1\t0\n')).toBe('ветка: main; незакоммиченных файлов: 1; коммитов после записи: 0')
+    expect(formatGitDelta('')).toBe('')
+  })
+
+  test('at most 12 repositories, those with changes first, the rest counted', () => {
+    const quiet = Array.from({ length: 12 }, (_, i) => `r${String(i).padStart(2, '0')}\tmain\t0\t0`)
+    const out = formatGitDelta([...quiet, 'zz\tfix\t0\t4', 'bad\nname'].join('\n')).split('\n')
+    expect(out).toHaveLength(GIT_REPOS_MAX + 1)
+    expect(out[0]).toBe('zz: ветка fix; незакоммиченных файлов: 0; коммитов после записи: 4')
+    expect(out.at(-1)).toBe('не показано репо: 1 (без изменений)')
   })
 })
