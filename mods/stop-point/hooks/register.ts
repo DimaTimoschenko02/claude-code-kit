@@ -8,7 +8,7 @@
 // Why a completion, not a subagent: a plugin-spawned subagent's hand-back arrives on the main thread as a prompt and
 // starts a turn (measured 2026-10-04: origin `peer`, then a main reply about it) — on every reply, a loop.
 
-import type { EngineInterface, Register, SessionMessage, Settings, SettingsSource } from 'claude-code'
+import type { EngineInterface, ModelTextBlock, Register, SessionMessage, Settings, SettingsSource } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { StopPointSession } from '../types'
 import type { Addendum } from './logic'
@@ -257,11 +257,11 @@ async function writeOnce(
     root: c.root,
     now: t0,
   })
-  const ask = (text: string, ms: number) =>
+  const ask = (blocks: readonly ModelTextBlock[], ms: number) =>
     $.model.complete({
       model: WRITER_MODEL,
       system: WRITER_SYSTEM,
-      prompt: text,
+      prompt: blocks,
       maxTokens: MAX_REPLY_TOKENS,
       effort: 'medium',
       timeoutMs: ms,
