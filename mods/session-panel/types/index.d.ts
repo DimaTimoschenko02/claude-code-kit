@@ -8,6 +8,8 @@ export type Item = {
   task?: string
   checked: boolean
   by: 'auto' | 'tool' | 'owner'
+  /** The main thread's reply that last carried it (`Panel.turn` then); absent on lines stored before replies were counted — old. */
+  seen?: number
 }
 
 export type Panel = {
@@ -17,6 +19,17 @@ export type Panel = {
   /** The owner's changes not yet shown to the model. */
   report: string[]
   seq: number
+  at: number
+  /** Main-thread replies counted so far: freshness is measured in work done, not in clock time. */
+  turn: number
+}
+
+/** A GitHub pull request as `gh pr view` last reported it; `at` is when it was asked. */
+export type Pr = {
+  state: 'OPEN' | 'MERGED' | 'CLOSED'
+  review: string
+  draft: boolean
+  base: string
   at: number
 }
 
@@ -32,6 +45,16 @@ export type Refs = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'session-panel': { panel: Panel; editing: string | null; doneTasks: string[]; refs: Refs }
+    'session-panel': {
+      panel: Panel
+      editing: string | null
+      /** A task id → its card's frontmatter `status:`, for every task the panel names that has a card file. */
+      statuses: Record<string, string>
+      /** `owner/repo#n` → the pull request's state. */
+      prs: Record<string, Pr>
+      /** What the owner unfolded: `more:<section>`, `closed`, `task:<id>`. */
+      open: string[]
+      refs: Refs
+    }
   }
 }

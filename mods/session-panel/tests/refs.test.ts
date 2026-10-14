@@ -227,12 +227,12 @@ describe('the pane links in place', () => {
     ...emptyPanel(1_000),
     seq: 3,
     items: [
-      { id: 'i1', kind: 'link', text: 'PR #139', href: `${REPO}/pull/139`, checked: false, by: 'auto' },
-      { id: 'i2', kind: 'done', text: MICRO_PR, checked: true, by: 'auto' },
-      { id: 'i3', kind: 'done', text: `${SHA_LINE}; правка в hooks/refs.ts`, checked: true, by: 'auto' },
-      { id: 'i4', kind: 'done', text: 'скрипт bin/run, заметка docs/out.md, папка /home/fake/proj/docs, чужое /home/fake/other/x.ts и /net/evil.example/share/x', checked: true, by: 'auto' },
-      { id: 'i6', kind: 'done', text: 'деплой infra/deploy.sh, запуск bin/go.command, приложение Calc.app/x и /home/fake/proj/Calc.app, кит ~/claude-code-kit/mods/bin/mod-check, план ~/mind/notes/plan.md, карточка brain/tasks/PH-95.md', checked: true, by: 'auto' },
-      { id: 'i5', kind: 'link', text: 'команда', href: 'obsidian://advanced-uri?commandid=x', checked: false, by: 'tool' },
+      { id: 'i1', kind: 'link', text: 'PR #139', href: `${REPO}/pull/139`, checked: false, by: 'auto', seen: 0 },
+      { id: 'i2', kind: 'done', text: MICRO_PR, checked: true, by: 'auto', seen: 0 },
+      { id: 'i3', kind: 'done', text: `${SHA_LINE}; правка в hooks/refs.ts`, checked: true, by: 'auto', seen: 0 },
+      { id: 'i4', kind: 'done', text: 'скрипт bin/run, заметка docs/out.md, папка /home/fake/proj/docs, чужое /home/fake/other/x.ts и /net/evil.example/share/x', checked: true, by: 'auto', seen: 0 },
+      { id: 'i6', kind: 'done', text: 'деплой infra/deploy.sh, запуск bin/go.command, приложение Calc.app/x и /home/fake/proj/Calc.app, кит ~/claude-code-kit/mods/bin/mod-check, план ~/mind/notes/plan.md, карточка brain/tasks/PH-95.md', checked: true, by: 'auto', seen: 0 },
+      { id: 'i5', kind: 'link', text: 'команда', href: 'obsidian://advanced-uri?commandid=x', checked: false, by: 'tool', seen: 0 },
     ],
   }
 

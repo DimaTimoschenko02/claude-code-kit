@@ -4,13 +4,13 @@
   "author": {
     "name": "Dima Timoschenko"
   },
-  "description": "A side panel per session: the links the replies carried, grouped under their task, and one line per delivered result; the owner ticks, edits, deletes and adds lines in place",
+  "description": "A side panel per session: one row per task with its card status and pull request state, the links the replies carried, and one line per delivered result; only what recent replies carried shows, the rest folds behind one line; the owner ticks, edits, deletes and adds lines in place",
   "types": "./types/index.d.ts",
   "userConfig": {
     "cardsDir": {
       "type": "string",
       "title": "Task cards folder",
-      "description": "Absolute path of the folder with task cards named <TASK-ID>.md; a card whose frontmatter status is a done status folds its task's other links away.",
+      "description": "Absolute path of the folder with task cards named <TASK-ID>.md: the frontmatter status of every task the panel names shows on its row, and a done status closes the task.",
       "default": ""
     },
     "doneStatuses": {

@@ -4,23 +4,28 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Item, Panel } from '../types'
+import type { Item, Panel, Pr } from '../types'
 import {
   addNote,
   addOwnerLine,
   capture,
-  cardTasks,
   edit,
   emptyPanel,
   isCard,
-  isDoneCard,
   merge,
+  nextTurn,
+  normalize,
+  panelPulls,
+  panelTasks,
   remove,
   reportText,
   taskRegex,
   toggle,
   view,
 } from './logic'
+import type { Section, TaskGroup } from './logic'
+import { GH_FIELDS, cardBadge, cardStatus, parsePr, prBadge, pullOf } from './status'
+import type { Badge } from './status'
 import { runs, withLead } from './markup'
 import type { Run } from './markup'
 import { NO_REFS, blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
@@ -40,7 +45,13 @@ const CODE_COLOR = 'permission'
 
 const panelAtom = atom({ plugin: 'session-panel', key: 'panel' } as const, emptyPanel(0))
 const editingAtom = atom({ plugin: 'session-panel', key: 'editing' } as const, null)
-const doneAtom = atom({ plugin: 'session-panel', key: 'doneTasks' } as const, [])
+const statusesAtom = atom({ plugin: 'session-panel', key: 'statuses' } as const, {})
+const prsAtom = atom({ plugin: 'session-panel', key: 'prs' } as const, {})
+const openAtom = atom({ plugin: 'session-panel', key: 'open' } as const, [])
+/** An open pull request is asked again at most this often; a merged or closed one not again in this load. */
+const PR_REFRESH_MS = 60_000
+/** Pull requests asked per pass, the most recently carried first; the rest wait for the next reply. */
+const PR_PER_PASS = 20
 const refsAtom = atom({ plugin: 'session-panel', key: 'refs' } as const, NO_REFS)
 
 function isPanel(value: unknown): value is Panel {
@@ -66,8 +77,9 @@ async function sync($: Engine): Promise<void> {
   if (id === sid) return
   sid = id
   const stored = await $.store.get(`${KEY}${id}`)
-  await update($, panelAtom, () => (isPanel(stored) ? stored : emptyPanel(0)))
+  await update($, panelAtom, () => (isPanel(stored) ? normalize(stored) : emptyPanel(0)))
   await update($, editingAtom, () => null)
+  await update($, openAtom, () => [])
   await refreshCards($)
   await resolveRefs($)
 }
@@ -172,15 +184,81 @@ async function change($: Engine, fn: (p: Panel) => Panel): Promise<void> {
   if (after.items !== before.items) await resolveRefs($)
 }
 
+/** Every task the panel names gets its card's status, whether or not a reply linked the card itself. */
 async function refreshCards($: Engine): Promise<void> {
   if (cfg.cardsDir === '') return
-  const tasks = cardTasks(await read($, panelAtom))
-  const done: string[] = []
-  for (const task of tasks) {
+  const statuses: Record<string, string> = {}
+  for (const task of panelTasks(await read($, panelAtom))) {
     const text = await $.fs.read(`${cfg.cardsDir}/${task}.md`).catch(() => null)
-    if (text !== null && isDoneCard(text, cfg.doneStatuses)) done.push(task)
+    const status = text === null ? undefined : cardStatus(text)
+    if (status !== undefined) statuses[task] = status
   }
-  await update($, doneAtom, () => done)
+  await update($, statusesAtom, () => statuses)
+}
+
+// One pass at a time; gh missing or failing leaves the rows without a pull request badge, nothing else.
+let prBusy = false
+let ghMissing = false
+// A session started outside a login shell may lack Homebrew on its PATH: the usual places are tried next.
+const GH = ['gh', '/opt/homebrew/bin/gh', '/usr/local/bin/gh']
+let gh = 0
+// Once a path ran, a failure to start (a timeout) is that request's, not a missing gh.
+let ghRan = false
+let prFailed = new Map<string, number>()
+
+/** Asks gh for the state of the panel's pull requests that are new or open and not asked within the last minute. */
+async function refreshPrs($: Engine, force: boolean): Promise<void> {
+  if (prBusy || ghMissing) return
+  prBusy = true
+  try {
+    const now = await $.clock.now()
+    const known: Readonly<Record<string, Pr>> = await read($, prsAtom)
+    const fresh = (at: number | undefined) => at !== undefined && now - at < PR_REFRESH_MS
+    const due = panelPulls(await read($, panelAtom))
+      .filter(p => {
+        const have = known[p.key]
+        if (have !== undefined && have.state !== 'OPEN') return false
+        if (fresh(prFailed.get(p.key))) return false
+        return have === undefined || force || !fresh(have.at)
+      })
+      .slice(0, PR_PER_PASS)
+    for (const p of due) {
+      // Only a checked owner/repo and a number reach gh, as separate arguments.
+      let r = null
+      while (r === null && gh < GH.length) {
+        r = await $.process
+          .run([GH[gh]!, 'pr', 'view', p.number, '--repo', p.repo, '--json', GH_FIELDS], { timeoutMs: 15_000 })
+          .catch(() => null)
+        if (r === null && ghRan) break
+        if (r === null) gh++
+      }
+      if (r === null && ghRan) {
+        prFailed.set(p.key, now)
+        continue
+      }
+      if (r === null) {
+        ghMissing = true
+        $.ui.log('session-panel: gh did not start; pull request states are off for this load', { to: 'debug' })
+        return
+      }
+      ghRan = true
+      const pr = r.exitCode === 0 ? parsePr(r.stdout, now) : null
+      if (pr === null) {
+        prFailed.set(p.key, now)
+        continue
+      }
+      prFailed.delete(p.key)
+      await update($, prsAtom, m => ({ ...m, [p.key]: pr }))
+    }
+  } finally {
+    prBusy = false
+  }
+}
+
+function laterPrs($: Engine, force: boolean): void {
+  $.clock.after(0, () => {
+    void refreshPrs($, force).catch(() => undefined)
+  })
 }
 
 async function togglePane($: Engine): Promise<boolean> {
@@ -189,7 +267,15 @@ async function togglePane($: Engine): Promise<boolean> {
     return false
   }
   await $.ui.open({ id: PANE, title: 'Сессия', columns: COLUMNS })
+  // Opening the pane asks again, even after gh was not found earlier in this load.
+  ghMissing = false
+  gh = 0
+  laterPrs($, true)
   return true
+}
+
+async function flip($: Engine, key: string): Promise<void> {
+  await update($, openAtom, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
 }
 
 export const register: Register = (on, options) => {
@@ -235,8 +321,13 @@ export const register: Register = (on, options) => {
     }
 
     sid = ''
+    prFailed = new Map()
+    ghMissing = false
+    gh = 0
+    ghRan = false
     await locate($, e.cwd)
     await sync($)
+    laterPrs($, true)
     const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
     const job = jobDir?.replace(/\/+$/, '').split('/').pop()
     restart = job !== undefined && job !== '' ? `claude respawn ${job}` : `claude --resume ${sid}`
@@ -273,8 +364,10 @@ export const register: Register = (on, options) => {
     const r = await next(e)
     if (e.agentId !== undefined || e.isAborted || e.answer === '') return r
     const got = capture(e.answer)
-    if (got.links.length > 0 || got.results.length > 0) await change($, p => merge(p, got, pattern))
+    // Every reply counts, carrying links or not: freshness is measured in the work done since.
+    await change($, p => merge(nextTurn(p), got, pattern))
     await refreshCards($)
+    laterPrs($, false)
     return r
   })
 
@@ -296,7 +389,9 @@ export const register: Register = (on, options) => {
     const Input = 'Input' in els ? els.Input : null
     const panel = await read($, panelAtom)
     const editing = await read($, editingAtom)
-    const v = view(panel, await read($, doneAtom))
+    const prs: Readonly<Record<string, Pr>> = await read($, prsAtom)
+    const unfolded: readonly string[] = await read($, openAtom)
+    const v = view(panel, { statuses: await read($, statusesAtom), prs, doneStatuses: cfg.doneStatuses })
     // Every place a line names — `#140`, a sha, a path, an address, a task with its card here — is a link where it stands.
     const places = {
       ...(await read($, refsAtom)),
@@ -322,7 +417,40 @@ export const register: Register = (on, options) => {
       return safe === undefined ? label : <Link href={safe}>{label}</Link>
     }
 
-    const row = (item: Item, indent = 0) => {
+    const look = (b: Badge) => ({ ...(b.color === undefined ? {} : { color: b.color }), ...(b.dim === undefined ? {} : { dimColor: true }) })
+    // A pull request's state after its link: `PR #171 ждёт ревью`, `PR #171 → main`.
+    const prState = (href: string | undefined, key: string) => {
+      const pr = href === undefined ? undefined : pullOf(href)
+      const known = pr === undefined ? undefined : prs[pr.key]
+      if (known === undefined) return null
+      const b = prBadge(known)
+      return <Text key={`ps-${key}`} {...look(b)}>{` ${b.text}`}</Text>
+    }
+    // A task row's badges: the card's status, then each pull request with its number linked.
+    const badges = (g: TaskGroup) => {
+      const out: RenderChildren[] = []
+      if (g.status !== undefined) {
+        const b = cardBadge(g.status)
+        out.push(<Text key={`cs-${g.task}`} {...look(b)}>{`  ${b.text}`}</Text>)
+      }
+      for (const k of g.prs) {
+        const pr = prs[k]
+        if (pr === undefined) continue
+        const b = prBadge(pr)
+        const n = k.slice(k.lastIndexOf('#') + 1)
+        out.push(<Text key={`pd-${g.task}-${k}`} dimColor>{out.length === 0 ? '  ' : ' · '}</Text>)
+        out.push(
+          <Link key={`pl-${g.task}-${k}`} href={`https://github.com/${k.slice(0, k.lastIndexOf('#'))}/pull/${n}`}>
+            <Text {...look(b)}>{`PR #${n}`}</Text>
+          </Link>,
+        )
+        out.push(<Text key={`pb-${g.task}-${k}`} {...look(b)}>{` ${b.text}`}</Text>)
+      }
+      return out
+    }
+
+    // `lead` sits before the tick (a task's fold arrow), `tail` after the text (a task's badges).
+    const row = (item: Item, indent = 0, lead: RenderChildren = null, tail: RenderChildren[] = []) => {
       if (editing === item.id && Input !== null) {
         return (
           <Box key={item.id} paddingLeft={indent}>
@@ -341,11 +469,12 @@ export const register: Register = (on, options) => {
       }
       return (
         <Box key={item.id} flexDirection="row" paddingLeft={indent}>
+          {lead}
           <Button key={`t-${item.id}`} plain label={item.checked ? '☑' : '☐'} onPress={() => change($, p => toggle(p, item.id))} />
           <Text key={`s-${item.id}`}> </Text>
           {item.href === undefined
-            ? <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap" dimColor={item.checked && item.kind !== 'done'}>{inline(withLead(linked(runs(item.text), places)), item.id, true)}</Text></Box>
-            : <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap">{linkTo(item.href, inline(runs(item.text), item.id, false))}</Text></Box>}
+            ? <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap" dimColor={item.checked && item.kind !== 'done'}>{inline(withLead(linked(runs(item.text), places)), item.id, true)}{tail}</Text></Box>
+            : <Box key={`b-${item.id}`} flexGrow={1} flexShrink={1}><Text wrap="wrap">{linkTo(item.href, inline(runs(item.text), item.id, false))}{prState(item.href, item.id)}{tail}</Text></Box>}
           <Text key={`g-${item.id}`}> </Text>
           {Input === null ? null : <Button key={`e-${item.id}`} plain dimColor label="✎" onPress={() => update($, editingAtom, () => item.id)} />}
           <Button key={`d-${item.id}`} plain dimColor label="✕" onPress={() => change($, p => remove(p, item.id))} />
@@ -353,29 +482,67 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const section = (title: string, body: RenderChildren[]) =>
-      body.length === 0 ? null : (
+    // One dim line in place of what is folded; pressed, it unfolds in place and turns into the line that folds back.
+    const more = (key: string, label: string, count: number) =>
+      count === 0 ? null : (
+        <Button key={`more-${key}`} plain dimColor label={unfolded.includes(key) ? '▾ свернуть' : label} onPress={() => flip($, key)} />
+      )
+
+    // One coarse line per task: fold arrow, the card (or the task id), its badges; its links unfold under it.
+    const taskRow = (g: TaskGroup) => {
+      const key = `task:${g.task}`
+      const isOpen = unfolded.includes(key)
+      const arrow =
+        g.children.length === 0 ? (
+          <Text key={`fa-${g.task}`}>{'  '}</Text>
+        ) : (
+          <Button key={`f-${g.task}`} plain dimColor label={isOpen ? '▾' : '▸'} onPress={() => flip($, key)} />
+        )
+      const head =
+        g.card !== undefined ? (
+          row(g.card, 0, [arrow, <Text key={`fs-${g.task}`}> </Text>], badges(g))
+        ) : (
+          <Box key={`h-${g.task}`} flexDirection="row">
+            {arrow}
+            <Text key={`hs-${g.task}`}> </Text>
+            <Box key={`hb-${g.task}`} flexGrow={1} flexShrink={1}>
+              <Text wrap="wrap"><Text bold>{g.task}</Text>{badges(g)}</Text>
+            </Box>
+          </Box>
+        )
+      return [head, ...(isOpen ? g.children.map(c => row(c, 4)) : [])]
+    }
+
+    const items = (sec: Section<Item>, key: string) => [
+      ...sec.shown.map(i => row(i)),
+      ...(unfolded.includes(`more:${key}`) ? sec.rest.map(i => row(i)) : []),
+      more(`more:${key}`, `▸ ещё ${sec.rest.length}`, sec.rest.length),
+    ]
+
+    const block = (title: string, body: RenderChildren[]) =>
+      body.every(b => b === null) ? null : (
         <Box key={title} flexDirection="column" marginTop={1}>
           <Text bold>{title}</Text>
           {body}
         </Box>
       )
 
-    const taskRows = v.tasks.flatMap(g => {
-      if (g.card === undefined) {
-        return [<Text key={`h-${g.task}`} dimColor>{g.task}</Text>, ...g.children.map(c => row(c, 2))]
-      }
-      return [row(g.card), ...(g.folded ? [] : g.children.map(c => row(c, 2)))]
-    })
+    const taskRows = [
+      ...v.tasks.shown.flatMap(taskRow),
+      ...(unfolded.includes('more:tasks') ? v.tasks.rest.flatMap(taskRow) : []),
+      more('more:tasks', `▸ ещё ${v.tasks.rest.length}`, v.tasks.rest.length),
+      ...(unfolded.includes('closed') ? v.closed.flatMap(taskRow) : []),
+      more('closed', `▸ закрытые: ${v.closed.length}`, v.closed.length),
+    ]
 
     return (
       <Box flexDirection="column">
         {restart === '' ? null : <Text dimColor wrap="wrap">перезапуск: {restart}</Text>}
         {panel.items.length === 0 ? <Text dimColor>Пока пусто: ссылки и итоги из ответов появятся здесь.</Text> : null}
-        {section('Задачи', taskRows)}
-        {section('Ссылки', v.links.map(i => row(i)))}
-        {section('Заметки', v.notes.map(i => row(i)))}
-        {section('Сделано', v.done.map(i => row(i)))}
+        {block('Задачи', taskRows)}
+        {block('Ссылки', items(v.links, 'links'))}
+        {block('Заметки', items(v.notes, 'notes'))}
+        {block('Сделано', items(v.done, 'done'))}
         {Input === null ? null : (
           <Box marginTop={1}>
             <Input

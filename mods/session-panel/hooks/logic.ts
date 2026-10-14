@@ -1,17 +1,53 @@
-import type { Item, Panel } from '../types'
+import type { Item, Panel, Pr } from '../types'
 import { plain } from './markup'
+import { isDoneStatus, isTerminal, pullOf } from './status'
 
 export const DEFAULT_TASK_PATTERN = '\\b[A-Z]{2,}-\\d+\\b'
 /** The store holds every session's panel in 4 MiB of JSON; a panel past this drops its oldest auto lines first. */
 export const MAX_ITEMS = 200
+/** A line carried within this many main-thread replies is fresh; an idle night does not age it. */
+export const FRESH_REPLIES = 15
+/** Fresh lines a section shows before the rest fold behind «ещё N». */
+export const SECTION_CAP = 5
 
 export type Captured = { links: { href: string; label: string }[]; results: string[] }
 
-export type TaskGroup = { task: string; card: Item | undefined; children: Item[]; folded: boolean }
-export type PanelView = { tasks: TaskGroup[]; links: Item[]; notes: Item[]; done: Item[] }
+export type TaskGroup = {
+  task: string
+  card: Item | undefined
+  children: Item[]
+  /** The latest reply that carried anything of the task: its links, or a result or note naming it. */
+  seen: number
+  status: string | undefined
+  /** The task's pull requests, `owner/repo#n`, newest first. */
+  prs: string[]
+  /** The card is ticked or done, or every pull request is merged or closed while no card says otherwise. */
+  closed: boolean
+}
+/** A section's lines: `shown` at once, `rest` behind one «ещё N» line. */
+export type Section<T> = { shown: T[]; rest: T[] }
+export type PanelView = {
+  tasks: Section<TaskGroup>
+  /** Closed tasks no longer fresh, behind «закрытые: N». */
+  closed: TaskGroup[]
+  links: Section<Item>
+  notes: Section<Item>
+  done: Section<Item>
+}
+export type ViewContext = { statuses: Readonly<Record<string, string>>; prs: Readonly<Record<string, Pr>>; doneStatuses: readonly string[] }
 
 export function emptyPanel(at: number): Panel {
-  return { items: [], dropped: [], report: [], seq: 0, at }
+  return { items: [], dropped: [], report: [], seq: 0, at, turn: 0 }
+}
+
+/** A panel stored before replies were counted: its lines keep no `seen`, so they read as old. */
+export function normalize(panel: Panel): Panel {
+  return typeof panel.turn === 'number' ? panel : { ...panel, turn: 0 }
+}
+
+/** One more main-thread reply. */
+export function nextTurn(panel: Panel): Panel {
+  return { ...panel, turn: panel.turn + 1 }
 }
 
 /** A bad pattern in the owner's config must not take the panel down: it falls back to the default. */
@@ -100,44 +136,66 @@ function nextId(panel: Panel): [string, number] {
   return [`i${seq}`, seq]
 }
 
+const seenOf = (i: Item) => i.seen ?? -1
+
+/** Past the bound, the auto lines carried longest ago go first; the owner's and the model's own lines stay. */
 function cap(items: Item[]): Item[] {
-  let extra = items.length - MAX_ITEMS
+  const extra = items.length - MAX_ITEMS
   if (extra <= 0) return items
-  return items.filter(i => {
-    if (extra > 0 && i.by === 'auto') {
-      extra--
-      return false
-    }
-    return true
-  })
+  const out = new Set(
+    items
+      .map((item, n) => ({ item, n }))
+      .filter(x => x.item.by === 'auto')
+      .sort((a, b) => seenOf(a.item) - seenOf(b.item) || a.n - b.n)
+      .slice(0, extra)
+      .map(x => x.item),
+  )
+  return items.filter(i => !out.has(i))
 }
 
-/** Adds what a reply carried: a link once per address and never one the owner deleted, a result once per text. */
+/**
+ * Adds what a reply carried: a link once per address and never one the owner deleted, a result once per text. A line
+ * already here that the reply carries again is marked as seen in this reply, so it stays fresh.
+ */
 export function merge(panel: Panel, got: Captured, pattern: RegExp, by: Item['by'] = 'auto'): Panel {
-  let next = panel
-  const hrefs = new Set(panel.items.map(i => i.href).filter(Boolean))
+  const turn = panel.turn
+  const bump = new Set<string>()
+  const byHref = new Map(panel.items.filter(i => i.href !== undefined).map(i => [i.href!, i] as const))
   const dropped = new Set(panel.dropped)
+  const added: Item[] = []
+  let seq = panel.seq
   for (const link of got.links) {
-    if (hrefs.has(link.href) || dropped.has(link.href)) continue
-    hrefs.add(link.href)
-    const [id, seq] = nextId(next)
+    if (dropped.has(link.href)) continue
+    const have = byHref.get(link.href)
+    if (have !== undefined) {
+      if (have.seen !== turn) bump.add(have.id)
+      continue
+    }
+    seq++
     const task = taskOf(`${link.href} ${link.label}`, pattern)
-    const item: Item = { id, kind: 'link', text: link.label, href: link.href, checked: false, by }
+    const item: Item = { id: `i${seq}`, kind: 'link', text: link.label, href: link.href, checked: false, by, seen: turn }
     if (task !== undefined) item.task = task
-    next = { ...next, seq, items: [...next.items, item] }
+    byHref.set(link.href, item)
+    added.push(item)
   }
   // A result is one line whatever marks it carries: a reply that repeats it with `code` or **bold** adds nothing.
-  const texts = new Set(panel.items.filter(i => i.kind === 'done').map(i => plain(i.text)))
+  const texts = new Map(panel.items.filter(i => i.kind === 'done').map(i => [plain(i.text), i] as const))
   for (const result of got.results) {
-    if (texts.has(plain(result))) continue
-    texts.add(plain(result))
-    const [id, seq] = nextId(next)
+    const have = texts.get(plain(result))
+    if (have !== undefined) {
+      if (have.seen !== turn) bump.add(have.id)
+      continue
+    }
+    seq++
     const task = taskOf(result, pattern)
-    const item: Item = { id, kind: 'done', text: result, checked: true, by }
+    const item: Item = { id: `i${seq}`, kind: 'done', text: result, checked: true, by, seen: turn }
     if (task !== undefined) item.task = task
-    next = { ...next, seq, items: [...next.items, item] }
+    texts.set(plain(result), item)
+    added.push(item)
   }
-  return next === panel ? panel : { ...next, items: cap(next.items) }
+  if (added.length === 0 && bump.size === 0) return panel
+  const items = panel.items.map(i => (bump.has(i.id) ? { ...i, seen: turn } : i))
+  return { ...panel, seq, items: cap([...items, ...added]) }
 }
 
 /** One line, no quote marks of its own, bounded: a line's text may have come from a page, so it reaches the model as a short quote. */
@@ -154,7 +212,7 @@ export function addNote(panel: Panel, raw: string, pattern: RegExp, by: Item['by
   const text = raw.trim()
   if (text === '') return panel
   const [id, seq] = nextId(panel)
-  const item: Item = { id, kind: 'note', text, checked: false, by }
+  const item: Item = { id, kind: 'note', text, checked: false, by, seen: panel.turn }
   const task = taskOf(text, pattern)
   if (task !== undefined) item.task = task
   return { ...panel, seq, items: cap([...panel.items, item]) }
@@ -167,7 +225,8 @@ export function addOwnerLine(panel: Panel, raw: string, pattern: RegExp): Panel 
   const next = url
     ? merge({ ...panel, dropped: panel.dropped.filter(h => h !== text) }, { links: [{ href: text, label: labelFor(text) }], results: [] }, pattern, 'owner')
     : addNote(panel, text, pattern, 'owner')
-  if (next.seq === panel.seq) return panel
+  // An address already here is only brought back to fresh: nothing new to tell the model.
+  if (next.seq === panel.seq) return next
   return { ...next, report: [...next.report, `добавил ${url ? 'ссылку' : 'строку'} ${describe(next.items.at(-1)!)}`] }
 }
 
@@ -204,43 +263,100 @@ export function remove(panel: Panel, id: string): Panel {
   }
 }
 
-/** Tasks whose card is in the panel: the ones whose status the card file can answer. */
-export function cardTasks(panel: Panel): string[] {
-  return [...new Set(panel.items.filter(isCard).map(i => i.task!))]
+// A task id becomes a file name in the cards folder: nothing that could step out of it.
+const SAFE_TASK = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/
+
+/** Every task the panel names — by a link, a result or a note — whose card file may say its status. */
+export function panelTasks(panel: Panel): string[] {
+  const ids = panel.items.flatMap(i => (i.task === undefined ? [] : [i.task]))
+  return [...new Set(ids)].filter(t => SAFE_TASK.test(t) && !t.includes('..'))
 }
 
-/** The card's frontmatter `status:` is one of the done statuses. */
-export function isDoneCard(text: string, doneStatuses: readonly string[]): boolean {
-  const head = /^---\n([\s\S]*?)\n---/.exec(text)
-  const status = head === null ? undefined : /^status:\s*["']?(.+?)["']?\s*$/m.exec(head[1]!)?.[1]
-  return status !== undefined && doneStatuses.some(s => s.toLowerCase() === status.toLowerCase())
+/** The pull requests the panel links, `owner/repo#n` with their repo and number, most recently carried first. */
+export function panelPulls(panel: Panel): { key: string; repo: string; number: string }[] {
+  const out = new Map<string, { key: string; repo: string; number: string }>()
+  for (const item of order(panel.items.filter(i => i.href !== undefined))) {
+    const pr = pullOf(item.href!)
+    if (pr !== undefined && !out.has(pr.key)) out.set(pr.key, pr)
+  }
+  return [...out.values()]
+}
+
+/** Most recently carried first; lines carried in the same reply keep the order the reply gave them. */
+function order(items: readonly Item[]): Item[] {
+  const at = new Map(items.map((i, n) => [i, n] as const))
+  return [...items].sort((a, b) => seenOf(b) - seenOf(a) || at.get(a)! - at.get(b)!)
+}
+
+export function isFresh(seen: number | undefined, turn: number): boolean {
+  return seen !== undefined && turn - seen < FRESH_REPLIES
 }
 
 /**
- * Links group under their task; a task whose card is ticked or done shows the card alone — its PR and design
- * are one click away from the card. A task without a card in the panel keeps its links in the group.
+ * Newest first: what the owner keeps (`pinned`) and the fresh lines, up to the cap, shown; the rest behind one line.
+ * Pinned lines are shown whatever the cap.
  */
-export function view(panel: Panel, doneTasks: readonly string[]): PanelView {
-  const groups = new Map<string, TaskGroup>()
+function section(items: readonly Item[], turn: number, pinned: (i: Item) => boolean, old: (i: Item) => boolean): Section<Item> {
+  const shown: Item[] = []
+  const rest: Item[] = []
+  const all = order(items)
+  let room = SECTION_CAP - all.filter(pinned).length
+  for (const i of all) {
+    if (pinned(i)) shown.push(i)
+    else if (room > 0 && !old(i) && isFresh(i.seen, turn)) {
+      shown.push(i)
+      room--
+    } else rest.push(i)
+  }
+  return { shown, rest }
+}
+
+/**
+ * Links group under their task, one row per task with its card's status and its pull requests. Open tasks come
+ * first, most recently worked on first; a closed task stays at the bottom while fresh and then folds behind
+ * «закрытые: N». Every section shows its fresh lines newest first, up to the cap; the rest wait behind «ещё N».
+ * A ticked link or note is old at once; the owner's own unticked lines never fold.
+ */
+export function view(panel: Panel, ctx: ViewContext): PanelView {
+  const turn = panel.turn
+  const groups = new Map<string, Item[]>()
   const links: Item[] = []
   const notes: Item[] = []
   const done: Item[] = []
+  // Activity on a task is anything that names it: a result or a note counts as much as a link.
+  const touched = new Map<string, number>()
   for (const item of panel.items) {
+    if (item.task !== undefined) touched.set(item.task, Math.max(touched.get(item.task) ?? -1, seenOf(item)))
     if (item.kind === 'done') done.push(item)
     else if (item.kind === 'note') notes.push(item)
     else if (item.task === undefined) links.push(item)
-    else {
-      const g = groups.get(item.task) ?? { task: item.task, card: undefined, children: [], folded: false }
-      if (isCard(item) && g.card === undefined) g.card = item
-      else g.children.push(item)
-      groups.set(item.task, g)
-    }
+    else groups.set(item.task, [...(groups.get(item.task) ?? []), item])
   }
-  const tasks = [...groups.values()].map(g => ({
-    ...g,
-    folded: g.card !== undefined && (g.card.checked || doneTasks.includes(g.task)),
-  }))
-  return { tasks, links, notes, done }
+  const tasks: TaskGroup[] = [...groups].map(([task, items]) => {
+    const card = items.find(isCard)
+    const children = order(items.filter(i => i !== card))
+    const prs = [...new Set(order(items).flatMap(i => (i.href === undefined ? [] : [pullOf(i.href)?.key ?? ''])).filter(Boolean))]
+    const status = ctx.statuses[task]
+    const merged = status === undefined && prs.length > 0 && prs.every(k => isTerminal(ctx.prs[k]))
+    const closed = card?.checked === true || isDoneStatus(status, ctx.doneStatuses) || merged
+    return { task, card, children, seen: touched.get(task) ?? -1, status, prs, closed }
+  })
+  tasks.sort((a, b) => b.seen - a.seen)
+  const open = tasks.filter(t => !t.closed)
+  const shut = tasks.filter(t => t.closed)
+  const freshOpen = open.filter(t => isFresh(t.seen < 0 ? undefined : t.seen, turn)).slice(0, SECTION_CAP)
+  const freshShut = shut
+    // A task the owner ticked is dismissed at once; one closed by its card or its merge stays while fresh.
+    .filter(t => t.card?.checked !== true && isFresh(t.seen < 0 ? undefined : t.seen, turn))
+    .slice(0, SECTION_CAP - freshOpen.length)
+  const owner = (i: Item) => i.by === 'owner' && !i.checked
+  return {
+    tasks: { shown: [...freshOpen, ...freshShut], rest: open.filter(t => !freshOpen.includes(t)) },
+    closed: shut.filter(t => !freshShut.includes(t)),
+    links: section(links, turn, owner, i => i.checked),
+    notes: section(notes, turn, owner, i => i.checked),
+    done: section(done, turn, () => false, () => false),
+  }
 }
 
 export function reportText(report: readonly string[]): string | undefined {

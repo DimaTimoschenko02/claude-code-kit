@@ -112,14 +112,14 @@ function world(on: On, panel: Panel): Map<string, unknown> {
 const start = ($: Engine) => $.session.start({ cwd: '/home/fake/proj', surface: 'terminal', isInteractive: true })
 
 describe('the pane', () => {
-  // A panel stored before this change holds raw text: it is drawn formatted with no migration.
+  // A panel stored before this change holds raw text: it is drawn formatted with no migration. Its lines are fresh (seen in reply 0).
   const STORED: Panel = {
     ...emptyPanel(1_000),
     seq: 3,
     items: [
-      { id: 'i1', kind: 'done', text: DONE[0]!, checked: true, by: 'auto' },
-      { id: 'i2', kind: 'link', text: 'доки `/warm`', href: 'https://example.com/warm', checked: false, by: 'auto' },
-      { id: 'i3', kind: 'link', text: 'доска сессии', href: 'obsidian://open?vault=v&file=board', checked: false, by: 'auto' },
+      { id: 'i1', kind: 'done', text: DONE[0]!, checked: true, by: 'auto', seen: 0 },
+      { id: 'i2', kind: 'link', text: 'доки `/warm`', href: 'https://example.com/warm', checked: false, by: 'auto', seen: 0 },
+      { id: 'i3', kind: 'link', text: 'доска сессии', href: 'obsidian://open?vault=v&file=board', checked: false, by: 'auto', seen: 0 },
     ],
   }
 

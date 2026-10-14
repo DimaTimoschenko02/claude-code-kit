@@ -74,15 +74,16 @@ describe('capture', () => {
     expect(got.results).toEqual(['PH-95 переводы названий собраны и задеплоены'])
   })
 
-  test('a done card folds its PR and design away; a task without its card keeps them', () => {
+  test('a task row holds its card, its PR and design under it, newest first; a done card closes the task', () => {
     const p = merge(emptyPanel(0), capture(ANSWER), taskRegex(undefined))
-    const open = view(p, [])
-    expect(open.tasks[0]!.card?.href).toBe(CARD)
-    expect(open.tasks[0]!.children.map(c => c.href)).toEqual([PR, DESIGN])
-    expect(open.links.map(l => l.href)).toEqual(['https://stand.example.com/products'])
-    expect(view(p, ['PH-95']).tasks[0]!.folded).toBe(true)
+    const ctx = (statuses: Record<string, string>) => ({ statuses, prs: {}, doneStatuses: ['Done'] })
+    const open = view(p, ctx({}))
+    expect(open.tasks.shown[0]!.card?.href).toBe(CARD)
+    expect(open.tasks.shown[0]!.children.map(c => c.href)).toEqual([PR, DESIGN])
+    expect(open.links.shown.map(l => l.href)).toEqual(['https://stand.example.com/products'])
+    expect(view(p, ctx({ 'PH-95': 'Done' })).tasks.shown[0]!.closed).toBe(true)
     const noCard = merge(emptyPanel(0), { links: [{ href: DESIGN, label: 'design' }], results: [] }, taskRegex(undefined))
-    expect(view(noCard, ['PH-95']).tasks[0]).toMatchObject({ card: undefined, folded: false })
+    expect(view(noCard, ctx({})).tasks.shown[0]).toMatchObject({ card: undefined, closed: false })
   })
 
   test('a link the owner deleted does not come back with the next reply', () => {
