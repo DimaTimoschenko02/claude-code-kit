@@ -19,6 +19,7 @@ import {
   panelTasks,
   remove,
   reportText,
+  setWaiting,
   taskRegex,
   toggle,
   view,
@@ -26,6 +27,7 @@ import {
 import type { Section, TaskGroup } from './logic'
 import { GH_FIELDS, cardBadge, cardStatus, parsePr, prBadge, pullOf } from './status'
 import type { Badge } from './status'
+import { markerRegex, waitingLines } from './waiting'
 import { runs, withLead } from './markup'
 import type { Run } from './markup'
 import { NO_REFS, blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
@@ -60,11 +62,11 @@ function isPanel(value: unknown): value is Panel {
   return Array.isArray(v.items) && Array.isArray(v.dropped) && Array.isArray(v.report) && typeof v.seq === 'number'
 }
 
-type Config = { pattern: RegExp; cardsDir: string; doneStatuses: string[]; linkRoots: string[]; vault: string }
+type Config = { pattern: RegExp; cardsDir: string; doneStatuses: string[]; linkRoots: string[]; vault: string; wait: RegExp | null }
 /** The owner's own repos and vault: their files link from any session. */
 const LINK_ROOTS = ['~/claude-code-kit', '~/mind']
 const VAULT = '~/mind'
-let cfg: Config = { pattern: taskRegex(undefined), cardsDir: '', doneStatuses: ['Done'], linkRoots: LINK_ROOTS, vault: VAULT }
+let cfg: Config = { pattern: taskRegex(undefined), cardsDir: '', doneStatuses: ['Done'], linkRoots: LINK_ROOTS, vault: VAULT, wait: markerRegex(undefined) }
 // Bumped per owner line so the add field empties; an auto capture mid-typing leaves it alone.
 let addRound = 0
 // The session the atom holds; `/clear` starts a new id, whose panel is loaded fresh.
@@ -287,6 +289,7 @@ export const register: Register = (on, options) => {
       : ['Done'],
     linkRoots: Array.isArray(options.linkRoots) ? options.linkRoots.filter((s): s is string => typeof s === 'string') : LINK_ROOTS,
     vault: typeof options.vault === 'string' ? options.vault : VAULT,
+    wait: markerRegex(typeof options.waitMarker === 'string' ? options.waitMarker : undefined),
   }
   const pattern = cfg.pattern
 
@@ -365,7 +368,9 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined || e.isAborted || e.answer === '') return r
     const got = capture(e.answer)
     // Every reply counts, carrying links or not: freshness is measured in the work done since.
-    await change($, p => merge(nextTurn(p), got, pattern))
+    // The «Ждёт тебя» block replaces its section; a reply without one leaves it as it was.
+    const wait = waitingLines(e.answer, cfg.wait)
+    await change($, p => setWaiting(merge(nextTurn(p), got, pattern), wait))
     await refreshCards($)
     laterPrs($, false)
     return r
@@ -408,7 +413,11 @@ export const register: Register = (on, options) => {
           ...(r.code === undefined ? {} : { color: CODE_COLOR }),
         }
         const text = <Text key={`r-${id}-${n}`} {...look}>{r.text}</Text>
-        return r.href !== undefined && linkable ? <Link key={`l-${id}-${n}`} href={r.href}>{text}</Link> : text
+        if (r.href === undefined || !linkable) return text
+        const link = <Link key={`l-${id}-${n}`} href={r.href}>{text}</Link>
+        // A pull request linked inside a line carries its state after it, as a link row does.
+        const state = prState(r.href, `${id}-${n}`)
+        return state === null ? link : [link, state]
       })
 
     // A link item's own address passes the same gate as a line's: one that fails draws as its label, plain.
@@ -539,6 +548,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {restart === '' ? null : <Text dimColor wrap="wrap">перезапуск: {restart}</Text>}
         {panel.items.length === 0 ? <Text dimColor>Пока пусто: ссылки и итоги из ответов появятся здесь.</Text> : null}
+        {block('Ждёт тебя', v.waiting.map(i => row(i)))}
         {block('Задачи', taskRows)}
         {block('Ссылки', items(v.links, 'links'))}
         {block('Заметки', items(v.notes, 'notes'))}

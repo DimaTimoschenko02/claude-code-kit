@@ -27,6 +27,8 @@ export type TaskGroup = {
 /** A section's lines: `shown` at once, `rest` behind one «ещё N» line. */
 export type Section<T> = { shown: T[]; rest: T[] }
 export type PanelView = {
+  /** What the session waits on the owner for, as the last reply's block listed it; never folded. */
+  waiting: Item[]
   tasks: Section<TaskGroup>
   /** Closed tasks no longer fresh, behind «закрытые: N». */
   closed: TaskGroup[]
@@ -145,7 +147,7 @@ function cap(items: Item[]): Item[] {
   const out = new Set(
     items
       .map((item, n) => ({ item, n }))
-      .filter(x => x.item.by === 'auto')
+      .filter(x => x.item.by === 'auto' && x.item.kind !== 'wait')
       .sort((a, b) => seenOf(a.item) - seenOf(b.item) || a.n - b.n)
       .slice(0, extra)
       .map(x => x.item),
@@ -198,6 +200,21 @@ export function merge(panel: Panel, got: Captured, pattern: RegExp, by: Item['by
   return { ...panel, seq, items: cap([...items, ...added]) }
 }
 
+/**
+ * The «Ждёт тебя» block of the last reply that carried one replaces the section whole: lines answered or hidden go
+ * with it. `null` (no block in the reply) leaves the section as it is. The lines carry no task: they are the owner's
+ * to-do, not activity on a task.
+ */
+export function setWaiting(panel: Panel, lines: readonly string[] | null): Panel {
+  if (lines === null) return panel
+  const now = panel.items.filter(i => i.kind === 'wait')
+  const same = now.length === lines.length && now.every((i, n) => i.text === lines[n] && !i.checked)
+  if (same) return panel
+  let seq = panel.seq
+  const fresh: Item[] = lines.map(text => ({ id: `i${++seq}`, kind: 'wait', text, checked: false, by: 'auto', seen: panel.turn }))
+  return { ...panel, seq, items: [...panel.items.filter(i => i.kind !== 'wait'), ...fresh] }
+}
+
 /** One line, no quote marks of its own, bounded: a line's text may have come from a page, so it reaches the model as a short quote. */
 export function clip(text: string, max = 80): string {
   const flat = text.replace(/[«»\s]+/g, ' ').trim()
@@ -234,10 +251,14 @@ export function toggle(panel: Panel, id: string): Panel {
   const item = panel.items.find(i => i.id === id)
   if (item === undefined) return panel
   const checked = !item.checked
+  const verb =
+    item.kind === 'wait'
+      ? checked ? 'отметил как отвеченное в «Ждёт тебя»' : 'снял отметку «отвечено» в «Ждёт тебя»'
+      : checked ? 'отметил' : 'снял отметку'
   return {
     ...panel,
     items: panel.items.map(i => (i.id === id ? { ...i, checked } : i)),
-    report: [...panel.report, `${checked ? 'отметил' : 'снял отметку'} ${describe(item)}`],
+    report: [...panel.report, `${verb} ${describe(item)}`],
   }
 }
 
@@ -259,7 +280,7 @@ export function remove(panel: Panel, id: string): Panel {
     ...panel,
     items: panel.items.filter(i => i.id !== id),
     dropped: item.href === undefined || panel.dropped.includes(item.href) ? panel.dropped : [...panel.dropped, item.href],
-    report: [...panel.report, `удалил ${describe(item)}`],
+    report: [...panel.report, `${item.kind === 'wait' ? 'убрал из «Ждёт тебя»' : 'удалил'} ${describe(item)}`],
   }
 }
 
@@ -275,6 +296,7 @@ export function panelTasks(panel: Panel): string[] {
 /** The pull requests the panel links, `owner/repo#n` with their repo and number, most recently carried first. */
 export function panelPulls(panel: Panel): { key: string; repo: string; number: string }[] {
   const out = new Map<string, { key: string; repo: string; number: string }>()
+  // A pull request linked inside a line's text is a link item too: capture takes every address of the reply.
   for (const item of order(panel.items.filter(i => i.href !== undefined))) {
     const pr = pullOf(item.href!)
     if (pr !== undefined && !out.has(pr.key)) out.set(pr.key, pr)
@@ -323,11 +345,13 @@ export function view(panel: Panel, ctx: ViewContext): PanelView {
   const links: Item[] = []
   const notes: Item[] = []
   const done: Item[] = []
+  const waiting: Item[] = []
   // Activity on a task is anything that names it: a result or a note counts as much as a link.
   const touched = new Map<string, number>()
   for (const item of panel.items) {
     if (item.task !== undefined) touched.set(item.task, Math.max(touched.get(item.task) ?? -1, seenOf(item)))
-    if (item.kind === 'done') done.push(item)
+    if (item.kind === 'wait') waiting.push(item)
+    else if (item.kind === 'done') done.push(item)
     else if (item.kind === 'note') notes.push(item)
     else if (item.task === undefined) links.push(item)
     else groups.set(item.task, [...(groups.get(item.task) ?? []), item])
@@ -351,6 +375,7 @@ export function view(panel: Panel, ctx: ViewContext): PanelView {
     .slice(0, SECTION_CAP - freshOpen.length)
   const owner = (i: Item) => i.by === 'owner' && !i.checked
   return {
+    waiting,
     tasks: { shown: [...freshOpen, ...freshShut], rest: open.filter(t => !freshOpen.includes(t)) },
     closed: shut.filter(t => !freshShut.includes(t)),
     links: section(links, turn, owner, i => i.checked),

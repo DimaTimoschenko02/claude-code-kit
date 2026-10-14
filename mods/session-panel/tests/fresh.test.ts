@@ -221,6 +221,19 @@ describe('the pane', () => {
     await ui.unmount()
   })
 
+  test('a pull request linked inside a «Ждёт тебя» line is asked and carries its state after the link', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    w.answers.set('119', ghJson({ reviewDecision: 'APPROVED' }))
+    await start($)
+    await reply($, `**Ждёт тебя** — ревью по порядку:\n\n1. [#119](${PR(119)}) — шаг 3 аудита.`)
+    await w.clock.settle()
+    expect(w.gh.map(a => a[3])).toEqual(['119'])
+    const ui = await $.ui.mount(PANE)
+    // Once after the link in the «Ждёт тебя» line, once on the PR's own row in «Ссылки».
+    expect(await ui.findAll({ type: 'Text', text: /^ апрув$/ })).toHaveLength(2)
+    await ui.unmount()
+  })
+
   test('without gh the usual places are tried once, then no badge and no more tries; the pane still draws', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
     w.noGh = true

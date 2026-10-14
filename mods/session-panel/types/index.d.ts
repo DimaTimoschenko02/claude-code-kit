@@ -1,4 +1,5 @@
-export type ItemKind = 'link' | 'note' | 'done'
+/** `wait`: a line of the reply's «Ждёт тебя» block — replaced whole by the next reply that carries the block. */
+export type ItemKind = 'link' | 'note' | 'done' | 'wait'
 
 export type Item = {
   id: string

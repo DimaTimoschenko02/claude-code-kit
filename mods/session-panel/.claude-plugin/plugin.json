@@ -43,6 +43,12 @@
       "title": "Obsidian vault",
       "description": "Absolute (or ~/) folder of the Obsidian vault: a .md file inside it links as obsidian://open with the folder's name as the vault; '' links every file to the editor.",
       "default": "~/mind"
+    },
+    "waitMarker": {
+      "type": "string",
+      "title": "Waiting block marker",
+      "description": "The words that open a reply's block of what waits on the owner (`**Ждёт тебя:** …`, `### Ждёт тебя` and a list); its lines show at the top of the panel, replaced by the next reply that carries the block. '' turns the section off.",
+      "default": "Ждёт тебя"
     }
   }
 }
