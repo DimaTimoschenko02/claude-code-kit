@@ -4,7 +4,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Item, Panel, Pr } from '../types'
+import type { Blocker, Item, Panel, Pr } from '../types'
 import {
   addNote,
   addOwnerLine,
@@ -28,6 +28,7 @@ import type { Section, TaskGroup } from './logic'
 import { GH_FIELDS, cardBadge, cardStatus, parsePr, prBadge, pullOf } from './status'
 import type { Badge } from './status'
 import { markerRegex, waitingLines } from './waiting'
+import { CHROME, blockerText, blockersOf, chromeSignal, hhmm, iconOf, lift, ownerLift, parseTzOffset, raise, signedInHost, validKey } from './blockers'
 import { runs, withLead } from './markup'
 import type { Run } from './markup'
 import { NO_REFS, blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
@@ -38,6 +39,7 @@ type Engine = EngineInterface
 const PANE = 'session-panel'
 export const COMMAND = 'sp'
 export const TOOL = 'add'
+export const BLOCKER_TOOL = 'blocker'
 const KEY = 'panel:'
 const TTL_MS = 30 * 86_400_000
 /** Wide enough for a card title and its three buttons; the owner's drag or key resize wins and is kept. */
@@ -73,6 +75,10 @@ let addRound = 0
 let sid = ''
 // How to restart this session so it loads new mods: a background job by its job id, any other by its session id.
 let restart = ''
+let interactive = false
+let tzOffsetMin = 0
+/** claude-in-chrome calls in a row that found the extension down; one is a hiccup a reconnect fixes, two a blocker. */
+let chromeDowns = 0
 
 async function sync($: Engine): Promise<void> {
   const id = await $.session.id()
@@ -280,6 +286,41 @@ async function flip($: Engine, key: string): Promise<void> {
   await update($, openAtom, list => (list.includes(key) ? list.filter(k => k !== key) : [...list, key]))
 }
 
+/** A new blocker also tells the owner at once: a toast, and the pane opened if it is not. */
+async function putUp($: Engine, b: Omit<Blocker, 'since'>): Promise<void> {
+  await sync($)
+  const isNew = !blockersOf(await read($, panelAtom)).some(x => x.key === b.key)
+  const now = await $.clock.now()
+  await change($, p => raise(p, b, now))
+  if (!isNew) return
+  try {
+    $.ui.toast(`⛔ Нужен ты: ${b.text}`, { timeoutMs: 8_000 })
+  } catch {}
+  if (interactive && !(await $.ui.panes().catch(() => [])).some(p => p.id === PANE)) {
+    void $.ui.open({ id: PANE, title: 'Сессия', columns: COLUMNS }).catch(() => undefined)
+  }
+}
+
+/** What a claude-in-chrome call's result says: the extension down twice in a row, or back; a host past its sign-in. */
+async function watchChrome($: Engine, tool: string, text: string, isError: boolean): Promise<void> {
+  const signal = chromeSignal(tool, text, isError)
+  if (signal === 'down') {
+    chromeDowns++
+    const listed = tool.endsWith('__list_connected_browsers')
+    if (chromeDowns >= 2 || listed) {
+      await putUp($, { key: CHROME, text: 'Расширение Chrome не подключено — перезапусти его', by: 'detector' })
+    }
+    return
+  }
+  if (signal !== 'up') return
+  chromeDowns = 0
+  await sync($)
+  const host = signedInHost(text)
+  const keys = blockersOf(await read($, panelAtom)).map(b => b.key)
+  const gone = keys.filter(k => k === CHROME || (host !== undefined && k.toLowerCase() === `login:${host}`))
+  if (gone.length > 0) await change($, p => gone.reduce(lift, p))
+}
+
 export const register: Register = (on, options) => {
   cfg = {
     pattern: taskRegex(typeof options.taskPattern === 'string' ? options.taskPattern : undefined),
@@ -314,6 +355,36 @@ export const register: Register = (on, options) => {
         required: ['text'],
       },
     }).catch(err => $.ui.log(`session-panel: tool not registered: ${String(err)}`, { to: 'debug' }))
+    // In the prompt's own tool list, not behind ToolSearch: its description is how the model learns when to call it.
+    await $.tool.register({
+      name: BLOCKER_TOOL,
+      isDeferred: false,
+      description:
+        "Puts a blocker at the top of the owner's session panel: something only the owner can physically do and no " +
+        'tool, harness or auto mode of yours can work around — sign in (Google, SSO, 2FA, a password), a VPN ' +
+        'profile only they can import, a local app to start or install, a permission only they can grant. Not for ' +
+        'decisions, forks or questions. Call it when you hit the wall (still say it in one line in your reply), and ' +
+        'again with cleared: true the moment you see the condition gone. A disconnected Chrome extension (key ' +
+        '`chrome`) is put up and taken down by itself; a `login:<host>` blocker also goes by itself once a browser ' +
+        'call lands on that host past its sign-in page.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          key: {
+            type: 'string',
+            description: 'Stable id, the same for the same wall: `login:<host>`, `vpn`, `app:<name>`, `2fa:<service>`, `access:<what>`.',
+          },
+          text: { type: 'string', description: 'One line in the owner\'s language: what is blocked — the one action only they can do.' },
+          href: { type: 'string', description: 'https:// address the owner opens to act (the sign-in page), optional.' },
+          cleared: { type: 'boolean', description: 'The condition is gone: takes the blocker down.' },
+        },
+        required: ['key'],
+      },
+    }).catch(err => $.ui.log(`session-panel: blocker tool not registered: ${String(err)}`, { to: 'debug' }))
+    const zone = await $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).catch(() => null)
+    tzOffsetMin = parseTzOffset(zone?.stdout ?? '') ?? -new Date().getTimezoneOffset()
+    interactive = e.isInteractive
+    chromeDowns = 0
 
     // Panels of sessions long gone would fill the store's 4 MiB.
     const now = await $.clock.now()
@@ -361,6 +432,35 @@ export const register: Register = (on, options) => {
           : addNote(p, text, pattern, 'tool'),
     )
     return { result: 'added to the session panel' }
+  })
+
+  on('tool.call', { tool: 'mcp__session-panel__blocker' }, async ($, e) => {
+    const input = e as unknown as { key?: unknown; text?: unknown; href?: unknown; cleared?: unknown }
+    const key = typeof input.key === 'string' ? input.key.trim() : ''
+    if (!validKey(key)) return { deny: 'key must be a short id: letters, digits and : . _ - (login:<host>, vpn, app:<name>)' }
+    if (input.cleared === true) {
+      await change($, p => lift(p, key))
+      return { result: `blocker ${key} taken down` }
+    }
+    const text = typeof input.text === 'string' ? blockerText(input.text) : ''
+    const href = typeof input.href === 'string' ? input.href.trim() : ''
+    if (text === '') return { deny: 'text is empty: say what is blocked and the one action only the owner can do' }
+    if (href !== '' && !/^https?:\/\/\S+$/.test(href)) return { deny: 'href must be an https:// address' }
+    await putUp($, { key, text, ...(href === '' ? {} : { href }), by: 'tool' })
+    return { result: `blocker ${key} is up on the session panel; call again with cleared: true once it is gone` }
+  })
+
+  // Hot: every tool call passes here; anything but a claude-in-chrome call goes straight on.
+  on('tool.call', async ($, e, next) => {
+    if (!e.tool.startsWith('mcp__claude-in-chrome__')) return next(e)
+    const r = await next(e)
+    if (r.deny === undefined) {
+      const text = typeof r.text === 'string' ? r.text : typeof r.result === 'string' ? r.result : ''
+      await watchChrome($, e.tool, text, r.isError === true).catch(err =>
+        $.ui.log(`session-panel: chrome watch failed: ${String(err)}`, { to: 'debug' }),
+      )
+    }
+    return r
   })
 
   on('turn.complete', async ($, e, next) => {
@@ -544,10 +644,38 @@ export const register: Register = (on, options) => {
       more('closed', `▸ закрытые: ${v.closed.length}`, v.closed.length),
     ]
 
+    // Only the owner can clear these: a red frame above everything, a glyph per kind, since when, «сделал» and ✕.
+    const walls = blockersOf(panel)
+    const blockerBox =
+      walls.length === 0 ? null : (
+        <Box key="blockers" flexDirection="column" borderStyle="round" borderColor="error" paddingX={1}>
+          <Text bold color="error">⛔ Нужен ты — сам не обойду</Text>
+          {walls.map(b => (
+            <Box key={`bk-${b.key}`} flexDirection="row" marginTop={1}>
+              <Box key={`bb-${b.key}`} flexGrow={1} flexShrink={1}>
+                <Text wrap="wrap">
+                  <Text>{`${iconOf(b.key)} `}</Text>
+                  {inline(withLead(linked(runs(b.text), places)), `bt-${b.key}`, true)}
+                  {b.href === undefined ? null : (
+                    <Text key={`bh-${b.key}`}>{' → '}{linkTo(b.href, [<Text key={`bl-${b.key}`} color="suggestion">открыть</Text>])}</Text>
+                  )}
+                  <Text dimColor>{`  с ${hhmm(b.since, tzOffsetMin)}`}</Text>
+                </Text>
+              </Box>
+              <Text key={`bg-${b.key}`}> </Text>
+              <Button key={`bd-${b.key}`} plain label="✓ сделал" onPress={() => change($, p => ownerLift(p, b.key, true))} />
+              <Text key={`bs-${b.key}`}> </Text>
+              <Button key={`bx-${b.key}`} plain dimColor label="✕" onPress={() => change($, p => ownerLift(p, b.key, false))} />
+            </Box>
+          ))}
+        </Box>
+      )
+
     return (
       <Box flexDirection="column">
+        {blockerBox}
         {restart === '' ? null : <Text dimColor wrap="wrap">перезапуск: {restart}</Text>}
-        {panel.items.length === 0 ? <Text dimColor>Пока пусто: ссылки и итоги из ответов появятся здесь.</Text> : null}
+        {panel.items.length === 0 && walls.length === 0 ? <Text dimColor>Пока пусто: ссылки и итоги из ответов появятся здесь.</Text> : null}
         {block('Ждёт тебя', v.waiting.map(i => row(i)))}
         {block('Задачи', taskRows)}
         {block('Ссылки', items(v.links, 'links'))}

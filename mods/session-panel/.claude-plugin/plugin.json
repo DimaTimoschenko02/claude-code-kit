@@ -4,7 +4,7 @@
   "author": {
     "name": "Dima Timoschenko"
   },
-  "description": "A side panel per session: one row per task with its card status and pull request state, the links the replies carried, and one line per delivered result; only what recent replies carried shows, the rest folds behind one line; the owner ticks, edits, deletes and adds lines in place",
+  "description": "A side panel per session: blockers only the owner can clear in a red frame on top (put up by the model or, for a disconnected Chrome extension, by itself; taken down when the condition is seen gone), one row per task with its card status and pull request state, the links the replies carried, and one line per delivered result; only what recent replies carried shows, the rest folds behind one line; the owner ticks, edits, deletes and adds lines in place",
   "types": "./types/index.d.ts",
   "userConfig": {
     "cardsDir": {

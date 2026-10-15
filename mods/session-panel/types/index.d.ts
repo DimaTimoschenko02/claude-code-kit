@@ -13,8 +13,21 @@ export type Item = {
   seen?: number
 }
 
+/** Something only the owner can physically do; one per key, up until the condition is seen gone. */
+export type Blocker = {
+  /** `chrome`, `login:<host>`, `vpn`, `app:<name>`…: a later call with the same key rewrites or clears it. */
+  key: string
+  text: string
+  href?: string
+  /** When it first went up. */
+  since: number
+  by: 'detector' | 'tool'
+}
+
 export type Panel = {
   items: Item[]
+  /** Absent on panels stored before blockers existed. */
+  blockers?: Blocker[]
   /** Addresses the owner deleted: a later reply carrying them again does not bring them back. */
   dropped: string[]
   /** The owner's changes not yet shown to the model. */
