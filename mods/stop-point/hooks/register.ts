@@ -5,10 +5,21 @@
 // (its own write over what is still unwritten, bounded), then puts the point and the files the summary dropped back
 // into context. The status line says when the point was last made current, that it is being written, or why not.
 //
+// A subagent's compaction is its own: no write, no wait, no point handed to it. Its classic SessionStart(compact)
+// carries no agent_id (measured 2026-10-15), so whose a SessionStart(compact) is comes from session.compact, which does.
+//
 // Why a completion, not a subagent: a plugin-spawned subagent's hand-back arrives on the main thread as a prompt and
 // starts a turn (measured 2026-10-04: origin `peer`, then a main reply about it) — on every reply, a loop.
 
-import type { EngineInterface, ModelTextBlock, Register, SessionMessage, Settings, SettingsSource } from 'claude-code'
+import type {
+  EngineInterface,
+  ModelTextBlock,
+  Register,
+  SessionCompactResult,
+  SessionMessage,
+  Settings,
+  SettingsSource,
+} from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { StopPointSession } from '../types'
 import type { Addendum } from './logic'
@@ -27,6 +38,11 @@ import {
   pickAddendum,
   withAddendum,
   claimForCompaction,
+  agentCompactBegins,
+  agentCompactEnds,
+  closeMainCompaction,
+  compactStartOwner,
+  openMainCompaction,
   claimOnReply,
   clockTime,
   cursorAt,
@@ -425,13 +441,32 @@ async function takeDeliveries($: EngineInterface, c: Config): Promise<string[]> 
   await change($, v => {
     out.blocks = [...v.pending]
     out.due = v.pointDue
-    return { ...v, pending: [], pointDue: false }
+    const taken = { ...v, pending: [], pointDue: false }
+    return v.pointDue ? closeMainCompaction(taken) : taken
   })
   if (out.due) {
     const file = await pointFile($, c)
     if (file !== null) out.blocks.unshift(afterCompactText(c.pointPath, file.text, file.mtimeMs, await $.clock.now()))
   }
   return out.blocks
+}
+
+/**
+ * A subagent's compaction: marked in the state while it runs, so a SessionStart(compact) it raises (which carries no
+ * agent_id) is never taken for the main thread's. No write, no wait, none of the main point's fields touched.
+ */
+async function agentCompaction(
+  $: EngineInterface,
+  id: string,
+  run: () => Promise<SessionCompactResult>,
+): Promise<SessionCompactResult> {
+  const now = await $.clock.now().catch(() => null)
+  if (now !== null) await change($, v => agentCompactBegins(v, id, now)).catch(() => null)
+  try {
+    return await run()
+  } finally {
+    await change($, v => agentCompactEnds(v, id)).catch(() => null)
+  }
 }
 
 async function commandText($: EngineInterface): Promise<string> {
@@ -573,7 +608,9 @@ export const register: Register = on => {
   // --- compaction: a current point first, then the new cycle ----------------------------------------------------------
 
   on('session.compact', async ($, e, next) => {
-    if (e.agentId !== undefined || e.trigger === 'precompute') return next(e)
+    if (e.trigger === 'precompute') return next(e)
+    // A subagent's compaction is its own: the main point is neither written for it nor handed to it.
+    if (e.agentId !== undefined) return agentCompaction($, e.agentId, () => next(e))
     const c = await config($).catch(() => null)
     if (c === null || c.standDown !== null) return next(e)
 
@@ -601,10 +638,17 @@ export const register: Register = on => {
       $.ui.log(`stop-point: no write before the compaction: ${String(err)}`, { to: 'debug' })
     }
 
-    await change($, v => ({ ...v, compactSeq: v.compactSeq + 1 })).catch(() => null)
-    const r = await next(e)
+    await change($, openMainCompaction).catch(() => null)
+    let r: SessionCompactResult
+    try {
+      r = await next(e)
+    } catch (err) {
+      await change($, closeMainCompaction).catch(() => null)
+      throw err
+    }
     if (r.skip !== undefined) {
-      showStatus($, await readState($).catch(() => INITIAL))
+      // nothing compacted: no point is owed, and a SessionStart(compact) from now on is not this one's
+      showStatus($, await change($, closeMainCompaction).catch(() => INITIAL))
       return r
     }
     try {
@@ -637,19 +681,28 @@ export const register: Register = on => {
       showStatus($, s)
       return r
     }
-    const file = await pointFile($, c)
     const now = await $.clock.now()
     const blocks: string[] = []
     if (e.source === 'compact') {
-      const out = { pending: [] as string[] }
+      // A subagent's compaction raises this too, with no agent_id and the main transcript_path: whose it is comes
+      // from what session.compact (which does carry agentId) left in the state. Not the main's → change nothing.
+      const out = { pending: [] as string[], owner: 'agent' as ReturnType<typeof compactStartOwner> }
       await change($, v => {
+        out.owner = compactStartOwner(v, now)
+        if (out.owner !== 'main') return v
         out.pending = v.pending
-        return { ...v, pending: [], pointDue: false, injectedSeq: v.compactSeq }
+        return closeMainCompaction({ ...v, pending: [], pointDue: false })
       })
+      if (out.owner !== 'main') {
+        $.ui.log(`stop-point: SessionStart(compact) left alone: ${out.owner === 'agent' ? 'a subagent compacted' : 'a subagent compacted alongside, the next main tool call carries the point'}`, { to: 'debug' })
+        return r
+      }
+      const file = await pointFile($, c)
       if (file !== null) blocks.push(afterCompactText(c.pointPath, file.text, file.mtimeMs, now))
       blocks.push(...out.pending)
-    } else if (file !== null) {
-      blocks.push(resumeText(c.pointPath, file.text, file.mtimeMs, now, await gitDelta($, c.root, file.mtimeMs)))
+    } else {
+      const file = await pointFile($, c)
+      if (file !== null) blocks.push(resumeText(c.pointPath, file.text, file.mtimeMs, now, await gitDelta($, c.root, file.mtimeMs)))
     }
     if (blocks.length === 0) return r
     return { ...r, additionalContext: [...(r.additionalContext ?? []), ...blocks] }

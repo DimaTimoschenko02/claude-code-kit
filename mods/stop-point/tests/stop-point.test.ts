@@ -55,6 +55,8 @@ type World = {
   compactions: number
   summary: SessionMessage[]
   duringCompact: (() => Promise<void>) | null
+  /** The engine skips the compaction with this reason (a classic PreCompact hook blocked it). */
+  skipCompact: string | null
   ran: string[]
   commands: string[]
   sid: string
@@ -90,6 +92,7 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
     compactions: 0,
     summary: [{ role: 'user', text: 'This session is being continued from a previous conversation. Summary.', toolUses: [] }],
     duringCompact: null,
+    skipCompact: null,
     ran: [],
     commands: [],
     sid: SID,
@@ -185,6 +188,7 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
     return { text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }
   })
   on('session.compact', async () => {
+    if (w.skipCompact !== null) return { skip: w.skipCompact }
     w.order.push('engine compacts')
     w.compactions += 1
     if (w.duringCompact !== null) await w.duringCompact()
@@ -1224,5 +1228,185 @@ describe('the prompt cache: the steady text first, marked, the time after it', (
     expect(blocks(w, 1)[0]).toEqual(blocks(w, 0)[0])
     expect(blocks(w, 1)[0]?.cache).toBe(true)
     expect(blocks(w, 1).at(-1)?.text).toContain('сократи до 3072 байт по правилу шаблона')
+  })
+})
+
+/** Reads the mod's session state as any plugin may (the test engine's `$` has no `state` noun). */
+const PEEK_PLUGIN = {
+  name: 'peek',
+  register(on: On) {
+    on('command.run', { command: 'peek' }, async $ => {
+      const { value } = await $.state.get({ plugin: 'stop-point', key: 'session' })
+      return { text: JSON.stringify(value ?? null) }
+    })
+  },
+}
+const peek = async ($: Engine): Promise<typeof INITIAL> => {
+  const r = await $.command.run({ command: 'peek', args: '', origin: { kind: 'composer' } } as never)
+  return { ...INITIAL, ...(JSON.parse(r.text ?? 'null') ?? {}) }
+}
+const WITH_PEEK = { plugins: [PEEK_PLUGIN] }
+
+describe('a subagent\'s compaction is its own', () => {
+  const AGENT = 'ac780648e37e4f064'
+  const agentWork: SessionMessage[] = [
+    owner('Задача агента: прочитай client/net/netClient.ts'),
+    said('читаю', 'ta1', { name: 'Read', input: { file_path: `${ROOT}/client/net/netClient.ts` }, out: 'x' }),
+  ]
+  /** What the main point's bookkeeping holds: none of it may move when a subagent compacts. */
+  const mainState = async ($: Engine) => {
+    const v = await peek($)
+    return {
+      compactSeq: v.compactSeq,
+      injectedSeq: v.injectedSeq,
+      pointDue: v.pointDue,
+      pending: v.pending,
+      cursor: v.cursor,
+      gen: v.gen,
+      appliedGen: v.appliedGen,
+      writing: v.writing,
+    }
+  }
+  /** A subagent compacts; the engine raises SessionStart(compact) without agent_id inside it and once after it. */
+  const agentCompacts = async ($: Engine, w: World): Promise<string> => {
+    const seen: string[] = []
+    w.duringCompact = async () => {
+      seen.push(...((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []))
+    }
+    const r = await $.session.compact({ trigger: 'auto', messages: [...agentWork], agentId: AGENT })
+    w.duringCompact = null
+    expect(r.skip).toBeUndefined()
+    seen.push(...((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []))
+    return seen.join('\n')
+  }
+  const POINT_TEXT = '# Точка останова\n\n## Сейчас\n- главная: правка лобби, 42 rows'
+
+  test('no point, no lost refs, no write and no main state change after the main compacted before', WITH_PEEK, async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    w.files.set(POINT, { text: POINT_TEXT, mtimeMs: START })
+    w.reply = () => answered(UNCHANGED)
+    // the main thread compacts first, and its SessionStart carries its point
+    let mainGot = ''
+    w.duringCompact = async () => {
+      mainGot = ((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []).join('\n')
+    }
+    await compact($, 'auto', [...w.messages, owner('продолжай'), said('читаю', 'tu5', { name: 'Read', input: { file_path: `${ROOT}/src/a.ts` }, out: 'a' })])
+    expect(mainGot).toContain('=== ТОЧКА ОСТАНОВА (после компакта')
+    expect(ctx(await read($))).toContain('- читал: src/a.ts') // the main's own lost refs, on its next tool call
+    w.messages = [...w.summary, owner('дальше'), said('делаю')] // main work the point does not cover yet
+    const before = await mainState($)
+    const calls = w.calls.length
+    const compactions = w.compactions
+
+    const got = await agentCompacts($, w)
+    await w.clock.settle()
+
+    expect(w.compactions).toBe(compactions + 1)
+    expect(got).not.toContain('ТОЧКА ОСТАНОВА')
+    expect(got).not.toContain('ОПОРЫ')
+    expect(w.calls).toHaveLength(calls) // no write of the main point for it
+    expect(await mainState($)).toEqual(before)
+    expect(ctx(await read($))).toBe('') // and nothing left over for the main thread either
+    expect((await peek($)).agentCompacting).toEqual({})
+  })
+
+  test('the main point waiting for delivery stays the main thread\'s', WITH_PEEK, async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.files.set(POINT, { text: '# Stop point\n- see src/d.ts', mtimeMs: START })
+    w.reply = () => answered(UNCHANGED)
+    // the main compacts with no SessionStart: its point and lost refs wait for the next main tool call
+    await compact($, 'manual', [
+      { role: 'assistant', text: 'reading', toolUses: [{ tool_use_id: '1', tool: 'Read', input: { file_path: `${ROOT}/src/a.ts` } }] },
+    ])
+    const before = await mainState($)
+    expect(before.pointDue).toBe(true)
+
+    const got = await agentCompacts($, w)
+    expect(got).toBe('')
+    expect(await mainState($)).toEqual(before)
+
+    const main = ctx(await read($))
+    expect(main).toContain('ТОЧКА ОСТАНОВА (после компакта')
+    expect(main).toContain('- читал: src/a.ts')
+    const delivered = await peek($)
+    expect(delivered.injectedSeq).toBe(delivered.compactSeq) // delivered: nothing owed any more
+    expect(ctx(await read($))).toBe('')
+    expect(await agentCompacts($, w)).toBe('') // a later one finds nothing owed either
+  })
+})
+
+describe('the main compaction, with subagents compacting around it', () => {
+  const AGENT = 'a32dc9a58eed3c6d5'
+  const POINT_TEXT = '# Точка останова\n\n## Значения\n- 42 rows, measured 04.10'
+
+  test('after a subagent compaction ended, the main SessionStart(compact) carries the point and refs as before', WITH_PEEK, async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.files.set(POINT, { text: POINT_TEXT, mtimeMs: START })
+    w.reply = () => answered(UNCHANGED)
+    await $.session.compact({ trigger: 'auto', messages: [owner('агент')], agentId: AGENT })
+    await $.classic.SessionStart({ source: 'compact' })
+    let injected = ''
+    w.duringCompact = async () => {
+      injected = ((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []).join('\n')
+    }
+    await compact($, 'manual', [
+      { role: 'assistant', text: 'reading', toolUses: [{ tool_use_id: '1', tool: 'Read', input: { file_path: `${ROOT}/src/a.ts` } }] },
+    ])
+    expect(injected).toContain('=== ТОЧКА ОСТАНОВА (после компакта')
+    expect(injected).toContain('42 rows, measured 04.10')
+    const v = await peek($)
+    expect(v.injectedSeq).toBe(v.compactSeq)
+    // the lost refs: after the compaction, on the next main tool call (refs are computed once next() returns)
+    const later = ctx(await read($))
+    expect(later).toContain('- читал: src/a.ts')
+    expect(later).not.toContain('ТОЧКА ОСТАНОВА (после компакта')
+  })
+
+  test('a subagent compacting at the same moment: neither SessionStart carries it, the next main tool call does, once', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.files.set(POINT, { text: POINT_TEXT, mtimeMs: START })
+    w.reply = () => answered(UNCHANGED)
+    // the subagent's compaction is still running when the main's begins
+    let release: () => void = () => undefined
+    const held = new Promise<void>(r => {
+      release = r
+    })
+    let agentGot = ''
+    w.duringCompact = async () => {
+      await held
+      agentGot = ((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []).join('\n')
+    }
+    const agentDone = $.session.compact({ trigger: 'auto', messages: [owner('агент')], agentId: AGENT })
+    await w.clock.settle()
+    w.duringCompact = null
+    const mainDone = compact($, 'auto', [owner('сожми')])
+    await w.clock.settle()
+    const mainGot = ((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []).join('\n')
+    release()
+    await Promise.all([agentDone, mainDone])
+    expect(agentGot).toBe('')
+    expect(mainGot).toBe('')
+    expect(ctx(await read($))).toContain('ТОЧКА ОСТАНОВА (после компакта')
+    expect(ctx(await read($))).toBe('')
+  })
+
+  test('a skipped main compaction owes nothing: a later subagent SessionStart(compact) gets nothing', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.files.set(POINT, { text: POINT_TEXT, mtimeMs: START })
+    w.reply = () => answered(UNCHANGED)
+    w.skipCompact = 'blocked by a PreCompact hook'
+    const r = await compact($, 'manual', [owner('сожми')])
+    expect(r.skip).toBeDefined()
+    const got = ((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []).join('\n')
+    expect(got).toBe('')
+    expect(ctx(await read($))).toBe('')
   })
 })

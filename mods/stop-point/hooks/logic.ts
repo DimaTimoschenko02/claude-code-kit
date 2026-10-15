@@ -16,6 +16,9 @@ export const INITIAL: StopPointSession = {
   error: null,
   compactSeq: 0,
   injectedSeq: 0,
+  openAgentSeq: 0,
+  agentCompacting: {},
+  agentCompactSeq: 0,
   pointDue: false,
   pending: [],
   noTranscript: false,
@@ -63,6 +66,54 @@ export function releaseRun(v: StopPointSession, gen: number, now: number): Claim
 export const noTranscriptError = (err: unknown): boolean => /session\.messages is not available/.test(String(err))
 
 export const claimForCompaction = (v: StopPointSession): Claim => ({ state: { ...v, gen: v.gen + 1 }, gen: v.gen + 1 })
+
+// --- whose compaction: the main thread's or a subagent's ------------------------------------------------------------
+
+/** A subagent compaction marked as running for longer than this is a leftover (a reload dropped its end). */
+export const AGENT_COMPACT_STALE_MS = 15 * 60_000
+
+/**
+ * A main compaction opens in session.compact: the point's injection is owed until SessionStart(compact) or the next
+ * main tool call or prompt delivers it (`injectedSeq` catches up with `compactSeq`).
+ */
+export const openMainCompaction = (v: StopPointSession): StopPointSession => ({
+  ...v,
+  compactSeq: v.compactSeq + 1,
+  openAgentSeq: v.agentCompactSeq,
+})
+
+/** The open main compaction needs no injection any more (delivered, skipped, failed). */
+export const closeMainCompaction = (v: StopPointSession): StopPointSession => ({ ...v, injectedSeq: v.compactSeq })
+
+const liveAgents = (m: Record<string, number>, now: number): [string, number][] =>
+  Object.entries(m).filter(([, at]) => now - at < AGENT_COMPACT_STALE_MS)
+
+/** A subagent compaction begins (session.compact with agentId). Touches none of the main point's fields. */
+export const agentCompactBegins = (v: StopPointSession, id: string, now: number): StopPointSession => ({
+  ...v,
+  agentCompacting: Object.fromEntries([...liveAgents(v.agentCompacting, now).filter(([k]) => k !== id), [id, now]]),
+  agentCompactSeq: v.agentCompactSeq + 1,
+})
+
+/** …and ends, whatever its result. */
+export const agentCompactEnds = (v: StopPointSession, id: string): StopPointSession => ({
+  ...v,
+  agentCompacting: Object.fromEntries(Object.entries(v.agentCompacting).filter(([k]) => k !== id)),
+  agentCompactSeq: v.agentCompactSeq + 1,
+})
+
+/**
+ * Whose compaction a classic SessionStart(compact) follows. Its payload cannot tell: a subagent's compaction raises
+ * it with no agent_id and the MAIN transcript_path (measured 2026-10-15), while session.compact does carry agentId —
+ * so the mod keeps the facts itself. No main compaction open → a subagent's: nothing for it. A main one open while an
+ * agent compaction runs or ran since it opened → unsure: nothing here, the main thread's next tool call or prompt
+ * carries the point (those hooks see agentId). Otherwise → the main thread's.
+ */
+export function compactStartOwner(v: StopPointSession, now: number): 'main' | 'agent' | 'unsure' {
+  if (v.injectedSeq >= v.compactSeq) return 'agent'
+  if (liveAgents(v.agentCompacting, now).length > 0 || v.agentCompactSeq !== v.openAgentSeq) return 'unsure'
+  return 'main'
+}
 
 // --- the transcript delta ------------------------------------------------------------------------------------------
 

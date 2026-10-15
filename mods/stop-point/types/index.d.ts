@@ -45,6 +45,15 @@ export type StopPointSession = {
   compactSeq: number
   /** The compactSeq whose point classic SessionStart(compact) already injected. */
   injectedSeq: number
+  /**
+   * agentCompactSeq when the open main compaction began: an agent compaction that started or ended since then makes
+   * a SessionStart(compact) ambiguous (whose is it?).
+   */
+  openAgentSeq: number
+  /** Subagent compactions running now: agent id → ms since the epoch it began. Never the main thread's. */
+  agentCompacting: Record<string, number>
+  /** Bumped when a subagent compaction begins and when it ends. */
+  agentCompactSeq: number
   /** The point of the last compaction still has to reach the model (SessionStart did not carry it). */
   pointDue: boolean
   /** Model-only blocks waiting for the next main tool call or prompt (files and links the summary dropped). */
