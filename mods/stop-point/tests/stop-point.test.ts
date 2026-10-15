@@ -341,6 +341,24 @@ describe('a write after every reply', () => {
   })
 })
 
+/**
+ * A module instance a reload or the session's end dropped: every `$` call of its environment refuses from then on.
+ * The test engine drops a test's environment only when the test ends, so this stand-in refuses the clock on `cut`.
+ */
+const GONE_PLUGIN = {
+  name: 'gone',
+  register(on: On) {
+    let isGone = false
+    on('command.run', { command: 'gone' }, (_$, e) => {
+      isGone = e.args === 'cut'
+      return { text: e.args }
+    })
+    on('clock.now', (_$, e, next) =>
+      isGone ? { deny: 'no hooks module of that name is loaded (a stand-in for a dropped environment)' } : next(e),
+    )
+  },
+}
+
 describe('single flight', () => {
   test('replies during a write queue exactly one more write after it, never two at once', async ($, on) => {
     const w = world(on)
@@ -386,6 +404,29 @@ describe('single flight', () => {
     await w.clock.settle()
     expect(w.calls).toHaveLength(2)
     expect(w.calls[1]?.req.prompt).toContain('сколько строк') // the cut run's delta is not lost
+  })
+
+  test('the cut instance\'s run, its writer back after the reload, ends quietly: no rejection, no state moved', { plugins: [GONE_PLUGIN] }, async ($, on) => {
+    const w = world(on)
+    w.auto = false
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    await start($) // the reload: the old instance's run still waits on its writer
+    await $.command.run({ command: 'gone', args: 'cut', origin: { kind: 'composer' } } as never) // its clock now refuses
+    w.calls[0]?.resolve({ isAnswered: false, reason: 'aborted', usage: USAGE } as never)
+    await w.clock.settle() // before the fix: «a rejection nothing handled … $.clock.now refused» at the file's end
+    expect(w.calls).toHaveLength(1) // the cut run asked nothing more
+    expect(w.files.has(POINT)).toBe(false)
+    await $.command.run({ command: 'gone', args: 'back', origin: { kind: 'composer' } } as never)
+    w.auto = true
+    w.messages.push(owner('после перезагрузки'))
+    await reply($)
+    await w.clock.settle()
+    expect(w.calls).toHaveLength(2)
+    expect(w.calls[1]?.req.prompt).toContain('сколько строк') // the cursor never moved for the cut run
+    expect(w.status.at(-1)).toBe(`🟢 точка ${clockTime(START)}`)
   })
 })
 

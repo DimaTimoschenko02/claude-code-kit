@@ -398,13 +398,21 @@ async function backgroundLoop($: EngineInterface, first: number): Promise<void> 
       outcome = { kind: 'error', reason, ms: 0, count: 0, chars: 0 }
     }
     if (c !== null) await logRun($, c, 'reply', outcome)
-    const now = await $.clock.now()
+    // The loop runs on unawaited (`void` from a timer), so nothing may reject past this point. A reload or the
+    // session's end drops this instance's environment while the writer runs: from then on its clock and state refuse.
+    // The release then ends the loop; the slot goes to the next instance (session.start clears it, or a claim older
+    // than STALE_MS is taken over).
     const out = { gen: null as number | null }
-    const after = await change($, v => {
-      const r = releaseRun(v, current, now)
-      out.gen = r.gen
-      return r.state
-    }).catch(() => null)
+    const after = await $.clock
+      .now()
+      .then(now =>
+        change($, v => {
+          const r = releaseRun(v, current, now)
+          out.gen = r.gen
+          return r.state
+        }),
+      )
+      .catch(() => null)
     if (after === null) return
     showStatus($, after)
     gen = out.gen
