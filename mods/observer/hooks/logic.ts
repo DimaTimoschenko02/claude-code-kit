@@ -557,3 +557,39 @@ export function failureReason(r: { reason: string; status?: number | null; error
 /** A finding as one line of the session's findings file. */
 export const findingLine = (f: ObserverFinding): string =>
   `- ${dateTime(f.at)} ${f.kind}${f.fact ? ' (по счётчику)' : ''}: ${oneLine(f.text, 600)}`
+
+// --- the band's actions ----------------------------------------------------------------------------------------------
+
+export const KIND_WORD: Readonly<Record<ObserverFinding['kind'], string>> = { KNOW: 'знай', REPEAT: 'повтор' }
+
+/** What «в чат» puts in the prompt box: the hint as one line, named as the observer's, for the owner to send or extend. */
+export const chatText = (b: { kind: ObserverFinding['kind']; text: string }): string =>
+  `Наблюдатель (мод observer) отметил — ${KIND_WORD[b.kind]}: ${oneLine(b.text, 600)}`
+
+export const DEFECTS_KEEP = 1_000
+export const DEFECTS_HEADER = [
+  '# Недочёты, отмеченные наблюдателем',
+  '',
+  'Сохранены кнопкой «сохранить» на полосе над промптом, новые внизу. Строка: время · проект · вид · текст · сессия.',
+  '',
+]
+
+/** One saved defect: a single line, so the file stays greppable and bounded by lines. */
+export function defectLine(d: { at: number; kind: ObserverFinding['kind']; fact: boolean; text: string; project: string; sid: string }): string {
+  return `- ${dateTime(d.at)} · ${oneLine(d.project, 60) || '?'} · ${KIND_WORD[d.kind]}${d.fact ? ' (по счётчику)' : ''}: ` +
+    `${oneLine(d.text, 600)} · сессия ${d.sid.slice(0, 8)}`
+}
+
+/** The text after a line is saved: the header kept, entries bounded, the same finding never twice (null). */
+export function withDefect(old: string, line: string, text: string, keep: number = DEFECTS_KEEP): string | null {
+  const rows = old === '' ? [] : old.replace(/\n$/, '').split('\n')
+  const entries = rows.filter(r => r.startsWith('- '))
+  const flat = oneLine(text, 600)
+  if (entries.some(r => r.includes(`: ${flat} · сессия `))) return null
+  const head = rows.length === 0 ? DEFECTS_HEADER : rows.filter(r => !r.startsWith('- '))
+  return `${[...head, ...[...entries, line].slice(-keep)].join('\n')}\n`
+}
+
+/** The last `n` saved defects, newest last. */
+export const lastDefects = (text: string, n: number): string[] =>
+  text.split('\n').filter(r => r.startsWith('- ')).slice(-n)

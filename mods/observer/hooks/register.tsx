@@ -7,6 +7,10 @@
 // findings file, reaches the band only when it rests on a counted fact, and is handed once to the main model with
 // the next prompt. Repeats are counted by code over the whole session, never remembered by the model.
 //
+// The band's line has three actions, as the built-in's «Chat in main session»: «в чат» puts it in the prompt box for
+// the owner to send or extend, «сохранить» adds it to the durable defects file, «убрать» takes it down. The engine's own
+// `[-]` at the band's right end only folds the band: the line stays.
+//
 // Why a completion, not a subagent: a plugin-spawned subagent's hand-back starts a main turn — on every reply, a loop.
 
 import type { EngineInterface, Register, SessionMessage } from 'claude-code'
@@ -22,8 +26,10 @@ import {
   OBSERVER_MODEL,
   changingBlock,
   claimOnReply,
+  chatText,
   clockTime,
   contextNote,
+  defectLine,
   count,
   cursorAt,
   deltaFrom,
@@ -33,6 +39,7 @@ import {
   hitsIn,
   inventoryBlock,
   isDuplicate,
+  lastDefects,
   noTranscriptError,
   norm,
   oneLine,
@@ -44,6 +51,7 @@ import {
   stableBlock,
   stamp,
   thresholdOf,
+  withDefect,
 } from './logic'
 
 const SESSION = atom({ plugin: 'observer', key: 'session' } as const, INITIAL)
@@ -63,6 +71,8 @@ type Config = {
   dir: string
   findingsPath: string
   logPath: string
+  /** Defects the owner chose to keep, across sessions and projects; never pruned by age. */
+  defectsPath: string
   /** Checks run here: an interactive session, or a headless one the owner opted in with CLAUDE_OBSERVER_HEADLESS=1. */
   active: boolean
 }
@@ -99,6 +109,7 @@ async function load($: EngineInterface): Promise<Config> {
     dir,
     findingsPath: `${dir}/${sid}.md`,
     logPath: `${dir}/checks.log`,
+    defectsPath: `${dir}/defects.md`,
     active: interactive !== false || headless === '1',
   }
 }
@@ -273,7 +284,7 @@ async function checkOnce($: EngineInterface, c: Config, gen: number, messages: r
     }
   })
   if (!out.applied) return { kind: 'discarded', ms: now - t0, ...base, usage }
-  if (banded !== null) await update($, BAND, () => ({ text: banded.text, kind: banded.kind, at: now, prompts: 0 }))
+  if (banded !== null) await update($, BAND, () => ({ text: banded.text, kind: banded.kind, at: now, prompts: 0, fact: banded.fact }))
   if (found.length > 0) await appendBounded($, c.findingsPath, found.map(f => findingLine(f)), 500).catch(() => null)
   return {
     kind: 'checked',
@@ -363,7 +374,15 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
     await change($, v => ({ ...v, off: false }))
     return 'Наблюдатель в этой сессии включён: проверка после каждого ответа.'
   }
-  if (word !== '') return 'Команда: /observer — состояние и находки, /observer off | on — выключить или включить в этой сессии.'
+  if (word === 'saved' || word === 'недочёты' || word === 'недочеты') {
+    const text = await $.fs.read(c.defectsPath).catch(() => '')
+    const last = lastDefects(text, 10)
+    return last.length === 0
+      ? `Сохранённых недочётов пока нет. Сохраняет кнопка «сохранить» на полосе наблюдателя; файл: ${tilde(c.defectsPath, c.home)}`
+      : [`Последние сохранённые недочёты (${tilde(c.defectsPath, c.home)}):`, ...last].join('\n')
+  }
+  if (word !== '')
+    return 'Команда: /observer — состояние и находки; /observer недочёты — сохранённые недочёты; /observer off | on — выключить или включить в этой сессии.'
   const [s, now] = await Promise.all([readState($), $.clock.now()])
   const lines: string[] = []
   if (s.noTranscript) lines.push('Наблюдатель: хост этой сессии (SDK) не даёт плагинам транскрипт — здесь не работает.')
@@ -386,8 +405,56 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
     lines.push('', 'Счётчики (3 и больше за сессию):')
     for (const k of over) lines.push(`- ${k.label} × ${k.n} (${stamp(k.first, now)} … ${stamp(k.last, now)})`)
   }
-  lines.push('', `Файл находок: ${c.findingsPath}`, `Журнал проверок (время, токены): ${c.logPath}`)
+  lines.push(
+    '',
+    'Полоса над промптом: «в чат» (1) — подсказка в поле ввода, отправишь или допишешь; «сохранить» (2) — строкой в файл недочётов; «убрать» (0) — подсказка уходит совсем.',
+    '[-] справа на полосе — это движок: сворачивает всю полосу (ctrl+x ctrl+a), подсказка остаётся.',
+    '',
+    `Файл находок сессии: ${c.findingsPath}`,
+    `Сохранённые недочёты (все проекты, /observer недочёты): ${c.defectsPath}`,
+    `Журнал проверок (время, токены): ${c.logPath}`,
+  )
   return lines.join('\n')
+}
+
+const tilde = (path: string, home: string): string => (home !== '' && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path)
+
+/** «в чат»: the line into the prompt box (after a draft, never over it); no box at all → sent as the mod's message. */
+async function toChat($: EngineInterface, band: NonNullable<ObserverBand>): Promise<void> {
+  try {
+    const text = chatText(band)
+    const box = await $.prompt.read()
+    const draft = box.text.trim() !== ''
+    const r = await $.prompt.fill({ text: draft ? `\n${text}` : text, mode: draft ? 'append' : 'replace' })
+    if (r.isFilled) {
+      await update($, BAND, b => (b !== null && b.at === band.at ? null : b))
+      return
+    }
+    if (r.refusal === 'no_composer') {
+      await $.prompt.submit({ text })
+      await update($, BAND, b => (b !== null && b.at === band.at ? null : b))
+      return
+    }
+    $.ui.toast(r.refusal === 'dialog' ? 'Открыт диалог — ответь на него и нажми «в чат» ещё раз.' : 'Поле ввода не приняло текст.')
+  } catch (err) {
+    $.ui.toast(`Наблюдатель: не вставил в чат — ${String(err).slice(0, 80)}`)
+  }
+}
+
+/** «сохранить»: one line in the defects file; the band stays, its button says it is saved. */
+async function saveDefect($: EngineInterface, band: NonNullable<ObserverBand>): Promise<void> {
+  try {
+    const c = await config($)
+    const project = c.root.replace(/\/+$/, '').split('/').pop() ?? ''
+    const line = defectLine({ at: band.at, kind: band.kind, fact: band.fact === true, text: band.text, project, sid: c.sid })
+    const old = await $.fs.read(c.defectsPath).catch(() => '')
+    const next = withDefect(old, line, band.text)
+    if (next !== null) await $.fs.write(c.defectsPath, next)
+    await update($, BAND, b => (b !== null && b.at === band.at ? { ...b, saved: true } : b))
+    $.ui.toast(next === null ? `Уже в недочётах: ${tilde(c.defectsPath, c.home)}` : `Сохранено в недочёты: ${tilde(c.defectsPath, c.home)}`)
+  } catch (err) {
+    $.ui.toast(`Наблюдатель: не сохранил — ${String(err).slice(0, 80)}`)
+  }
 }
 
 export const register: Register = on => {
@@ -492,11 +559,20 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {below}
-        <Box flexDirection="row">
-          <Text color={band.kind === 'KNOW' ? 'cyan' : 'yellow'} wrap="wrap">
-            {`👁 ${band.kind === 'KNOW' ? 'знай' : 'повтор'}: ${band.text} `}
-          </Text>
-          <Button key="observer-hide" label="скрыть" onPress={() => update($, BAND, () => null)} />
+        <Text color={band.kind === 'KNOW' ? 'cyan' : 'yellow'} wrap="wrap">
+          {`👁 ${band.kind === 'KNOW' ? 'знай' : 'повтор'}: ${band.text}`}
+        </Text>
+        <Box flexDirection="row" gap={2}>
+          <Button key="observer-chat" plain hotkey="1" label="в чат" onPress={() => void toChat($, band)} />
+          <Button
+            key="observer-save"
+            plain
+            hotkey="2"
+            label={band.saved === true ? 'сохранено ✓' : 'сохранить'}
+            dimColor={band.saved === true}
+            onPress={() => void saveDefect($, band)}
+          />
+          <Button key="observer-hide" plain hotkey="0" role="dismiss" label="убрать" onPress={() => void update($, BAND, () => null)} />
         </Box>
       </Box>
     )

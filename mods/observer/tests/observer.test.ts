@@ -16,6 +16,10 @@ import {
   RULES_CAP,
   INVENTORY_CAP,
   clockTime,
+  chatText,
+  defectLine,
+  lastDefects,
+  withDefect,
 } from '../hooks/logic'
 
 const ROOT = '/home/fake/proj'
@@ -24,6 +28,7 @@ const SID = '11111111-2222-3333-4444-555555555555'
 const START = Date.UTC(2026, 9, 12, 9, 0)
 const USAGE = { input_tokens: 9000, output_tokens: 400, cache_read_input_tokens: 7000, cache_creation_input_tokens: 0 }
 const LOG = `${HOME}/.claude/state/observer/checks.log`
+const DEFECTS = `${HOME}/.claude/state/observer/defects.md`
 const FINDINGS = `${HOME}/.claude/state/observer/${SID}.md`
 
 type Call = { req: ModelCompleteInput; resolve: (r: ModelCompleteResult) => void }
@@ -36,6 +41,10 @@ type World = {
   prompts: { text: string; context: readonly string[] }[]
   commands: string[]
   clock: MockClock
+  /** The prompt box: its draft, and how a fill is refused (none → taken). */
+  box: string
+  refuse: 'no_composer' | 'dialog' | null
+  toasts: string[]
 }
 
 const answered = (text: string): ModelCompleteResult => ({ isAnswered: true, text, usage: USAGE })
@@ -57,6 +66,9 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
     prompts: [],
     commands: [],
     clock: mock.clock(on, { now: START }),
+    box: '',
+    refuse: null,
+    toasts: [],
   }
   mock.env(on, { HOME, CLAUDE_CODE_PLUGIN_DIRS: '/home/fake/kit/mods/stop-point:/home/fake/kit/mods/observer', ...opts.env })
   on('session.root', () => ({ value: ROOT }))
@@ -121,6 +133,16 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
   on('prompt.submit', (_$, e) => {
     w.prompts.push({ text: e.text, context: e.context ?? [] })
     return { text: e.text, ...(e.context === undefined ? {} : { context: e.context }) }
+  })
+  on('prompt.read', () => ({ value: { text: w.box, cursor: w.box.length } }))
+  on('prompt.fill', (_$, e) => {
+    if (w.refuse !== null) return { isFilled: false, refusal: w.refuse }
+    w.box = e.mode === 'replace' ? e.text : `${w.box}${e.text}`
+    return { isFilled: true }
+  })
+  on('ui.toast', (_$, e) => {
+    w.toasts.push(e.text)
+    return { value: undefined }
   })
   on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
     const { Text } = $.ui.resolve(e)
@@ -337,7 +359,7 @@ describe('counting by code', () => {
 })
 
 describe('what the observer says and where it goes', () => {
-  test('KNOW goes to the band above the prompt and to the findings file; «скрыть» takes it down', async ($, on) => {
+  test('KNOW goes to the band above the prompt and to the findings file; «убрать» takes it down', async ($, on) => {
     const w = world(on)
     await start($)
     w.reply = () => answered('NOTES:\n- сказал про revoke\nOUT:\nKNOW: На проде выполнен revoke connect — ты разрешал только dev-БД; проверь бэкап.')
@@ -434,6 +456,92 @@ describe('what the observer says and where it goes', () => {
   })
 })
 
+const CODE_STYLE_REPEAT =
+  'REPEAT: [rule-miss] FACT хук code-style × 6 (10:23…12:13) «Код пишется по конвенциям. Прочитай целиком» → hook: не сбрасывать замок при компакте, если файлы не менялись.'
+
+/** A REPEAT on a counted fact, in the band: the owner's real case (a hook firing six times). */
+async function bandedRepeat($: Engine, w: World): Promise<void> {
+  w.messages = [owner('a'), said('b', bash('sleep 1; true'), bash('sleep 1; true'), bash('sleep 1; true'))]
+  w.reply = () => answered(`NOTES:\n- n\nOUT:\n${CODE_STYLE_REPEAT}`)
+  await reply($)
+  await w.clock.settle()
+}
+
+describe('the band\'s actions: в чат, сохранить, убрать', () => {
+  test('«в чат» puts the hint in an empty prompt box, named as the observer\'s, and takes the band down; nothing is sent by itself', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await bandedRepeat($, w)
+    const ui = await $.ui.mount({ plugin: 'observer', surface: 'terminal', component: 'AbovePrompt', props: ABOVE_PROMPT })
+    expect(await ui.find({ type: 'Button', text: /в чат/ })).toBeDefined()
+    await ui.press({ key: 'observer-chat' })
+    expect(w.box).toBe('Наблюдатель (мод observer) отметил — повтор: [rule-miss] FACT хук code-style × 6 (10:23…12:13) «Код пишется по конвенциям. Прочитай целиком» → hook: не сбрасывать замок при компакте, если файлы не менялись.')
+    expect(await ui.find({ type: 'Text', text: /повтор/ })).toBeUndefined()
+    await ui.unmount()
+    expect(w.prompts).toHaveLength(0)
+  })
+
+  test('«в чат» keeps a draft the owner typed: the hint goes after it on a new line', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await bandedRepeat($, w)
+    w.box = 'почини это'
+    const ui = await $.ui.mount({ plugin: 'observer', surface: 'terminal', component: 'AbovePrompt', props: ABOVE_PROMPT })
+    await ui.press({ key: 'observer-chat' })
+    expect(w.box.startsWith('почини это\nНаблюдатель (мод observer) отметил — повтор: [rule-miss]')).toBe(true)
+    await ui.unmount()
+  })
+
+  test('«в чат» refused by the box says so and keeps the band (the engine\'s own dialog / no-box refusals carry a cause a test hook cannot give: checked live)', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await bandedRepeat($, w)
+    w.refuse = 'dialog'
+    const ui = await $.ui.mount({ plugin: 'observer', surface: 'terminal', component: 'AbovePrompt', props: ABOVE_PROMPT })
+    await ui.press({ key: 'observer-chat' })
+    expect(w.toasts.at(-1)).toBe('Поле ввода не приняло текст.')
+    expect(await ui.find({ type: 'Text', text: /повтор/ })).toBeDefined()
+    expect(w.prompts).toHaveLength(0)
+    await ui.unmount()
+  })
+
+  test('«сохранить» adds one line to the defects file under a header, keeps the band and says where; a second press adds nothing', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await bandedRepeat($, w)
+    const ui = await $.ui.mount({ plugin: 'observer', surface: 'terminal', component: 'AbovePrompt', props: ABOVE_PROMPT })
+    await ui.press({ key: 'observer-save' })
+    const saved = w.files.get(DEFECTS) ?? ''
+    expect(saved.startsWith('# Недочёты, отмеченные наблюдателем\n')).toBe(true)
+    const rows = saved.split('\n').filter(r => r.startsWith('- '))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatch(/^- \d{4}-\d\d-\d\d \d\d:\d\d · proj · повтор \(по счётчику\): \[rule-miss\] FACT хук code-style × 6 .* · сессия 11111111$/)
+    expect(w.toasts.at(-1)).toBe('Сохранено в недочёты: ~/.claude/state/observer/defects.md')
+    expect(await ui.find({ type: 'Text', text: /повтор/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', text: /сохранено ✓/ })).toBeDefined()
+    await ui.press({ key: 'observer-save' })
+    expect((w.files.get(DEFECTS) ?? '').split('\n').filter(r => r.startsWith('- '))).toHaveLength(1)
+    expect(w.toasts.at(-1)).toContain('Уже в недочётах')
+    await ui.unmount()
+    expect(w.prompts).toHaveLength(0)
+    const listed = (await run($, 'недочёты')).text
+    expect(listed).toContain('FACT хук code-style × 6')
+    expect(listed).toContain('~/.claude/state/observer/defects.md')
+  })
+
+  test('/observer explains the three buttons and the engine\'s [-], and names the defects file', async ($, on) => {
+    world(on)
+    await start($)
+    const text = (await run($)).text
+    expect(text).toContain('«в чат» (1)')
+    expect(text).toContain('«сохранить» (2)')
+    expect(text).toContain('«убрать» (0)')
+    expect(text).toContain('[-] справа')
+    expect(text).toContain(DEFECTS)
+    expect((await run($, 'saved')).text).toContain('Сохранённых недочётов пока нет')
+  })
+})
+
 describe('/observer', () => {
   test('shows the last findings, counters over the threshold and the cost; off stops the checks, on brings them back', async ($, on) => {
     const w = world(on)
@@ -463,6 +571,18 @@ describe('/observer', () => {
 })
 
 describe('pure parts', () => {
+  test('withDefect keeps the header, bounds the entries and refuses the same text twice', () => {
+    const line = (n: number) => defectLine({ at: START + n * 60_000, kind: 'KNOW', fact: false, text: `находка ${n}`, project: 'proj', sid: SID })
+    let text = ''
+    for (let n = 0; n < 5; n++) text = withDefect(text, line(n), `находка ${n}`, 3) ?? text
+    const rows = text.split('\n')
+    expect(rows[0]).toBe('# Недочёты, отмеченные наблюдателем')
+    expect(lastDefects(text, 10).map(r => r.replace(/^.*: /, '').replace(/ · сессия.*$/, ''))).toEqual(['находка 2', 'находка 3', 'находка 4'])
+    expect(withDefect(text, line(4), 'находка 4', 3)).toBeNull()
+    expect(withDefect(text, line(4), 'находка', 3)).not.toBeNull() // a prefix of a saved text is not the same text
+    expect(chatText({ kind: 'KNOW', text: 'раз\n  два' })).toBe('Наблюдатель (мод observer) отметил — знай: раз два')
+  })
+
   test('parseReply: strict NOTES/OUT, one line per job, fences tolerated', () => {
     expect(parseReply('NOTES:\n- a\nOUT:\n')).toMatchObject({ ok: true, notes: '- a', know: null, repeat: null })
     expect(parseReply('```\nNOTES:\n- a\nOUT:\nKNOW: x y\n```')).toMatchObject({ ok: true, know: 'x y' })

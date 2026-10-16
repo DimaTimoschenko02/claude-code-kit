@@ -78,6 +78,10 @@ export type ObserverBand = {
   at: number
   /** Owner prompts since it appeared; it goes after BAND_PROMPTS of them. */
   prompts: number
+  /** A REPEAT resting on a counted fact; absent on a band from before 0.2. */
+  fact?: boolean
+  /** The owner saved it to the defects file (the button then reads «сохранено»). */
+  saved?: boolean
 } | null
 
 declare module 'claude-code' {
