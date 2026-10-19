@@ -32,10 +32,15 @@ type World = {
   draft: string
   reads: number
   played: string[]
+  playedAt: number[]
   spoken: { text: string; voice?: string }[]
   submitted: PromptSubmitInput[]
   fills: string[]
+  /** ~/.claude/state/dictate/voice.log as the mod left it. */
+  log: string
 }
+
+const LOG = '/home/fake/.claude/state/dictate/voice.log'
 
 function world(on: On): World {
   const w: World = {
@@ -43,12 +48,22 @@ function world(on: On): World {
     draft: '',
     reads: 0,
     played: [],
+    playedAt: [],
     spoken: [],
     submitted: [],
     fills: [],
+    log: '',
   }
   mock.env(on, { HOME: '/home/fake' })
   on('fs.stat', ($, e) => ({ deny: `ENOENT: ${e.path}` }))
+  on('fs.read', ($, e) => (e.path === LOG && w.log !== '' ? { value: w.log } : { deny: `ENOENT: ${e.path}` }))
+  on('fs.write', ($, e) => {
+    if (e.path !== LOG) return { deny: `unexpected write: ${e.path}` }
+    w.log = e.text
+    return { value: undefined }
+  })
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '+0300\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('session.id', () => ({ value: 'ada8bcdd-0000-4000-8000-000000000000' }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
@@ -58,6 +73,7 @@ function world(on: On): World {
   })
   on('audio.play', ($, e) => {
     if (e.clip.asset !== undefined) w.played.push(e.clip.asset)
+    w.playedAt.push(w.clock.now())
     return { value: undefined }
   })
   on('audio.speak', ($, e) => {
@@ -113,6 +129,26 @@ async function dictate(w: World, text: string, ms: number): Promise<void> {
     await w.clock.advance(step)
   }
 }
+
+/**
+ * A first recording after an idle spell: voice mode buffers the audio while it
+ * connects (`[voice] startRecording: buffering audio while WebSocket connects`)
+ * and the box stays empty; once connected it shows everything said so far at
+ * once, then goes on word by word. Its 120 s cap counts from the tap.
+ */
+async function dictateAfterSlowConnect(w: World, text: string, connectMs: number, totalMs: number): Promise<void> {
+  const words = text.split(' ')
+  const perWord = totalMs / words.length
+  await w.clock.advance(connectMs)
+  const said = Math.floor(connectMs / perWord)
+  w.draft = words.slice(0, said).join(' ')
+  for (let i = said + 1; i <= words.length; i++) {
+    await w.clock.advance(perWord)
+    w.draft = words.slice(0, i).join(' ')
+  }
+}
+
+const logLines = (w: World) => w.log.split('\n').filter(line => line !== '')
 
 /** The engine putting a dropped prompt back in the box (REPL `hI`/`gI`). */
 const land = (draft: string, text: string) => (draft.trim() === '' ? text : `${draft}\n${text}`)
@@ -318,5 +354,63 @@ describe('voice cuts in a pack', () => {
     const long = `${'а'.repeat(300)}. ${'б'.repeat(100)}. ${'в '.repeat(60)}и вот,`
     await send($, w, long)
     expect((await bandLines($))[1]).toBe(`${label}…${'б'.repeat(100)}. ${'в '.repeat(60)}и вот,`)
+  })
+
+  // 2026-10-19: the first chunk of a pack ran into the 2-minute cap with no
+  // warning and no cut beep, and was held as the owner's own stop; the next
+  // chunks of the same pack warned. The cap counts from the tap, the mod
+  // counted from the first text the box showed.
+  test('a first recording after a slow connect still warns ~15 s before the cap and reads as the cap', async ($, on) => {
+    const w = world(on)
+    await run($)
+    const talk = `${'Так, смотри, по задачам в базе: тип, слой, кто просил и зачем. '.repeat(21)}и вот`
+    const tap = w.clock.now()
+    await dictateAfterSlowConnect(w, talk, 13 * SEC, 119 * SEC)
+    expect(w.played[0]).toBe('sounds/warn.wav')
+    const lead = 120 * SEC - ((w.playedAt[0] ?? Infinity) - tap)
+    expect(lead).toBeGreaterThanOrEqual(10 * SEC)
+    expect(lead).toBeLessThanOrEqual(20 * SEC)
+    await w.clock.advance(1 * SEC)
+    const out = await send($, w, talk)
+    expect(out.drop).toBe(`${HELD(1)} · ✂ запись оборвалась (лимит 2 мин) — где, видно над полем ввода`)
+    expect(w.played).toEqual(['sounds/warn.wav', 'sounds/cut.wav'])
+  })
+
+  test('a key typed and erased before the tap does not silence the next recording', async ($, on) => {
+    const w = world(on)
+    await run($)
+    const editor = $.prompt as unknown as { edit: (e: PromptEditInput) => Promise<unknown> }
+    await editor.edit({ origin: ME, key: { key: 'ф' }, text: '', cursor: 0, start: 0, end: 0, inputText: 'ф' })
+    w.draft = 'ф'
+    await w.clock.advance(2 * SEC)
+    await editor.edit({ origin: ME, key: { key: 'backspace' }, text: 'ф', cursor: 1, start: 0, end: 1, inputText: '' })
+    w.draft = ''
+    await w.clock.advance(2 * SEC)
+    await dictate(w, CAPPED, 119 * SEC)
+    expect(w.played).toEqual(['sounds/warn.wav'])
+    expect((await send($, w, CAPPED)).drop).toContain('✂ запись оборвалась')
+  })
+
+  test('every warning and held chunk is a line in the voice log, shown by /pack log', async ($, on) => {
+    const w = world(on)
+    expect((await run($, 'log')).text).toBe('журнал записей пуст: ~/.claude/state/dictate/voice.log')
+    await run($)
+    await dictate(w, CAPPED, 119 * SEC)
+    await send($, w, CAPPED)
+    const own = 'Контроллер модуль, ну, окей. Дальше смотрим сервисы.'
+    await dictate(w, own, 20 * SEC)
+    await send($, w, own)
+    await send($, w, `${'слово '.repeat(120)}как tag,`)
+    const lines = logLines(w)
+    expect(lines).toHaveLength(4)
+    expect(lines[0]).toMatch(/^2023-11-15 01:\d\d:\d\d ada8bcdd warn played · 10[3-4] s since the speech began$/)
+    expect(lines[1]).toMatch(/ ada8bcdd chunk 1: cap, 119 chars · 11[89] s since the speech began, still \d s · warned$/)
+    expect(lines[2]).toMatch(/ chunk 2: own, 52 chars · 2\d s since the speech began, still \d s · no warning$/)
+    expect(lines[3]).toMatch(/ chunk 3: cap, 728 chars · the box never showed it, judged by its end$/)
+    const shown = (await run($, 'log')).text ?? ''
+    expect(shown.split('\n')).toEqual([
+      'журнал записей (~/.claude/state/dictate/voice.log), последние 4:',
+      ...lines,
+    ])
   })
 })

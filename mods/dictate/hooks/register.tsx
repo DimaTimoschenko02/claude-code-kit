@@ -22,6 +22,13 @@ import type { DictateBatch, DictateCut } from '../types'
 // band above the prompt until the next chunk — where to pick up. A capped
 // chunk is marked in the batch so the model expects a repeat.
 //
+// The cap counts from the tap, but the box shows nothing until voice mode has
+// connected: on a slow connect (the first recording after an idle spell) it
+// buffers the audio and then shows several seconds of speech at once. The
+// start is put back by how long that first text took to say, so the warning
+// still comes ~15 s before the cap. Every warning and held chunk is a line in
+// ~/.claude/state/dictate/voice.log (`/pack log`), to check a missed beep later.
+//
 // The box: the engine puts a dropped prompt back into the prompt box (as the
 // draft, or after it on a new line — read from 2.1.296). Every held chunk is a
 // drop, so without care the whole chunk stayed in the box: voice mode would not
@@ -43,9 +50,13 @@ const HELD = (count: number) =>
   `📥 в пачке ${count} — «всё» или /pack, чтобы отправить; /pack cancel — сбросить`
 
 // Voice mode's own limits (Claude Code 2.1.289, tap mode): 120 s cap, 15 s
-// silence. The box shows the first words a second or two after the tap, so the
-// thresholds below are measured from then and sit a little under the limits.
+// silence. The thresholds below count from when the speech began (the first
+// text, put back by how long it took to say) and sit a little under the limits.
 const POLL_MS = 1000
+// A brisk speaking rate: the first text is put back by at most what it took to say.
+const FAST_CHARS_PER_S = 15
+// Voice mode stops 15 s after the tap when no word came, so no start is later than that.
+const MAX_BACKDATE_MS = 14_000
 const WARN_AFTER_MS = 103_000
 const CAP_SEEN_MS = 108_000
 const SILENCE_SEEN_MS = 12_000
@@ -63,23 +74,34 @@ const REPEAT_PREFIX_CHARS = 40
 const ENDS_SENTENCE = /[.!?…»")\]]\s*$/u
 // Keys that move or send rather than type; space is voice mode's tap key.
 const NOT_TYPING: ReadonlySet<string> = new Set([' ', 'space', 'return', 'escape', 'up', 'down', 'left', 'right', 'tab'])
+const LOG_PATH = '~/.claude/state/dictate/voice.log'
+const LOG_KEEP = 300
+const LOG_SHOWN = 12
 
 type Dollar = EngineInterface
 type Taken = { value: DictateBatch | null }
 type Stop = DictateCut['stop']
 type Held = { count: number; text: string | null }
 type Recording = {
+  /** When the speech began: the first sight of text, put back by `backdatedMs`. */
   startedAt: number
   lastText: string
   lastChangeAt: number
   isWarned: boolean
+  /** How long the text seen first took to say (0 for a word or two). */
+  backdatedMs: number
+  firstChars: number
 }
 
 // Module state: a hot reload empties it; session.start re-arms the watch.
 let watcher: Timer | undefined
 let recording: Recording | undefined
-// A key was typed into the draft since the last send: that send is the person's own.
+// A key was typed into the draft since the box was last empty: the next send is the person's own.
 let isTyped = false
+// The voice log: lines written one after another; the zone and session read once.
+let logChain: Promise<void> = Promise.resolve()
+let tzOffsetMin: number | undefined
+let sessionId: string | undefined
 
 // ---------------------------------------------------------------- batch state
 
@@ -216,8 +238,9 @@ async function toggle($: Dollar, arg: string): Promise<CommandRunResult> {
           : `🗑 пачка сброшена (${taken.messages.length} сообщ.)`,
     }
   }
+  if (arg === 'log') return { text: await logTail($) }
   if (arg !== '') {
-    return { text: 'пачка: /pack — включить или отправить; /pack cancel — сбросить' }
+    return { text: 'пачка: /pack — включить или отправить; /pack cancel — сбросить; /pack log — журнал записей' }
   }
   const current = await liveBatch($)
   if (current === null) {
@@ -272,12 +295,22 @@ async function observe($: Dollar): Promise<void> {
   const now = await $.clock.now()
   const text = box.text.trim()
   if (text === '') {
+    // Voice mode records only into an empty box: what was typed before is gone.
     recording = undefined
+    isTyped = false
     return
   }
   const isNewBurst = recording === undefined || now - recording.lastChangeAt > NEW_BURST_MS
   if (isNewBurst && text !== recording?.lastText) {
-    recording = { startedAt: now, lastText: text, lastChangeAt: now, isWarned: false }
+    const backdatedMs = Math.min(MAX_BACKDATE_MS, Math.round((text.length / FAST_CHARS_PER_S) * 1000))
+    recording = {
+      startedAt: now - backdatedMs,
+      lastText: text,
+      lastChangeAt: now,
+      isWarned: false,
+      backdatedMs,
+      firstChars: text.length,
+    }
     return
   }
   if (recording === undefined) return
@@ -285,7 +318,12 @@ async function observe($: Dollar): Promise<void> {
   const isMoving = now - recording.lastChangeAt < SILENCE_SEEN_MS
   if (!recording.isWarned && !isTyped && isMoving && now - recording.startedAt >= WARN_AFTER_MS) {
     recording = { ...recording, isWarned: true }
-    await $.audio.play({ asset: 'sounds/warn.wav' }).catch(() => undefined)
+    const seen = recording
+    const outcome = await $.audio.play({ asset: 'sounds/warn.wav' }).then(
+      () => 'played',
+      (err: unknown) => `failed: ${oneLine(String(err))}`,
+    )
+    record($, `warn ${outcome} · ${sinceStart(seen, now)}`)
   }
 }
 
@@ -298,6 +336,79 @@ function classifyStop(seen: Recording | undefined, now: number, text: string): S
   if (now - seen.lastChangeAt >= SILENCE_SEEN_MS) return 'silence'
   if (now - seen.startedAt >= CAP_SEEN_MS) return 'cap'
   return 'own'
+}
+
+const secs = (ms: number) => `${Math.round(ms / 1000)} s`
+const oneLine = (text: string) => text.replace(/\s+/gu, ' ').trim().slice(0, 200)
+
+/** How long a recording ran, and how much of its start was put back. */
+function sinceStart(seen: Recording, now: number): string {
+  const put = seen.backdatedMs >= 1000 ? `, ${secs(seen.backdatedMs)} put back for ${seen.firstChars} chars at once` : ''
+  return `${secs(now - seen.startedAt)} since the speech began${put}`
+}
+
+/** The log line of a held chunk: who stopped it and what the box showed of it. */
+export function chunkLine(
+  count: number,
+  stop: Stop,
+  chars: number,
+  seen: Recording | undefined,
+  now: number,
+  wasTyped: boolean,
+): string {
+  const head = `chunk ${count}: ${stop}, ${chars} chars`
+  if (wasTyped) return `${head} · typed into the box`
+  if (seen === undefined) return `${head} · the box never showed it, judged by its end`
+  const warned = seen.isWarned ? 'warned' : 'no warning'
+  return `${head} · ${sinceStart(seen, now)}, still ${secs(now - seen.lastChangeAt)} · ${warned}`
+}
+
+/** Local `YYYY-MM-DD HH:MM:SS` at a UTC offset in minutes. */
+export function stamp(ms: number, offsetMin: number): string {
+  const d = new Date(ms + offsetMin * 60_000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return (
+    `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
+  )
+}
+
+async function zoneOffset($: Dollar): Promise<number> {
+  const out = await $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).catch(() => null)
+  const m = /([+-])(\d{2})(\d{2})/u.exec(out?.stdout ?? '')
+  if (m === null) return -new Date().getTimezoneOffset()
+  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]))
+}
+
+async function logFile($: Dollar): Promise<string | undefined> {
+  home ??= await $.env.get('HOME')
+  return home === undefined ? undefined : `${home}${LOG_PATH.slice(1)}`
+}
+
+async function writeLine($: Dollar, text: string): Promise<void> {
+  const path = await logFile($)
+  if (path === undefined) return
+  tzOffsetMin ??= await zoneOffset($)
+  sessionId ??= await $.session.id()
+  const old = await $.fs.read(path).catch(() => '')
+  const lines = typeof old === 'string' && old !== '' ? old.replace(/\n$/u, '').split('\n') : []
+  lines.push(`${stamp(await $.clock.now(), tzOffsetMin)} ${sessionId.slice(0, 8)} ${text}`)
+  await $.fs.write(path, `${lines.slice(-LOG_KEEP).join('\n')}\n`)
+}
+
+/** One line in the voice log, off the caller's clock; a lost line never stops dictation. */
+function record($: Dollar, text: string): void {
+  $.clock.after(0, () => {
+    logChain = logChain.then(() => writeLine($, text)).catch(() => undefined)
+  })
+}
+
+async function logTail($: Dollar): Promise<string> {
+  const path = await logFile($).catch(() => undefined)
+  const text = path === undefined ? '' : await $.fs.read(path).catch(() => '')
+  const lines = typeof text === 'string' ? text.split('\n').filter(line => line.trim() !== '') : []
+  if (lines.length === 0) return `журнал записей пуст: ${LOG_PATH}`
+  return [`журнал записей (${LOG_PATH}), последние ${Math.min(LOG_SHOWN, lines.length)}:`, ...lines.slice(-LOG_SHOWN)].join('\n')
 }
 
 /** The last sentences of a chunk (up to 3, about 320 chars): where it stopped. */
@@ -422,8 +533,8 @@ export const register: Register = on => {
     await $.command
       .register({
         name: 'pack',
-        description: 'Пачка диктовки: включить или отправить, работает и посреди хода; /pack cancel — сбросить',
-        argumentHint: '[cancel]',
+        description: 'Пачка диктовки: включить или отправить, работает и посреди хода; /pack cancel — сбросить; /pack log — журнал записей',
+        argumentHint: '[cancel | log]',
         immediate: true,
       })
       .catch(err => $.ui.log(`dictate: /pack not registered: ${String(err)}`, { to: 'debug' }))
@@ -451,13 +562,19 @@ export const register: Register = on => {
       )
       return next(await withTerms($, e))
     }
-    const stop = classifyStop(recording, await $.clock.now(), e.text)
+    const now = await $.clock.now()
+    const seen = recording
+    const wasTyped = isTyped
+    const stop = classifyStop(seen, now, e.text)
     recording = undefined
     isTyped = false
     const held = await hold($, e.text, stop === 'cap')
     if (held.count === 0) return next(await withTerms($, e))
     const added = held.text
-    if (added !== null) await update($, cut, () => ({ stop, excerpt: excerpt(added) }))
+    if (added !== null) {
+      await update($, cut, () => ({ stop, excerpt: excerpt(added) }))
+      record($, chunkLine(held.count, stop, added.length, seen, now, wasTyped))
+    }
     if (stop !== 'own') beep($)
     return drop($, e.text, heldLine(held.count, stop, added === null))
   })
@@ -465,7 +582,10 @@ export const register: Register = on => {
   // Typing into the draft makes the next send the person's own, not a voice cut.
   // Hot event: a flag and nothing else, and only while a batch is watched.
   on('prompt.edit', (_$, e, next) => {
-    if (watcher !== undefined && e.key !== undefined && !NOT_TYPING.has(e.key.key)) isTyped = true
+    if (watcher !== undefined && e.key !== undefined && !NOT_TYPING.has(e.key.key)) {
+      const after = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+      isTyped = after.trim() !== ''
+    }
     return next(e)
   })
 
