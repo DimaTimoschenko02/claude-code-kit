@@ -1,0 +1,8 @@
+{
+  "name": "plain-quotes",
+  "version": "0.1.0",
+  "author": {
+    "name": "Dima Timoschenko"
+  },
+  "description": "Draws blockquotes in Claude's replies as plain paragraphs on the terminal, so a mouse copy of a draft takes no quote bar along."
+}
