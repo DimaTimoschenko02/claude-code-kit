@@ -89,10 +89,14 @@ else
   cp "$PKG_DIR/payload/hooks/_lib/bash-write-targets.py" "$PKG_DIR/payload/hooks/_lib/shell_text.py" "$CLAUDE_DIR/hooks/_lib/"
 fi
 # skill-invocation-log.sh is shared with cc-learning-log -> keep an existing copy
-# (both emit identical jsonl; learning-log's may be the richer _lib-based one).
+# (both emit identical jsonl; learning-log's may be the richer _lib-based one) — unless it predates agent_id: the gate
+# matches a subagent's record by agent_id, so an old copy makes it refuse every subagent, silently and for good.
 dest_log="$CLAUDE_DIR/hooks/skill-invocation-log.sh"
-if [ -f "$dest_log" ]; then
+if [ -f "$dest_log" ] && grep -q 'agent_id' "$dest_log"; then
   echo "kept existing skill-invocation-log.sh (shared logger; not overwritten)" >&2
+elif [ -f "$dest_log" ]; then
+  cp "$PKG_DIR/payload/hooks/skill-invocation-log.sh" "$dest_log"
+  echo "replaced skill-invocation-log.sh: the old copy did not log agent_id, so the gate refused every subagent" >&2
 else
   cp "$PKG_DIR/payload/hooks/skill-invocation-log.sh" "$dest_log"
 fi
