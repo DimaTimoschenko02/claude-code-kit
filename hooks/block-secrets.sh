@@ -28,9 +28,16 @@ tool=$(jq -r '.tool_name // ""' <<<"$input")
 
 deny() {
   echo "🛑 BLOCKED by block-secrets.sh: $1" >&2
-  echo "   If this is a false positive, the rule lives in ~/.claude/hooks/block-secrets.sh" >&2
+  echo "   If this is a false positive, the rule lives in ${BASH_SOURCE[0]}" >&2
   exit 2
 }
+
+# Codex CLI sends the same payload shape as Claude Code: shell is tool_name "Bash"
+# (unified exec may come as "exec_command") with tool_input.command, and file edits
+# come as "apply_patch" with the patch text in tool_input.command.
+case "$tool" in
+  exec_command) tool=Bash ;;
+esac
 
 # Path patterns considered sensitive — any read/write/edit/grep/glob on these is blocked
 is_sensitive_path() {
@@ -68,6 +75,16 @@ case "$tool" in
       deny "tried to grep/glob sensitive path: $path / $pattern"
     fi
     ;;
+  apply_patch)
+    # Codex patch headers name every touched file: "*** Add File: p", "*** Update File: p",
+    # "*** Delete File: p", "*** Move to: p".
+    patch=$(jq -r '.tool_input.command // .tool_input.input // ""' <<<"$input")
+    while IFS= read -r path; do
+      if [ -n "$path" ] && is_sensitive_path "$path"; then
+        deny "patch touches sensitive file: $path"
+      fi
+    done < <(sed -nE 's/^\*\*\* (Add File|Update File|Delete File|Move to): (.*)$/\2/p' <<<"$patch")
+    ;;
   WebFetch)
     # Claude has no legit reason to WebFetch a local file:// URL — that bypasses the Read guard.
     url=$(jq -r '.tool_input.url // ""' <<<"$input")
@@ -76,7 +93,7 @@ case "$tool" in
     fi
     ;;
   Bash)
-    cmd=$(jq -r '.tool_input.command // ""' <<<"$input")
+    cmd=$(jq -r '.tool_input.command // .tool_input.cmd // ""' <<<"$input")
 
     # Known credential-file suffixes / path literals. Kept WITHOUT bare "secret"/"password"
     # words on purpose (see DESIGN CONSTRAINT above).
