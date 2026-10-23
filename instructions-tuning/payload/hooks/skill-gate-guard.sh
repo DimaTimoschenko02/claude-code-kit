@@ -85,6 +85,33 @@ hook_log pass
 LOG="$ROOT/.claude/state/skill-invocations.jsonl"
 [ -f "$LOG" ] || exit 0   # logger hasn't written yet -> fail-open
 
+# Whose context is this? Inside a subagent `transcript_path` is the PARENT's transcript: the parent's compaction does
+# not touch the subagent's context, yet the gate read it as a reset and re-locked a coder that had loaded the skill
+# minutes earlier (41 of 51 coder blocks, 09–23.10). A subagent's own transcript is
+# <project-dir>/<session_id>/subagents/**/agent-<agent_id>.jsonl; its own compactions and skill re-attachments are there.
+# Not found -> fail-open, logged, never the parent's file.
+aid_early=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
+if [ -n "$aid_early" ]; then
+  own=$(printf '%s' "$input" | jq -r '.agent_transcript_path // empty' 2>/dev/null)
+  if [ -z "$own" ] || [ ! -f "$own" ]; then
+    own=""
+    case "$transcript" in
+      */subagents/*agent-"$aid_early".jsonl) own="$transcript" ;;
+      ?*)
+        sid_early=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+        proj_dir=$(dirname "$transcript")
+        case "$transcript" in */subagents/*) proj_dir=$(dirname "${transcript%%/subagents/*}") ;; esac
+        [ -n "$sid_early" ] && [ -d "$proj_dir/$sid_early/subagents" ] && \
+          own=$(find "$proj_dir/$sid_early/subagents" -name "agent-$aid_early.jsonl" 2>/dev/null | head -1) ;;
+    esac
+  fi
+  if [ -z "$own" ] || [ ! -f "$own" ]; then
+    hook_log skip "no subagent transcript"
+    exit 0
+  fi
+  transcript="$own"
+fi
+
 # Context-reset boundary = later of (session start, last /compact). Compaction is
 # recorded as a type:user entry with isCompactSummary:true; otherwise the earliest
 # transcript timestamp is the session start.
@@ -107,10 +134,9 @@ fi
 # `invoked_skills`, each cut at 20 000 chars). A skill re-attached whole is still in context, so that compaction did not
 # reset it — denying it only made the session re-load the skill and resend the write (31 bounces in 4 sessions,
 # 06–11.10). Only the attachment that follows the last compact summary in file order counts (both carry the same
-# second), and only for the main thread: the attachment is the main context, not a subagent's.
+# second). A subagent's own compaction re-attaches its skills in its own file, which `transcript` points at by now.
 restored=""   # one skill name per line, as invoked ("pricehub:code-style" or "code-style")
-aid_early=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
-if [ -z "$aid_early" ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
+if [ -n "$transcript" ] && [ -f "$transcript" ]; then
   compact_line=$(grep -n '"isCompactSummary":true' "$transcript" 2>/dev/null | tail -1 | cut -d: -f1)
   skills_hit=$(grep -n '"type":"invoked_skills"' "$transcript" 2>/dev/null | tail -1)
   skills_line=${skills_hit%%:*}

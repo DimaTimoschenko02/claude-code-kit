@@ -29,7 +29,8 @@ def skills(ts, *named):
 
 
 class Gate(unittest.TestCase):
-    def run_gate(self, transcript_lines, invocations, agent_id=None, agent_type=None, agents=None):
+    def run_gate(self, transcript_lines, invocations, agent_id=None, agent_type=None, agents=None,
+                 agent_lines=(), agent_invocations=(), agent_file=True):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, ".claude", "state"))
             os.makedirs(os.path.join(root, ".claude", "agents"))
@@ -41,9 +42,17 @@ class Gate(unittest.TestCase):
             with open(os.path.join(root, ".claude", "state", "skill-invocations.jsonl"), "w") as f:
                 for ts in invocations:
                     f.write(json.dumps({"skill": "vault-write", "ts": ts, "session_id": SID}) + "\n")
-            transcript = os.path.join(root, "t.jsonl")
+                for ts in agent_invocations:
+                    f.write(json.dumps({"skill": "vault-write", "ts": ts, "session_id": SID, "agent_id": agent_id}) + "\n")
+            transcript = os.path.join(root, SID + ".jsonl")
             with open(transcript, "w") as f:
                 f.write("\n".join([entry("2026-10-11T10:00:00.000Z", type="user")] + transcript_lines) + "\n")
+            if agent_id and agent_file:
+                # Claude Code's layout: <project-dir>/<session_id>/subagents/agent-<agent_id>.jsonl
+                sub = os.path.join(root, SID, "subagents")
+                os.makedirs(sub)
+                with open(os.path.join(sub, "agent-" + agent_id + ".jsonl"), "w") as f:
+                    f.write("\n".join([entry("2026-10-11T10:30:00.000Z", type="user")] + list(agent_lines)) + "\n")
             payload = {"tool_name": "Write", "tool_input": {"file_path": os.path.join(root, "brain", "n.md")},
                        "transcript_path": transcript, "cwd": root, "session_id": SID}
             if agent_id:
@@ -100,6 +109,28 @@ class Gate(unittest.TestCase):
     def test_preload_is_found_by_name_not_by_another_agent(self):
         agents = {"reader.md": "name: reader\nskills:\n  - vault-write", "coder.md": "name: coder"}
         self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", agents=agents), 2)
+
+
+    # Inside a subagent `transcript_path` is the parent's transcript. The parent's compaction left the subagent's context
+    # alone, yet the gate re-locked it: 41 of 51 coder blocks, 09–23.10, hit a coder that had loaded the skill.
+    def test_parent_compaction_does_not_reset_a_subagent(self):
+        self.assertEqual(self.run_gate([compact("2026-10-11T12:00:00.000Z")], [], agent_id="a-1",
+                                       agent_invocations=["2026-10-11T11:00:00.000Z"]), 0)
+
+    def test_subagent_own_compaction_resets(self):
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_lines=[compact("2026-10-11T12:00:00.000Z")],
+                                       agent_invocations=["2026-10-11T11:00:00.000Z"]), 2)
+
+    def test_subagent_own_reattachment_passes(self):
+        lines = [compact("2026-10-11T12:00:00.000Z"), skills("2026-10-11T12:00:00.000Z", ("vault-write", 1083))]
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_lines=lines,
+                                       agent_invocations=["2026-10-11T11:00:00.000Z"]), 0)
+
+    def test_subagent_load_before_its_start_does_not_count(self):
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_invocations=["2026-10-11T10:10:00.000Z"]), 2)
+
+    def test_subagent_without_its_transcript_fails_open(self):
+        self.assertEqual(self.run_gate([compact("2026-10-11T12:00:00.000Z")], [], agent_id="a-1", agent_file=False), 0)
 
 
 if __name__ == "__main__":
