@@ -12,7 +12,7 @@ const ME = { kind: 'composer' } as const
 const PRESENTATION = { isFullscreen: true, columns: 120 }
 const SEC = 1000
 const HELD = (n: number) =>
-  `📥 в пачке ${n} — «всё» или /pack, чтобы отправить; /pack cancel — сбросить`
+  `📥 в пачке ${n} — «всё» отдельно или последней фразой («… сделать. Всё.») или /pack — отправить; /pack cancel — сбросить`
 // Chunk 5 of the same pack, cut mid-sentence.
 const CHUNK_5 =
   'Модули, контроллеры. Ну, к модулям, контроллерам вроде вопросов нету. К сервисам. ' +
@@ -179,7 +179,7 @@ describe('voice cuts in a pack', () => {
     expect(w.played).toEqual(['sounds/warn.wav', 'sounds/cut.wav'])
     expect(w.spoken).toEqual([])
     expect(await bandLines($)).toEqual([
-      'пачка: 1 · всё — отправить · /pack cancel',
+      'пачка: 1 · всё (отдельно или последней фразой) — отправить · /pack cancel',
       `✂ запись оборвалась (лимит 2 мин), конец: ${CAPPED}`,
     ])
   })
@@ -197,6 +197,24 @@ describe('voice cuts in a pack', () => {
         `1. ${CAPPED}${CUT_MARK}\n\n` +
         '2. Бля, я хз, в каком моменте прервалось. Про фильтры повторю.',
     )
+  })
+
+  test('a cut ending in «все» mid-sentence is held; a chunk ending «Все.» after a long talk sends unmarked', async ($, on) => {
+    const w = world(on)
+    await run($)
+    const cutText = `${CAPPED} и потом проверь их все`
+    await dictate(w, cutText, 119 * SEC)
+    expect(await send($, w, cutText)).toEqual({ drop: `${HELD(1)} · ✂ запись оборвалась (лимит 2 мин) — где, видно над полем ввода` })
+    const last = 'Про фильтры повторю, теперь целиком. Все.'
+    await dictate(w, last, 119 * SEC)
+    const released = await send($, w, last)
+    expect(released.text).toBe(
+      'Пачка из 2 сообщений, надиктованных подряд — одна задача:\n\n' +
+        `1. ${cutText}${CUT_MARK}\n\n2. Про фильтры повторю, теперь целиком.`,
+    )
+    expect(w.played.filter(a => a === 'sounds/cut.wav')).toHaveLength(1)
+    expect(await bandLines($)).toEqual([])
+    expect(w.log).toMatch(/chunk 2: \w+, \d+ chars .* · ended with the end word, pack sent\n$/)
   })
 
   test('a 15-second pause that stopped the recording beeps and shows, not marked', async ($, on) => {
@@ -277,7 +295,7 @@ describe('voice cuts in a pack', () => {
     await dictate(w, 'Функция create в tag-сервисе. Дальше.', 10 * SEC)
     await send($, w, 'Функция create в tag-сервисе. Дальше.')
     expect(await bandLines($)).toEqual([
-      'пачка: 2 · всё — отправить · /pack cancel',
+      'пачка: 2 · всё (отдельно или последней фразой) — отправить · /pack cancel',
       '✓ в пачке, конец: Функция create в tag-сервисе. Дальше.',
     ])
 

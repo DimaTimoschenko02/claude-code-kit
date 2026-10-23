@@ -12,8 +12,8 @@ const ME = { kind: 'composer' } as const
 const PRESENTATION = { isFullscreen: true, columns: 120 }
 const HOUR = 60 * 60 * 1000
 const HELD = (n: number) =>
-  `📥 в пачке ${n} — «всё» или /pack, чтобы отправить; /pack cancel — сбросить`
-const BAND = 'пачка: 2 · всё — отправить · /pack cancel'
+  `📥 в пачке ${n} — «всё» отдельно или последней фразой («… сделать. Всё.») или /pack — отправить; /pack cancel — сбросить`
+const BAND = 'пачка: 2 · всё (отдельно или последней фразой) — отправить · /pack cancel'
 
 type File = { text: string; mtimeMs: number }
 type World = {
@@ -155,6 +155,69 @@ describe('batch', () => {
     expect(await say($, 'всё, но не совсем')).toEqual({ drop: HELD(1) })
   })
 
+  // Dima's own dictation of 2026-10-23, transcribed by voice mode: «Все.» with е, capital, period.
+  const ASKED =
+    'Но я бы хотел, чтобы еще оно считывало если последнее мое слово это все, то оно автоматически ' +
+    'заканчивало на этом сообщении, и отправляло его. Вот, например, если бы текущее сообщение ' +
+    'закончилось так, закончится, то оно бы сразу отправилось. Точка.'
+
+  test('an end word as the last sentence sends the pack with that message, the word left out', async ($, on) => {
+    const w = world(on)
+    await run($, 'pack')
+    expect(await say($, 'когда я записываю голосовое через пак, я должен написать все.')).toEqual({ drop: HELD(1) })
+    const released = await say($, `${ASKED} Все.`)
+    const expected =
+      'Пачка из 2 сообщений, надиктованных подряд — одна задача:\n\n' +
+      `1. когда я записываю голосовое через пак, я должен написать все.\n\n2. ${ASKED}`
+    expect(released.text).toBe(expected)
+    expect(w.submitted.map(p => p.text)).toEqual([expected])
+    expect((await say($, 'после')).text).toBe('после')
+  })
+
+  test('the trailing end word in any case, е or ё, after any sentence end', async ($, on) => {
+    const w = world(on)
+    const cases: [string, string][] = [
+      ['сделать. ВСЁ', 'сделать.'],
+      ['сделать.\nвсё!', 'сделать.'],
+      ['проверь\nвсе', 'проверь'],
+      ['сделать? все', 'сделать?'],
+      ['сделать… Всё)', 'сделать…'],
+      ['так и сделай». Готово.', 'так и сделай».'],
+      ['Деплой на дев. Поехали!', 'Деплой на дев.'],
+      ['Then merge. Go', 'Then merge.'],
+    ]
+    for (const [said, kept] of cases) {
+      await run($, 'pack')
+      await say($, 'первое')
+      expect((await say($, said)).text).toBe(
+        `Пачка из 2 сообщений, надиктованных подряд — одна задача:\n\n1. первое\n\n2. ${kept}`,
+      )
+    }
+    expect(w.submitted).toHaveLength(cases.length)
+  })
+
+  test('an end word that is not a sentence of its own is held as content', async ($, on) => {
+    const w = world(on)
+    await run($, 'pack')
+    const held = ['проверь их все.', 'Ну и всё.', 'ну и все', 'Закончил. Ну и всё.', 'открой main.go', 'всё, но не совсем']
+    for (const [i, said] of held.entries()) expect(await say($, said)).toEqual({ drop: HELD(i + 1) })
+    expect(w.submitted).toHaveLength(0)
+    expect((await say($, 'Все.')).text).toBe(
+      'Пачка из 6 сообщений, надиктованных подряд — одна задача:\n\n' +
+        held.map((t, i) => `${i + 1}. ${t}`).join('\n\n'),
+    )
+  })
+
+  test('a first message ending with the end word goes as itself; an end word twice is a bare release', async ($, on) => {
+    const w = world(on)
+    await run($, 'pack')
+    expect((await say($, 'Сделай ревью. Всё.')).text).toBe('Сделай ревью.')
+    await run($, 'pack')
+    await say($, 'первое')
+    expect((await say($, 'Все. Все.')).text).toBe('первое')
+    expect(w.submitted.map(p => p.text)).toEqual(['Сделай ревью.', 'первое'])
+  })
+
   test('/pack again sends the batch as a prompt of its own', async ($, on) => {
     const w = world(on)
     await run($, 'pack')
@@ -287,7 +350,7 @@ describe('band', () => {
       await say($, 'раз')
       const ui = await $.ui.mount({ plugin: 'dictate', surface, component: 'AbovePrompt', props: ABOVE_PROMPT })
       expect((await ui.find({ type: 'Text', text: /пачка: 1/ }))?.text).toBe(
-        'пачка: 1 · всё — отправить · /pack cancel',
+        'пачка: 1 · всё (отдельно или последней фразой) — отправить · /pack cancel',
       )
       await say($, 'два')
       expect((await ui.find({ type: 'Text', text: /пачка/ }))?.text).toBe(BAND)

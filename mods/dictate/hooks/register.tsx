@@ -45,9 +45,15 @@ const cut = atom({ plugin: 'dictate', key: 'cut' } as const, null)
 
 const MAX_AGE_MS = 12 * 60 * 60 * 1000
 const PERSON_ORIGINS: ReadonlySet<PromptOrigin['kind']> = new Set(['composer', 'bridge', 'sdk'])
-const RELEASE = /^\s*(?:всё|все|готово|отправляй|поехали|go)[\s.!?…,;:)]*$/iu
+const END_WORD = String.raw`(?:всё|все|готово|отправляй|поехали|go)[\s.!?…,;:)]*$`
+// A message that is only an end word.
+const RELEASE = new RegExp(String.raw`^\s*${END_WORD}`, 'iu')
+// An end word as the message's own last sentence: after a sentence end and a
+// space (`main.go` is a file, not a send), or on a line of its own.
+const TRAILING = new RegExp(String.raw`([.!?…]["»”)\]]*\s+|\n)\s*${END_WORD}`, 'iu')
+const SEND_HINT = '«всё» отдельно или последней фразой («… сделать. Всё.»)'
 const HELD = (count: number) =>
-  `📥 в пачке ${count} — «всё» или /pack, чтобы отправить; /pack cancel — сбросить`
+  `📥 в пачке ${count} — ${SEND_HINT} или /pack — отправить; /pack cancel — сбросить`
 
 // Voice mode's own limits (Claude Code 2.1.289, tap mode): 120 s cap, 15 s
 // silence. The thresholds below count from when the speech began (the first
@@ -157,6 +163,18 @@ export function fresh(messages: readonly string[], text: string): string | null 
 }
 
 /**
+ * The message before an end word that stands as its own last sentence
+ * (`… сделать. Всё.` → `… сделать.`), or null when it does not end so. `ну и
+ * всё`, `проверь их все.` and `Ну и всё.` are not: the end word must follow a
+ * sentence end. What is left may itself be only an end word (`Все. Все.`).
+ */
+export function beforeEndWord(text: string): string | null {
+  const m = TRAILING.exec(text)
+  if (m === null) return null
+  return text.slice(0, m.index + (m[1] ?? '').length).trimEnd()
+}
+
+/**
  * Appends a held prompt, the repeat of a held one left out: `count` 0 when the
  * batch was closed meanwhile, `text` what was added (null for a repeat).
  */
@@ -250,7 +268,7 @@ async function toggle($: Dollar, arg: string): Promise<CommandRunResult> {
     watch($)
     return {
       text:
-        '📥 пачка включена — диктуй; «всё» или /pack — отправить, /pack cancel — сбросить\n' +
+        `📥 пачка включена — диктуй; ${SEND_HINT} или /pack — отправить, /pack cancel — сбросить\n` +
         'голос сам рвёт запись через 2 мин и после 15 с тишины: за ~15 с до обрыва — двойной писк, ' +
         'на обрыве — один писк, а над полем ввода — последние фразы записи, с них продолжай',
     }
@@ -550,12 +568,16 @@ export const register: Register = on => {
     const current = isOwn ? null : await liveBatch($)
     if (current === null) return next(await withTerms($, e))
 
-    if (RELEASE.test(e.text)) {
+    const before = beforeEndWord(e.text)
+    if (RELEASE.test(e.text) || (before !== null && RELEASE.test(before))) {
       const taken = await take($)
       if (taken === null || taken.messages.length === 0) return drop($, e.text, 'пачка пуста — выключена')
       return next(await withTerms($, { ...e, text: compose(taken.messages) }))
     }
-    if (e.attachments !== undefined && e.attachments.length > 0) {
+    // Ends with «… . Всё.»: the message joins the pack and the pack goes, attachments with it.
+    const isLast = before !== null
+    const text = before ?? e.text
+    if (!isLast && e.attachments !== undefined && e.attachments.length > 0) {
       $.ui.toast(
         `пачка ещё открыта (${current.messages.length}): сообщение с вложением ушло отдельно`,
         { timeoutMs: 6000 },
@@ -565,11 +587,18 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const seen = recording
     const wasTyped = isTyped
-    const stop = classifyStop(seen, now, e.text)
+    const stop = classifyStop(seen, now, text)
     recording = undefined
     isTyped = false
-    const held = await hold($, e.text, stop === 'cap')
-    if (held.count === 0) return next(await withTerms($, e))
+    // A message that ends with the end word was finished on purpose: never marked as cut.
+    const held = await hold($, text, !isLast && stop === 'cap')
+    if (held.count === 0) return next(await withTerms($, { ...e, text }))
+    if (isLast) {
+      record($, `${chunkLine(held.count, stop, held.text?.length ?? 0, seen, now, wasTyped)} · ended with the end word, pack sent`)
+      const taken = await take($)
+      if (taken === null || taken.messages.length === 0) return next(await withTerms($, { ...e, text }))
+      return next(await withTerms($, { ...e, text: compose(taken.messages) }))
+    }
     const added = held.text
     if (added !== null) {
       await update($, cut, () => ({ stop, excerpt: excerpt(added) }))
@@ -597,7 +626,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         <Text color="yellow" wrap="truncate">
-          {`пачка: ${current.messages.length} · всё — отправить · /pack cancel`}
+          {`пачка: ${current.messages.length} · всё (отдельно или последней фразой) — отправить · /pack cancel`}
         </Text>
         {stopped === null ? null : (
           <Text color="yellow" wrap="wrap">
