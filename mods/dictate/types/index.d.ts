@@ -12,15 +12,11 @@ export type DictateBatch = {
 /**
  * The last chunk held in the pack, shown above the prompt until the next one:
  * `stop` = who ended it (`own` = the person, `cap` = voice mode's 2-minute
- * limit, `silence` = its 15 s pause); `excerpt` = the chunk's last sentences;
- * `isWaiting` = the box has shown nothing since: voice mode does not record
- * again by itself, the band says the next chunk needs a tap (absent in values
- * stored before 0.6.0, read as false).
+ * limit, `silence` = its 15 s pause); `excerpt` = the chunk's last sentences.
  */
 export type DictateCut = {
   stop: 'own' | 'cap' | 'silence'
   excerpt: string
-  isWaiting?: boolean
 }
 
 declare module 'claude-code' {
