@@ -21,6 +21,7 @@ const CHUNK_5 =
   'и тому подобное. Можно было бы это назвать как-то normalized name, типа color to lowercase, то есть, ну, ' +
   'в таких моментах это понятно, тут пять слов во всей строчке,'
 const CUT_MARK = ' ⟨запись оборвалась здесь — следующее сообщение может повторять конец⟩'
+const NEXT_TAP = '🎙 запись не продолжается сама — следующий кусок: пробел (пишет, только пока внизу ⏺ REC)'
 
 // The owner's first chunk of 2026-10-05, cut by the 2-minute cap mid-sentence.
 const CAPPED =
@@ -181,6 +182,7 @@ describe('voice cuts in a pack', () => {
     expect(await bandLines($)).toEqual([
       'пачка: 1 · всё — отправить · /pack cancel',
       `✂ запись оборвалась (лимит 2 мин), конец: ${CAPPED}`,
+      NEXT_TAP,
     ])
   })
 
@@ -279,11 +281,12 @@ describe('voice cuts in a pack', () => {
     expect(await bandLines($)).toEqual([
       'пачка: 2 · всё — отправить · /pack cancel',
       '✓ в пачке, конец: Функция create в tag-сервисе. Дальше.',
+      NEXT_TAP,
     ])
 
     await dictate(w, CAPPED, 119 * SEC)
     await send($, w, CAPPED)
-    expect(await bandLines($)).toHaveLength(2)
+    expect(await bandLines($)).toHaveLength(3)
     await send($, w, 'всё')
     expect(await bandLines($)).toEqual([])
   })
@@ -411,6 +414,81 @@ describe('voice cuts in a pack', () => {
     expect(shown.split('\n')).toEqual([
       'журнал записей (~/.claude/state/dictate/voice.log), последние 4:',
       ...lines,
+    ])
+  })
+})
+
+// 2026-10-23, six chunks of one pack, four of them cut by the cap: «после отправки
+// сообщения первого как будто у меня в строке анимация того, что мой голосовой
+// ввод уже идет. А он что-то не записывается… удобно, что после отправки сразу
+// можно записывать голосовой еще раз, не нажимая пробел. Но как будто это не
+// работает». Voice mode (tap, 2.1.309) never records again by itself: every stop
+// leaves it idle until the next tap, measured over a pty with a real microphone.
+describe('the next chunk needs a tap', () => {
+  test('after a capped chunk the band says the recording does not go on by itself', async ($, on) => {
+    const w = world(on)
+    const enabled = (await run($)).text ?? ''
+    expect(enabled).toContain('после каждого куска запись выключена: следующий — снова пробелом')
+    await dictate(w, CAPPED, 119 * SEC)
+    await send($, w, CAPPED)
+    expect(await bandLines($)).toEqual([
+      'пачка: 1 · всё — отправить · /pack cancel',
+      `✂ запись оборвалась (лимит 2 мин), конец: ${CAPPED}`,
+      NEXT_TAP,
+    ])
+    // He goes on talking without a tap: nothing reaches the box, the line stays.
+    await w.clock.advance(20 * SEC)
+    expect((await bandLines($)).at(-1)).toBe(NEXT_TAP)
+  })
+
+  test('his own stop says it too, and the line goes once the next recording shows text', async ($, on) => {
+    const w = world(on)
+    await run($)
+    const first = 'Контроллер модуль, ну, окей. Дальше смотрим сервисы.'
+    await dictate(w, first, 20 * SEC)
+    expect(await send($, w, first)).toEqual({ drop: HELD(1) })
+    expect((await bandLines($)).at(-1)).toBe(NEXT_TAP)
+
+    // The tap: voice mode connects, then writes the interim transcript into the box.
+    await w.clock.advance(3 * SEC)
+    expect((await bandLines($)).at(-1)).toBe(NEXT_TAP)
+    await dictate(w, 'Теперь к черновику заказа.', 4 * SEC)
+    await w.clock.advance(1 * SEC)
+    expect(await bandLines($)).toEqual([
+      'пачка: 1 · всё — отправить · /pack cancel',
+      `✓ в пачке, конец: ${first}`,
+    ])
+
+    await send($, w, 'Теперь к черновику заказа.')
+    expect((await bandLines($)).at(-1)).toBe(NEXT_TAP)
+  })
+
+  test('a tap while voice mode still processes the stop is only a space: the line stays', async ($, on) => {
+    const w = world(on)
+    await run($)
+    await dictate(w, CAPPED, 119 * SEC)
+    await send($, w, CAPPED)
+    // The engine types that space into the box; the drop's clean-up takes it out with the chunk.
+    w.draft = ' '
+    await w.clock.advance(2 * SEC)
+    expect((await bandLines($)).at(-1)).toBe(NEXT_TAP)
+  })
+
+  test('a cut as 0.5.0 stored it, with no isWaiting, shows no line', async ($, on) => {
+    const w = world(on)
+    // Only the owner writes its value: strip the field on the way in, as the old code wrote it.
+    on('state.set', ($, e, next) => {
+      const v = e.value as { isWaiting?: boolean } | null
+      if (e.key !== 'cut' || v === null || typeof v !== 'object') return next(e)
+      const { isWaiting: _, ...old } = v
+      return next({ ...e, value: old } as typeof e)
+    })
+    await run($)
+    await dictate(w, CAPPED, 119 * SEC)
+    await send($, w, CAPPED)
+    expect(await bandLines($)).toEqual([
+      'пачка: 1 · всё — отправить · /pack cancel',
+      `✂ запись оборвалась (лимит 2 мин), конец: ${CAPPED}`,
     ])
   })
 })

@@ -37,6 +37,12 @@ import type { DictateBatch, DictateCut } from '../types'
 // the band shows the tail of the last held chunk instead, and a chunk already in
 // the pack is never held twice.
 //
+// The next chunk: voice mode never records again by itself (focus re-arm is
+// off in tap mode; read from 2.1.309 and measured with a live microphone):
+// after every stop it waits for a tap, and a tap while it still processes the
+// stop is typed as a space. Speaking on after a held chunk went nowhere, so the
+// band says so after every held chunk until the box shows the next recording.
+//
 // Terms: every person's prompt has misheard phrases from
 // ~/.claude/dictate-terms.json replaced before the model reads it.
 
@@ -252,7 +258,8 @@ async function toggle($: Dollar, arg: string): Promise<CommandRunResult> {
       text:
         '📥 пачка включена — диктуй; «всё» или /pack — отправить, /pack cancel — сбросить\n' +
         'голос сам рвёт запись через 2 мин и после 15 с тишины: за ~15 с до обрыва — двойной писк, ' +
-        'на обрыве — один писк, а над полем ввода — последние фразы записи, с них продолжай',
+        'на обрыве — один писк, а над полем ввода — последние фразы записи, с них продолжай\n' +
+        'после каждого куска запись выключена: следующий — снова пробелом, пишет только при ⏺ REC внизу',
     }
   }
   const taken = await take($)
@@ -294,6 +301,7 @@ async function observe($: Dollar): Promise<void> {
   const box = await $.prompt.read()
   const now = await $.clock.now()
   const text = box.text.trim()
+  if (text !== '') await settleWait($)
   if (text === '') {
     // Voice mode records only into an empty box: what was typed before is gone.
     recording = undefined
@@ -325,6 +333,12 @@ async function observe($: Dollar): Promise<void> {
     )
     record($, `warn ${outcome} · ${sinceStart(seen, now)}`)
   }
+}
+
+/** The box shows text again (a new recording, or typing): the tap hint is done. */
+async function settleWait($: Dollar): Promise<void> {
+  if ((await read($, cut))?.isWaiting !== true) return
+  await update($, cut, value => (value === null ? null : { ...value, isWaiting: false }))
 }
 
 /** Who stopped the recording that just arrived, judged at its arrival. */
@@ -432,6 +446,11 @@ function beep($: Dollar): void {
     void $.audio.play({ asset: 'sounds/cut.wav' }).catch(() => undefined)
   })
 }
+
+// Voice mode (tap) never records again by itself after a chunk: every stop
+// leaves it idle until the next tap, and a tap in the moment it is still
+// processing the stop is typed as a space instead (measured on 2.1.309).
+export const NEXT_TAP = '🎙 запись не продолжается сама — следующий кусок: пробел (пишет, только пока внизу ⏺ REC)'
 
 const CUT_LABEL: Record<DictateCut['stop'], string> = {
   own: '✓ в пачке, конец:',
@@ -572,7 +591,7 @@ export const register: Register = on => {
     if (held.count === 0) return next(await withTerms($, e))
     const added = held.text
     if (added !== null) {
-      await update($, cut, () => ({ stop, excerpt: excerpt(added) }))
+      await update($, cut, () => ({ stop, excerpt: excerpt(added), isWaiting: true }))
       record($, chunkLine(held.count, stop, added.length, seen, now, wasTyped))
     }
     if (stop !== 'own') beep($)
@@ -604,6 +623,11 @@ export const register: Register = on => {
             {`${CUT_LABEL[stopped.stop]} ${stopped.excerpt}`}
           </Text>
         )}
+        {stopped?.isWaiting === true ? (
+          <Text color="yellow" wrap="wrap">
+            {NEXT_TAP}
+          </Text>
+        ) : null}
       </Box>
     )
   })
