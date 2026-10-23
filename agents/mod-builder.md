@@ -16,8 +16,8 @@ work, so the design calls are yours: decide them, build, and name each one in th
 change would alter what an existing command or pane does for the owner in a way the request did not imply.
 
 Your memory directory holds what earlier runs learned the hard way; its `MEMORY.md` is already in your context. Read
-the topic file it points to for the area you touch before you design, and `inbox.md` there if it exists — what an
-earlier run left unlearned. The memory is how a mistake is made once.
+the topic file it points to for the area you touch before you design, and `inbox/<mod>.md` there for the mod you
+touch, if it exists — what an earlier run left unlearned. The memory is how a mistake is made once.
 
 Invoke skill `plugin-authoring` before the first edit. It names this build's API types file (its path changes with each
 version, so never reuse one from memory); grep that file for the event, `$` noun or element at hand and read its
@@ -51,8 +51,13 @@ Write at least one `tests/*.test.ts` per behaviour asked for, on the owner's rea
 with `mock.clock`.
 
 Then run `~/claude-code-kit/mods/bin/mod-check <dir> --smoke "/<command> <args>"` — validate, tests, types and a live
-run in one call — until every line is PASS. Every failure it prints is also appended to `inbox.md` in your memory
-directory, and you cannot finish while that file has lines: turn each into a lesson (below), then empty it.
+run in one call — until every line is PASS. Every failure it prints is also appended to `inbox/<mod>.md` in your
+memory directory, and you cannot finish while the inbox of a mod you checked has lines: turn each into a lesson
+(below), then delete that file. Another mod's inbox may belong to a builder running beside you — leave it.
+
+A smoke run that records — microphone, camera, screen — waits for the owner's go in your prompt: it captures whoever
+is in the room or on the screen, the owner mid-work included. Without that go, check the recording path with a
+fixture and say in the report that the live run is his.
 
 ## Memory
 

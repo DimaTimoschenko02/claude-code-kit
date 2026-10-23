@@ -1,20 +1,60 @@
 #!/usr/bin/env bash
 # Stop hook of the mod-builder agent (its frontmatter `hooks: Stop`, which runs as SubagentStop): the agent may not
-# finish while the memory inbox has mod-check failures it has not turned into lessons. The failure is recorded by
+# finish while a mod it checked has mod-check failures it has not turned into lessons. The failure is recorded by
 # code; this makes the lesson happen too, instead of hoping the agent remembers.
+#
+# mod-check writes one inbox file per mod (inbox/<mod>.md). This hook holds the agent only for the mods it ran
+# mod-check on — read from its own transcript — so a builder never stops on, or drops, a parallel build's failures.
+# An environment variable cannot carry that: the hook runs in Claude Code's process, not in the agent's shell.
 set -uo pipefail
 
-inbox=${MOD_BUILDER_INBOX:-$HOME/.claude/agent-memory/mod-builder/inbox.md}
+mem=${MOD_BUILDER_MEMORY:-$HOME/.claude/agent-memory/mod-builder}
 payload=$(cat 2>/dev/null || true)
+field() { printf '%s' "$payload" | jq -r ".$1 // empty" 2>/dev/null; }
 
-[[ -s $inbox ]] || exit 0
-# Second refusal in a row: let it stop. The inbox stays, and the next run of the agent meets it again.
-[[ $(printf '%s' "$payload" | jq -r '.stop_hook_active // false' 2>/dev/null) == true ]] && exit 0
+# Second refusal in a row: let it stop. The inbox stays, and the next run on that mod meets it.
+[[ $(field stop_hook_active) == true ]] && exit 0
 
-count=$(grep -c '^- ' "$inbox")
-cat >&2 <<EOF
-$inbox holds $count entries, failed checks from mod-check. Before you finish: for each, add a lesson to the topic
-file MEMORY.md points to (the cause in one sentence and what to do instead) or, if a lesson there already covers it,
-sharpen that one; then empty inbox.md. A failure that was a typo with nothing to learn is dropped, not recorded.
-EOF
+own=$(field agent_transcript_path)
+if [[ -z $own || ! -f $own ]]; then
+  aid=$(field agent_id) sid=$(field session_id) parent=$(field transcript_path)
+  own=''
+  if [[ -n $aid && -n $sid && -n $parent ]]; then
+    proj=$(dirname "${parent%%/subagents/*}")
+    [[ -d $proj/$sid/subagents ]] && own=$(find "$proj/$sid/subagents" -name "agent-$aid.jsonl" 2>/dev/null | head -1)
+  fi
+fi
+# No transcript of its own: nothing tells which mods are this run's. Let it stop; the inbox waits for the next run.
+[[ -n $own && -f $own ]] || exit 0
+
+# Every Bash call of this agent that ran mod-check, with the cwd it ran in → the mod names mod-check used.
+names=$(jq -r 'select(.type == "assistant") | .cwd as $cwd | .message.content[]?
+               | select(.type == "tool_use" and .name == "Bash") | "\($cwd)\t\(.input.command | gsub("\n"; " "))"' \
+          "$own" 2>/dev/null \
+  | while IFS=$'\t' read -r cwd cmd; do
+      grep -oE 'mod-check[[:space:]]+[^[:space:];&|)]+' <<<"$cmd" | while read -r _ arg; do
+        arg=${arg//\"/}; arg=${arg//\'/}; arg=${arg/#\~/$HOME}
+        [[ $arg == /* ]] || arg="$cwd/$arg"
+        n=$(cd "$arg" 2>/dev/null && basename "$PWD") || n=''
+        [[ -n $n ]] || { arg=${arg%/}; n=${arg##*/}; }
+        printf '%s\n' "$n"
+      done
+    done | sort -u)
+
+pending=()
+while read -r n; do
+  [[ -n $n && -s $mem/inbox/$n.md ]] && pending+=("$mem/inbox/$n.md")
+done <<<"$names"
+[[ ${#pending[@]} -eq 0 ]] && exit 0
+
+{
+  echo "Failed checks from mod-check wait in the inbox of the mods you checked:"
+  for f in "${pending[@]}"; do echo "  $f — $(grep -c '^- ' "$f") entries"; done
+  cat <<'MSG'
+Before you finish: for each entry, add a lesson to the topic file MEMORY.md points to (the cause in one sentence and
+what to do instead) or, if a lesson there already covers it, sharpen that one; then delete that inbox file. A failure
+that was a typo with nothing to learn is dropped, not recorded. Inbox files of other mods are not yours: a build
+running in parallel may own them — leave them.
+MSG
+} >&2
 exit 2

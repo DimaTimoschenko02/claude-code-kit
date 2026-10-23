@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Every check a mod passes before it ships, in one call: validate, tests, types, and an optional live smoke run.
-# A failed step is appended to the mod-builder agent's memory inbox, so the lesson is recorded by this script
-# rather than by the agent remembering to — the agent turns inbox lines into lessons before it stops.
+# A failed step is appended to the mod-builder agent's memory inbox for this mod (inbox/<mod>.md), so the lesson is
+# recorded by this script rather than by the agent remembering to — the agent turns inbox lines into lessons before
+# it stops.
 #
 # usage: mod-check <mod dir> [--smoke "/command args"]
 set -uo pipefail
@@ -13,7 +14,8 @@ smoke=''
 [[ ${1:-} == --smoke ]] && smoke=${2:-}
 
 name=$(basename "$dir")
-inbox=${MOD_BUILDER_INBOX:-$HOME/.claude/agent-memory/mod-builder/inbox.md}
+# One inbox file per mod: two builders running in parallel must never meet each other's failures.
+inbox=${MOD_BUILDER_MEMORY:-$HOME/.claude/agent-memory/mod-builder}/inbox/$name.md
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 failed=0

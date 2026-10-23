@@ -38,8 +38,10 @@ the team should share them. Keep `MEMORY.md` an index of topic files; a lesson i
 do instead, replaced when a sharper one arrives.
 
 Writing lessons must be mechanical, not a request in the body. The check script the agent has to run appends every
-failure to an `inbox.md` in that folder, and a frontmatter `Stop` hook refuses to let the agent finish while the inbox
-has lines — releasing it on `stop_hook_active`, so a second refusal never loops. The owner's corrections
+failure to an inbox in that folder, and a frontmatter `Stop` hook refuses to let the agent finish while the inbox
+has lines — releasing it on `stop_hook_active`, so a second refusal never loops. Key the inbox by the thing being
+built (`inbox/<name>.md`) and let the hook find this run's names in its own transcript: one shared file makes two
+parallel runs block on, or silently drop, each other's failures. The owner's corrections
 arrive after the agent has finished, in the calling session: the caller passes them verbatim in the next run's
 prompt, and one line in the body says a correction in its prompt is a lesson even when every check passes. Without
 that the agent learns only from what fails inside its own run.
