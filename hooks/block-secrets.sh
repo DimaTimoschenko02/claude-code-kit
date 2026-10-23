@@ -39,6 +39,21 @@ case "$tool" in
   exec_command) tool=Bash ;;
 esac
 
+# Command text from tool_input, whatever its JSON type: Codex may send the command as an
+# argv array (["bash","-lc","cat .env"]), so arrays are joined and other types stringified
+# instead of reaching the regexes as JSON-escaped text. CR is dropped (CRLF patches).
+input_text() {
+  jq -r '(.tool_input.command // .tool_input.cmd // .tool_input.input // "")
+         | if type=="array" then map(tostring) | join(" ")
+           elif type=="string" then .
+           else tostring end' <<<"$input" | tr -d '\r'
+}
+
+# A relative patch path ("id_rsa", ".git-credentials") must also hit the "*/name" patterns.
+is_sensitive_rel() {
+  is_sensitive_path "$1" || is_sensitive_path "/$1"
+}
+
 # Path patterns considered sensitive — any read/write/edit/grep/glob on these is blocked
 is_sensitive_path() {
   local p="$1"
@@ -78,12 +93,17 @@ case "$tool" in
   apply_patch)
     # Codex patch headers name every touched file: "*** Add File: p", "*** Update File: p",
     # "*** Delete File: p", "*** Move to: p".
-    patch=$(jq -r '.tool_input.command // .tool_input.input // ""' <<<"$input")
+    patch=$(input_text)
+    paths=$(sed -nE 's/^[[:space:]]*\*\*\*[[:space:]]*(Add File|Update File|Delete File|Move to):[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\2/p' <<<"$patch")
+    # Fail closed: a non-empty patch with no header we can parse is a format we do not understand.
+    if [ -n "${patch//[[:space:]]/}" ] && [ -z "$paths" ]; then
+      deny "apply_patch input has no recognisable file headers"
+    fi
     while IFS= read -r path; do
-      if [ -n "$path" ] && is_sensitive_path "$path"; then
+      if [ -n "$path" ] && is_sensitive_rel "$path"; then
         deny "patch touches sensitive file: $path"
       fi
-    done < <(sed -nE 's/^\*\*\* (Add File|Update File|Delete File|Move to): (.*)$/\2/p' <<<"$patch")
+    done <<<"$paths"
     ;;
   WebFetch)
     # Claude has no legit reason to WebFetch a local file:// URL — that bypasses the Read guard.
@@ -93,7 +113,7 @@ case "$tool" in
     fi
     ;;
   Bash)
-    cmd=$(jq -r '.tool_input.command // .tool_input.cmd // ""' <<<"$input")
+    cmd=$(input_text)
 
     # Known credential-file suffixes / path literals. Kept WITHOUT bare "secret"/"password"
     # words on purpose (see DESIGN CONSTRAINT above).
