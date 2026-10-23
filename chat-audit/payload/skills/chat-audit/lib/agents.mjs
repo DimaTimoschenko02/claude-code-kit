@@ -39,27 +39,55 @@ function textOf(msg) {
 // A failed command's body is "Exit code N" plus whatever it printed — a cat of a note that says "not found" or a hook
 // file that says "deny" is not that error. So a command is classed by its exit code and the shell's own error lines,
 // and any other tool by the head of its message, where the tool states the error.
+//
+// Claude Code's own refusals get classes of their own, tested before the loose word tests: in one workspace on
+// 2026-10-23, 464 of 1 180 subagent errors were `other`. 412 were the worktree-isolation guard; the rest were the
+// sleep blocker, a tool missing from the agent's set, input-schema rejections, a path outside the working dirs, a guard
+// speaking without the «hook error» prefix, and MCP / browser / web failures.
+const HARNESS = [
+  [/is isolated in the worktree/, 'worktree isolation'],
+  [/^Cannot (?:enter|exit) worktree|^(?:Enter|Exit)Worktree cannot/, 'worktree switch refused'],
+  [/^Blocked: sleep \d/, 'sleep blocked'],
+  [/No such tool available/, 'tool unavailable'],
+  [/InputValidationError|does not match required schema/, 'input validation'],
+  [/outside the session's working directories/, 'outside working dirs'],
+];
+const EXTERNAL = /^Error POSTing to endpoint|unable to fetch from|^JavaScript execution error|^Failed to execute JavaScript|^Error capturing screenshot|^MCP error/;
+
+/** The hook as its denial names it: `[cmd path/name.sh]` → name.sh, «<name> mod …» → «<name> (mod)». A hook that
+ *  denies through JSON output leaves only its reason → unnamed. */
+function hookOf(head) {
+  const br = /hook error: \[([^\]]+)\]/.exec(head);
+  if (br) return path.basename(br[1].trim().split(/\s+/).pop());
+  const mod = /hook error: ([\w-]+) mod\b/.exec(head);
+  return mod ? `${mod[1]} (mod)` : 'unnamed';
+}
+
 export function classifyError(text) {
   const exit = /^Exit code (\d+)/.exec(text);
   if (exit) {
     if (exit[1] === '127' || /command not found/.test(text)) return { cls: 'command not found' };
-    if (/^[\w./-]+: .*(?:No such file or directory|cannot access)/m.test(text)) return { cls: 'not found' };
+    // `cat: x: No such file or directory` (the tool, then the path) or zsh's `(eval):1: no such file or directory: x`.
+    if (/^(?:\(eval\):\d+: )?(?:[\w./-]+: .*(?:no such file or directory|cannot access)|no such file or directory: )/im.test(text)) return { cls: 'not found' };
     if (/^(?:\(eval\):\d+: )?no matches found/m.test(text)) return { cls: 'glob no match' };
     return { cls: 'command failed (exit code)' };
   }
-  const head = text.slice(0, 400);
+  const head = text.slice(0, 400).replace(/^<tool_use_error>/, '').replace(/^Error: /, '');
   const low = head.toLowerCase();
-  if (/^\w+(?::\w+)? hook error/.test(head) || (low.includes('hook') && (low.includes('block') || low.includes('denied') || low.includes('deny')))) {
-    const m = /([\w-]+\.(?:sh|py|mjs|js))/.exec(text);
-    return { cls: 'hook block', hook: m ? m[1] : 'hook?' };
-  }
+  if (/^[\w-]+(?::[\w-]+)? hook error/.test(head)) return { cls: 'hook block', hook: hookOf(head) };
+  for (const [re, cls] of HARNESS) if (re.test(head)) return { cls };
+  // A guard that speaks without the prefix — a mod's tool guard: «🚧 skill-gate: …».
+  const bare = /^[^\w\s<"'`]{1,4}\s*([a-z][\w-]*): /.exec(head);
+  if (bare) return { cls: 'hook block', hook: bare[1] };
+  if (low.includes('hook') && (low.includes('block') || low.includes('denied') || low.includes('deny'))) return { cls: 'hook block', hook: hookOf(head) };
   if (low.includes('string to replace not found')) return { cls: 'edit mismatch' };
   if (low.includes('unknown skill')) return { cls: 'unknown skill' };
   if (low.includes('classifier gave no verdict')) return { cls: 'auto-mode classifier down' };
-  if (low.includes('exceeds maximum allowed tokens')) return { cls: 'read too large' };
+  if (low.includes('exceeds maximum allowed tokens') || low.includes('exceeds maximum allowed size')) return { cls: 'read too large' };
   if (low.includes('permission') || low.includes('denied') || low.includes('not allowed')) return { cls: 'permission denied' };
-  if (low.includes('timed out') || low.includes('timeout')) return { cls: 'timeout' };
-  if (low.includes('no such file') || low.includes('does not exist') || low.includes('not found')) return { cls: 'not found' };
+  if (low.includes('timed out') || low.includes('timeout') || low.includes('did not respond in time')) return { cls: 'timeout' };
+  if (EXTERNAL.test(head)) return { cls: 'external service' };
+  if (low.includes('no such file') || low.includes('does not exist') || low.includes('not found') || low.includes('eisdir')) return { cls: 'not found' };
   if (low.includes('must read') || low.includes('has not been read') || low.includes('modified since')) return { cls: 'read-before-edit' };
   return { cls: 'other' };
 }

@@ -20,9 +20,11 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { scrub } from './scrub.mjs';
 
 const HOME = os.homedir();
+const isInside = (dir, p) => { const rel = path.relative(dir, p); return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)); };
 
 // ---------------------------------------------------------------- config dirs
 
@@ -83,13 +85,45 @@ function folderCwd(folder) {
 }
 
 /**
+ * Where the project's sessions and code live outside its own tree — a project is not just its directory:
+ *  - workspaces: an ancestor below $HOME whose `.claude` IS the project's `.claude` (a symlink to it). A session started
+ *    there runs this project's config and calls its skills both bare and as `<project>:<name>`; on 2026-10-23 most
+ *    pricehub sessions started in knigomania/ (`.claude -> pricehub/.claude`), and every tool scoped to pricehub/ missed
+ *    them — agents.mjs saw 11 of 105 sessions (30 of 874 subagents), effect.mjs called vault-write and devops dead
+ *    (0 loads; 6 and 2 sessions with the workspace counted). memory-drift.mjs indexes the repos under a workspace: the project's memory documents
+ *    its sibling repos too.
+ *  - worktrees: other checkouts of the project's repo placed outside its tree (`git worktree list`) — the same code and
+ *    config on another branch; the ones under the tree are in it already.
+ */
+export function projectHomes(projectDir) {
+  const target = path.resolve(projectDir);
+  const workspaces = [], worktrees = [];
+  let own = null;
+  try { own = realpathSync(path.join(target, '.claude')); } catch {}
+  for (let d = path.dirname(target); own && d.startsWith(HOME + path.sep); d = path.dirname(d)) {
+    try { if (realpathSync(path.join(d, '.claude')) === own) workspaces.push(d); } catch {}
+  }
+  try {
+    const git = (args) => execFileSync('git', ['-C', target, ...args], { encoding: 'utf8', timeout: 10000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const sub = path.relative(realpathSync(git(['rev-parse', '--show-toplevel']).trim()), realpathSync(target));
+    for (const m of git(['worktree', 'list', '--porcelain']).matchAll(/^worktree (.+)$/gm)) {
+      const w = path.join(m[1], sub);
+      if (!isInside(target, w)) worktrees.push(w);
+    }
+  } catch { /* not a git repo */ }
+  return { workspaces, worktrees };
+}
+
+/**
  * Transcript folders belonging to a project.
  * scope: 'exact'   — only this dir
- *        'subtree' — this dir and anything under it (worktrees, sub-repos)
+ *        'subtree' — this dir and anything under it (worktrees, sub-repos), plus its workspaces (exact dir) and its
+ *                    worktrees elsewhere — see projectHomes
  *        'all'     — every folder on the machine
  */
 export function projectFolders(projectDir, scope = 'subtree') {
   const target = path.resolve(projectDir);
+  const homes = scope === 'subtree' ? projectHomes(target) : { workspaces: [], worktrees: [] };
   const out = [];
   for (const { projectsDir } of configDirs()) {
     let entries;
@@ -106,8 +140,7 @@ export function projectFolders(projectDir, scope = 'subtree') {
         if (e === encodeProjectPath(target)) out.push({ folder, cwd: target });
         continue;
       }
-      const rel = path.relative(target, cwd);
-      const inside = rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+      const inside = isInside(target, cwd) || homes.workspaces.includes(cwd) || homes.worktrees.some((w) => isInside(w, cwd));
       if (scope === 'exact' ? cwd === target : inside) out.push({ folder, cwd });
     }
   }

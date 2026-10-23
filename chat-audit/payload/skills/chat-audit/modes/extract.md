@@ -24,9 +24,14 @@ They see different things and you need all three:
   (same command within 3 steps), code written inline from scratch, failures, files re-read across sessions,
   guardrail blocks and classifier denials.
 - **`agents.mjs`** — inside every subagent the selected sessions spawned: duration, tool calls, tool errors by
-  class (hook block, permission, timeout, not found, read-before-edit, exit code, other), the longest silent
-  gap and where it fell, watchdog stalls, and user interruptions. Totals include agent-hours, error rate, hook
-  blocks per hook, and agents that ran on the main session's model because none was set explicitly.
+  class, the longest silent gap and where it fell, watchdog stalls, and user interruptions. Error classes: the
+  command's own failure (exit code, command not found, not found, glob no match); a hook block, named by its hook
+  (`<name> (mod)` for a mod's guard, `unnamed` when a hook denies through JSON alone); Claude Code's own refusals
+  (worktree isolation, worktree switch refused, sleep blocked, tool unavailable, input validation, outside working
+  dirs); tool-level errors (edit mismatch, read-before-edit, read too large, unknown skill, permission, timeout,
+  external service for MCP / browser / web); `other` is what none of these name — a large `other` means a new
+  class to add to `classifyError`. Totals include agent-hours, error rate, hook blocks per hook, and agents that
+  ran on the main session's model because none was set explicitly.
 
 ## What each signal means
 

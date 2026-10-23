@@ -98,6 +98,7 @@ What a verdict asks for (`effect.mjs`, column `action`):
 | decaying | worked, but the last third of the window is back at the baseline: check the rule is still loaded and not superseded; it recurs after that → make it a hook |
 | no-effect | reshape: an observable predicate, or a hook |
 | dead | delete it or fold it into what fires |
+| external (git rows) | a script starts it headless (`claude -p`, launchd, cron): no transcript names it, so there is no load to count — read that runner's log, never delete it on this table |
 | harmful | fix or revert the same day |
 | untested · unclear-window · unmeasurable | never cite as working; re-check next run, or add a signal |
 

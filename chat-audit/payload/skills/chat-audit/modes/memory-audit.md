@@ -16,8 +16,14 @@ cost is already measured: the turns spent re-deriving it.
 **2. Written and rotten.**
 
 ```bash
-node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir>
+node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir> [--roots <dir,dir>]
 ```
+
+Anchors resolve against every code root: the project's repos, the repos under its workspace (an ancestor whose
+`.claude` is the project's own) and the project's `.claude/`. The first output line says how many anchors each root
+resolved. Memory that documents code elsewhere — a repo that is no sibling, a plain folder of scripts — needs that
+place passed in `--roots`; otherwise every anchor into it reads as `missing-file`. A run where most `high` findings
+point into one place that exists is a missing root, not rot.
 
 Reports memory anchors that no longer resolve, by severity:
 

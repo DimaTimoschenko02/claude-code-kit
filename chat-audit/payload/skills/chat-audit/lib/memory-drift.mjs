@@ -12,16 +12,23 @@
 // Ported from memory-drift.py and generalized: memory location and repos are
 // discovered, not hardcoded.
 //
+// Code roots — where an anchor may resolve: the git repos at or under the project, the repos under its workspace (an
+// ancestor whose `.claude` is the project's own, discover.mjs#projectHomes — a project's memory documents its sibling
+// repos too: 29 of 30 `high` on pricehub were paths in knigoman-monolith next to it, 2026-10-23), the project's
+// `.claude/`, and every `--roots` dir (its repos, or the dir itself as plain files when it holds none). The summary
+// says how many anchors each root resolved.
+//
 // Usage:
-//   node memory-drift.mjs [--project <dir>] [--memory <dir>] [--file X.md] [--quiet] [--json]
+//   node memory-drift.mjs [--project <dir>] [--roots <dir,dir>] [--memory <dir>] [--file X.md] [--quiet] [--json]
 //                         [--fail-on high|medium]
 import fs from 'node:fs';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
+import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
-import { findMemory, configDirs } from './discover.mjs';
+import { findMemory, configDirs, projectHomes } from './discover.mjs';
 
 const CODE_EXT = /\.(ts|tsx|js|jsx|mjs|py|go|rs|java|kt|rb|php|sql|sh)$/;
 // Symbols also live in config, schema and migration files — index those too, or
@@ -98,6 +105,10 @@ export function findRepos(projectDir) {
   return repos;
 }
 
+// A plain dir is walked without these: `.claude/worktrees/*` are stale twins of the repo (see findRepos) — a file
+// deleted on main still read as alive through a worktree copy.
+const PLAIN_SKIP = new Set(['node_modules', 'state', '.git', 'worktrees']);
+
 /** basename -> [full paths] across all repos, plus plain dirs (the project's own
  *  `.claude/` — hooks, scripts, libs — is what a good share of memory anchors point
  *  at, and it is neither a repo nor reachable through `git ls-files`). */
@@ -119,7 +130,7 @@ function buildFileIndex(repos, extraDirs = []) {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
     for (const e of entries) {
-      if (e.name === 'node_modules' || e.name === 'state' || e.name === '.git') continue;
+      if (PLAIN_SKIP.has(e.name)) continue;
       const full = path.join(dir, e.name);
       if (e.isDirectory()) walk(full);
       else if (CODE_EXT.test(e.name)) add(full);
@@ -175,7 +186,7 @@ function buildIdentIndex(repos, extraDirs = []) {
       try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return true; }
       for (const e of entries) {
         const p = path.join(d, e.name);
-        if (e.isDirectory()) { if (!walk(p, depth + 1)) return false; }
+        if (e.isDirectory()) { if (!PLAIN_SKIP.has(e.name) && !walk(p, depth + 1)) return false; }
         else if (INDEX_EXT.test(e.name) && !eat(p)) return false;
       }
       return true;
@@ -185,9 +196,9 @@ function buildIdentIndex(repos, extraDirs = []) {
   return idents;
 }
 
-/** Same idea for commits: one `cat-file --batch-check` per repo. */
+/** Same idea for commits: one `cat-file --batch-check` per repo. sha → the repo that has it. */
 function resolveCommits(shas, repos) {
-  const alive = new Set();
+  const alive = new Map();
   if (!shas.size) return alive;
   const input = [...shas].map((s) => `${s}^{commit}`).join('\n') + '\n';
   for (const repo of repos) {
@@ -204,21 +215,41 @@ function resolveCommits(shas, repos) {
       if (!ok) continue;
       // batch-check echoes resolved objects; map back by prefix
       const sha = line.trim().split(' ')[0];
-      for (const s of shas) if (sha.startsWith(s)) alive.add(s);
+      for (const s of shas) if (sha.startsWith(s) && !alive.has(s)) alive.set(s, repo);
     }
   }
   return alive;
 }
 
+/** A path anchor names that path: `a/b/x.php` is a file ending in /a/b/x.php, not any x.php. Matched by basename
+ *  alone, a deleted file read as alive through a namesake in another root — and every added root adds namesakes. */
+function candidatesFor(fileIdx, ref) {
+  const r = ref.replace(/^\.\//, '');
+  const all = fileIdx.get(path.basename(r)) || [];
+  return r.includes('/') ? all.filter((q) => q.endsWith(`/${r}`)) : all;
+}
+
 export function checkMemory({ projectDir, memoryDir = null, onlyFile = null,
-                              includeEphemeral = false } = {}) {
-  const repos = findRepos(projectDir);
+                              includeEphemeral = false, roots = [] } = {}) {
+  // Code roots: the project's repos, its workspaces' repos, explicit --roots (their repos, or the dir as plain files).
+  const extra = roots.map((r) => path.resolve(r));
+  const repos = [], plain = [path.join(projectDir, '.claude')], seenRoot = new Set();
+  const take = (list, dir) => { let r; try { r = realpathSync(dir); } catch { r = dir; } if (!seenRoot.has(r)) { seenRoot.add(r); list.push(dir); } };
+  for (const dir of [projectDir, ...projectHomes(projectDir).workspaces, ...extra]) {
+    const found = findRepos(dir);
+    found.forEach((r) => take(repos, r));
+    if (!found.length && extra.includes(dir)) take(plain, dir);
+  }
+  const allRoots = [...repos, ...plain].sort((a, b) => b.length - a.length);   // longest first: .claude/ before its repo
+  const rootOf = (file) => (allRoots.find((r) => file === r || file.startsWith(r + path.sep)) || '?').replace(os.homedir(), '~');
+  const resolvedBy = new Map();
+  const resolved = (root) => resolvedBy.set(root, (resolvedBy.get(root) || 0) + 1);
   // Day-logs (.remember and friends) are scratch, not durable memory: their
   // anchors are expected to rot, so scanning them buries the real findings.
   const memDirs = memoryDir
     ? [{ realPath: memoryDir, kind: 'explicit' }]
     : findMemory(projectDir).filter((m) => includeEphemeral || m.kind !== 'remember-plugin');
-  const fileIdx = buildFileIndex(repos, [path.join(projectDir, '.claude')]);
+  const fileIdx = buildFileIndex(repos, plain);
   const sessionPrefixes = knownSessionPrefixes();
   const findings = [];
   let filesChecked = 0, anchors = 0;
@@ -280,51 +311,53 @@ export function checkMemory({ projectDir, memoryDir = null, onlyFile = null,
 
   // Pass 2 — resolve in batches, then report.
   const identIndex = symbols.size
-    ? buildIdentIndex(repos, [path.join(projectDir, '.claude')])
+    ? buildIdentIndex(repos, plain)
     : new Set();
   const aliveCommits = resolveCommits(commits, repos);
   const lineCache = new Map();
   const skippedSymbols = identIndex === null;
+  const missing = `file not found in ${allRoots.length} code root(s)`;
+  const where = (cands) => [...new Set(cands.map(rootOf))].join(', ');
 
   for (const p of pending) {
     if (p.type === 'line') {
-      const base = path.basename(p.ref);
-      const cands = (fileIdx.get(base) || []).filter((q) => q.endsWith(p.ref) || path.basename(q) === base);
+      const cands = candidatesFor(fileIdx, p.ref);
       if (!cands.length) {
-        findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'missing-file', anchor: `${p.ref}:${p.lno}`, note: 'file not found in any repo' });
+        findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'missing-file', anchor: `${p.ref}:${p.lno}`, note: missing });
       } else {
         // Several files share a basename across repos (balance.service.ts ×2).
         // A bare `file.ts:NN` anchor names any of them, so it is alive if ANY
         // candidate still has line NN; reporting against the first hit was a coin toss.
-        let best = 0;
+        let best = 0, bestFile = cands[0];
         for (const c of cands) {
           if (!lineCache.has(c)) lineCache.set(c, countLines(c));
-          best = Math.max(best, lineCache.get(c) || 0);
+          if ((lineCache.get(c) || 0) > best) { best = lineCache.get(c); bestFile = c; }
         }
         if (best && p.lno > best) {
           const note = cands.length > 1 ? `longest of ${cands.length} same-named files has ${best} lines` : `file now has ${best} lines`;
-          findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'line-out-of-range', anchor: `${p.ref}:${p.lno}`, note });
-        }
+          findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'line-out-of-range', anchor: `${p.ref}:${p.lno}`, note: `${note} (in ${where(cands)})` });
+        } else resolved(rootOf(bestFile));
       }
     } else if (p.type === 'fsym') {
-      const base = path.basename(p.ref);
-      const cands = (fileIdx.get(base) || []).filter((q) => q.endsWith(p.ref) || path.basename(q) === base);
+      const cands = candidatesFor(fileIdx, p.ref);
       if (!cands.length) {
-        findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'missing-file', anchor: `${p.ref}#${p.sym}`, note: 'file not found in any repo' });
+        findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'missing-file', anchor: `${p.ref}#${p.sym}`, note: missing });
       } else {
         const re = new RegExp(`\\b${p.sym}\\b`);
-        const hit = cands.some((c) => { try { return re.test(fs.readFileSync(c, 'utf8')); } catch { return false; } });
-        if (!hit) findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'symbol-not-in-file', anchor: `${p.ref}#${p.sym}`, note: `symbol absent from ${cands.length} candidate file(s) — moved or renamed` });
+        const hit = cands.find((c) => { try { return re.test(fs.readFileSync(c, 'utf8')); } catch { return false; } });
+        if (hit) resolved(rootOf(hit));
+        else findings.push({ severity: 'high', file: p.file, line: p.line, kind: 'symbol-not-in-file', anchor: `${p.ref}#${p.sym}`, note: `symbol absent from ${cands.length} candidate file(s) in ${where(cands)} — moved or renamed` });
       }
-    } else if (p.type === 'commit' && !aliveCommits.has(p.sha)) {
-      findings.push({ severity: 'medium', file: p.file, line: p.line, kind: 'missing-commit', anchor: p.sha, note: 'commit not reachable' });
+    } else if (p.type === 'commit') {
+      if (aliveCommits.has(p.sha)) resolved(rootOf(aliveCommits.get(p.sha)));
+      else findings.push({ severity: 'medium', file: p.file, line: p.line, kind: 'missing-commit', anchor: p.sha, note: `commit not reachable in ${repos.length} repo(s)` });
     } else if (p.type === 'symbol' && !skippedSymbols && !identIndex.has(p.sym)) {
       findings.push({ severity: 'low', file: p.file, line: p.line, kind: 'missing-symbol', anchor: p.sym, note: 'symbol not found in indexed code — may be external API, DB object or prose' });
     }
   }
 
-  return { repos, memoryDirs: memDirs.map((m) => m.realPath), filesChecked, anchors, findings,
-           skippedSymbols };
+  return { repos, roots: allRoots.map((r) => r.replace(os.homedir(), '~')), resolvedBy: Object.fromEntries(resolvedBy),
+           memoryDirs: memDirs.map((m) => m.realPath), filesChecked, anchors, findings, skippedSymbols };
 }
 
 // ---------------------------------------------------------------------- CLI
@@ -343,6 +376,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     memoryDir: arg('memory'),
     onlyFile: arg("file"),
     includeEphemeral: process.argv.includes("--include-ephemeral"),
+    roots: (arg('roots') || '').split(',').map((s) => s.trim()).filter(Boolean),
   });
   const failOn = arg('fail-on');           // 'high' | 'medium' — exit 1 when a finding meets or exceeds it
   const SEVERITY_RANK = { low: 0, medium: 1, high: 2 };
@@ -358,6 +392,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   } else {
     if (res.skippedSymbols) console.log('note: symbol check skipped — code index too large');
     console.log(`repos: ${res.repos.length} · memory dirs: ${res.memoryDirs.length} · files: ${res.filesChecked} · anchors: ${res.anchors}`);
+    console.log(`resolved by root (files, symbols in files, commits): ${res.roots.map((r) => `${r} ${res.resolvedBy[r] || 0}`).join(' · ')}`);
     // Symbol misses are a weak heuristic (external APIs, DB objects, prose all
     // trip it). Show the precise classes by default; --all opens the firehose.
     const showAll = process.argv.includes('--all');

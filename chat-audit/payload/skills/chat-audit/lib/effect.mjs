@@ -8,7 +8,10 @@
 //   - git, by itself: every commit that touches agent config — the project's .claude/ and CLAUDE.md, ~/.claude (a local
 //     repo since 2026-10-03, committed by its own Stop hook), the repos behind symlinked skills. One row per artifact,
 //     its latest burst of commits, measured for liveness only: does the hook run and decide, is the skill / agent /
-//     tool used at all since. Rows `G:<name>`.
+//     tool used at all since. Rows `G:<name>`. An agent or skill a script starts headless (`claude -p`, e.g. from
+//     launchd) leaves no Agent call or Skill load to count: with none seen it is `external`, never `dead`.
+// Transcripts are the project's by discover.mjs#projectFolders: its tree, its workspace (an ancestor running the same
+// `.claude`) and its other worktrees. A skill or agent name matches bare or as `<project>:<name>`.
 //   - the ledger, by hand: a `type:"change"` line (instructions-tuning Step 5, format in modes/land.md) when a change has
 //     a behaviour signal to measure — 7 days before vs since. A line for the same commit or artifact replaces its git row.
 // Global artifacts are measured on every project's transcripts: one project's view called a skill used elsewhere dead.
@@ -50,6 +53,7 @@ const GIT_DAYS = 30;   // Claude Code deletes transcripts after ~30 days: an old
 const ACTION = {
   alive: 'runs; whether behaviour moved needs a ledger line with a signal',
   works: '—', 'no-effect': 'reshape: predicate or hook', dead: 'delete or fold into what fires',
+  external: 'runs outside what transcripts can name: read its runner\'s log, never delete from this table',
   untested: 'never cite as works', leaking: 'widen the scope', harmful: 'fix or revert today',
   'unclear-window': 're-check next run', unmeasurable: 'add a signal or accept as faith',
   decaying: 'check the rule is still loaded and not superseded; recurs after that → hook',
@@ -226,18 +230,26 @@ export function readHookLog(project) {
 
 // ------------------------------------------------------------------ matching + measuring
 
+// A skill or agent of a nested `.claude` is called both bare and as `<project>:<name>` (`pricehub:vault-write`): a name
+// matches in either form, so a hand-written `^vault-write$` counts the prefixed loads too.
+const NAMED = new Set(['skill', 'subagent_type']);
+const nameIs = (re, v) => re.test(v) || re.test(v.replace(/^[\w.-]+:/, ''));
+
 function matches(spec, ev) {
   switch (spec.kind) {
     case 'reply': return ev.type === 'reply';
     case 'assistant': case 'user': return ev.type === spec.kind && spec.re.test(ev.text);
     case 'sessions': return ev.type === 'session';
-    case 'skill': return ev.type === 'skill' && spec.re.test(ev.name);
+    case 'skill': return ev.type === 'skill' && nameIs(spec.re, ev.name);
     case 'deny': return ev.type === 'deny' && ev.hook.includes(spec.hook) && spec.re.test(ev.text);
     case 'hooklog': return ev.type === 'hooklog' && ev.hook === spec.hook && spec.re.test(ev.text);
     case 'tool': {
       if (ev.type !== 'tool' || ev.test || !spec.names.has(ev.name)) return false;
       const i = ev.input;
-      if (spec.field) return i[spec.field] !== undefined && i[spec.field] !== null && spec.re.test(String(i[spec.field]));
+      if (spec.field) {
+        if (i[spec.field] === undefined || i[spec.field] === null) return false;
+        return NAMED.has(spec.field) ? nameIs(spec.re, String(i[spec.field])) : spec.re.test(String(i[spec.field]));
+      }
       // A heredoc body is data (a script, a quote), not the command being run.
       return spec.re.test(i.command != null ? String(i.command).replace(HEREDOC, '') : String(i.file_path ?? JSON.stringify(i)));
     }
@@ -283,6 +295,7 @@ function baseVerdict(change, before, after, hookLogStart, now) {
   // Liveness (rows from git): it runs at all — a load, a call, a log line; `fires` also wants a decision.
   if (want === 'alive' || want === 'fires') {
     if (after.hits) return 'alive';
+    if (change.launcher) return 'external';   // runs where no transcript can name it: unseen, not dead
     if (want === 'fires') return 'untested';   // has log lines, never denied, blocked, deferred or injected
     return now - Date.parse(change.ts) >= WINDOW ? 'dead' : 'unclear-window';
   }
@@ -411,11 +424,53 @@ function liveness(a, file) {
         ? { signal: { src: `hooklog:${a.name}`, re: '^(deny|block|defer|inject)', want: 'fires' }, occasion: null }
         : { signal: { src: `hooklog:${a.name}`, re: '^pass', want: 'alive' }, occasion: null, note: 'recorder: lives by its passes' };
     }
-    case 'skill': return { signal: { src: 'skill', re: `^([\\w-]+:)?${name}$`, want: 'alive' }, occasion: null };
-    case 'agent': return { signal: { src: 'tool:Agent.subagent_type', re: `^([\\w-]+:)?${name}$`, want: 'alive' }, occasion: sessions };
+    case 'skill': return { signal: { src: 'skill', re: `^${name}$`, want: 'alive' }, occasion: null };
+    case 'agent': return { signal: { src: 'tool:Agent.subagent_type', re: `^${name}$`, want: 'alive' }, occasion: sessions };
     case 'tool': return { signal: { src: 'tool:Bash.command', re: `(^|[\\s/])${name}(?![\\w.-])`, want: 'alive' }, occasion: sessions };
     default: return { signal: null, occasion: null };   // rule, memory, settings, hook-support: no mechanical signal
   }
+}
+
+// An agent or skill can run where no transcript names it: a script starts `claude -p` with its definition as the prompt
+// (pricehub-query-watch: launchd → .claude/query-watch/run.sh → `--append-system-prompt` from agents/<name>.md — its
+// sessions exist, but no Agent call or Skill load says whose they are). With nothing to count, such a row is `external`,
+// not `dead`: its liveness is the runner's own log. Launchers are scripts in the config dirs that run Claude headless.
+const HEADLESS = /\bclaude\s+(?:[^\n;|&]*\s)?(?:-p|--print)\b/;
+const LAUNCH_SKIP = new Set(['state', 'worktrees', 'node_modules', 'projects', 'plugins', 'jobs', 'file-history', 'shell-snapshots',
+  'cache', 'sessions', 'backups', 'archive', 'paste-cache', 'telemetry', 'tasks', 'todos', 'debug', 'agent-memory', 'session-env']);
+
+function findLaunchers(roots) {
+  const out = [];
+  const walk = (dir, top, depth) => {
+    let es;
+    try { es = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of es) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory() && depth < 3 && !LAUNCH_SKIP.has(e.name) && !e.name.startsWith('.')) walk(p, top, depth + 1);
+      else if (e.isFile() && SCRIPT.test(e.name)) {
+        let text = '';
+        try { if (fs.statSync(p).size < 256e3) text = fs.readFileSync(p, 'utf8'); } catch { /* unreadable */ }
+        if (HEADLESS.test(text)) out.push({ file: p, rel: path.relative(top, p), text });
+      }
+    }
+  };
+  for (const r of roots) if (!r.skill) walk(r.dir, r.top, 0);
+  // What starts them on a schedule: launchd agents and the crontab. A plist may run another checkout of the same repo,
+  // so a launcher is found there by its repo-relative path.
+  let sched = [];
+  const la = path.join(os.homedir(), 'Library/LaunchAgents');
+  try { sched = fs.readdirSync(la).filter((f) => f.endsWith('.plist')).map((f) => ({ name: `launchd ${f.replace(/\.plist$/, '')}`, text: fs.readFileSync(path.join(la, f), 'utf8') })); } catch { /* not macOS */ }
+  try { sched.push({ name: 'crontab', text: execFileSync('crontab', ['-l'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000 }) }); } catch { /* none */ }
+  for (const l of out) l.sched = sched.find((s) => s.text.includes(l.rel))?.name || null;
+  return out;
+}
+
+function launcherOf(a, launchers) {
+  if (a.kind !== 'agent' && a.kind !== 'skill') return null;
+  const n = a.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const ref = a.kind === 'agent' ? new RegExp(`agents/${n}\\.md\\b|--agents?[= ]['"]?${n}\\b`) : new RegExp(`skills/${n}/SKILL\\.md\\b`);
+  const l = launchers.find((x) => ref.test(x.text) && !x.rel.includes(`skills/${a.name}/`));   // not the skill's own scripts
+  return l ? `launched by ${l.rel}${l.sched ? ` (${l.sched})` : ''}: no Agent call or Skill load to count — read that runner's log` : null;
 }
 
 /**
@@ -425,6 +480,7 @@ function liveness(a, file) {
  */
 export function gitChanges(project, hand, since) {
   const roots = configRoots(project);
+  const launchers = findLaunchers(roots);
   const wired = { global: wiredHooks([path.join(os.homedir(), '.claude')]), project: wiredHooks(roots.filter((r) => r.scope === 'project' && !r.skill).map((r) => r.dir)) };
   // Seen by commit AND file: a second clone of the same repo repeats both; two linked skills of one repo share a
   // commit but not a file — keyed by commit alone, the second skill lost every commit the first one had.
@@ -476,6 +532,7 @@ export function gitChanges(project, hand, since) {
       type: 'change', source: 'git', id: `G:${scope === 'global' ? '~/' : ''}${a.name}`, ts: new Date(start).toISOString(),
       session: burst[burst.length - 1].session, kind: a.kind, scope, commit: burst[0].sha.slice(0, 8), commits: burst.length,
       edits: cs.length, paths: [...new Set(burst.flatMap((c) => c.files))], class: burst[0].subject, ...liveness(a, live[0]),
+      launcher: launcherOf(a, launchers),
     });
   }
   return rows.sort((x, y) => Date.parse(x.ts) - Date.parse(y.ts));
@@ -542,7 +599,8 @@ function measureGroup(project, changes, now, scope) {
     return {
       id: ch.id, source: ch.source || 'ledger', scope: ch.scope || null, ts: ch.ts, kind: ch.kind, class: ch.class,
       signal: ch.signal ? ch.signal.src : null, before, after, verdict: v, recorded: ch.verdict || null, action: ACTION[v],
-      ...(ch.source === 'git' ? { commit: ch.commit, commits: ch.commits, edits: ch.edits, session: ch.session, paths: ch.paths, note: ch.note || null } : {}),
+      ...(ch.source === 'git' ? { commit: ch.commit, commits: ch.commits, edits: ch.edits, session: ch.session, paths: ch.paths,
+        note: ch.note || (v === 'external' ? ch.launcher : null) } : {}),
     };
   });
 }

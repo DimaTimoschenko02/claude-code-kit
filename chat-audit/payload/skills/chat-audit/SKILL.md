@@ -55,7 +55,7 @@ node .claude/skills/chat-audit/lib/discover.mjs sessions  --project <dir> [--day
 node .claude/skills/chat-audit/lib/extract.mjs   --sessions a.jsonl,b.jsonl --out slice.json   # per-session slice, with user turns
 node .claude/skills/chat-audit/lib/analyze.mjs   --project <dir> [--days N] [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
 node .claude/skills/chat-audit/lib/agents.mjs    --project <dir> [--days N] | --sessions a.jsonl,b.jsonl [--json]  # subagent transcripts: duration, tool errors by class, gaps, stalls
-node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir> [--memory <dir>] [--fail-on high|medium] [--all]  # anchors in memory that no longer resolve
+node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir> [--roots <dir,dir>] [--memory <dir>] [--fail-on high|medium] [--all]  # anchors in memory that no longer resolve
 node .claude/skills/chat-audit/lib/tokens.mjs    [--project <dir>|--all] [--since YYYY-MM-DD] [--top N]  # what the tokens are spent ON
 node .claude/skills/chat-audit/lib/effect.mjs    [--project <dir>] [--id C-n,..] [--now <iso>] [--json]  # did each recorded .claude change work
 node .claude/skills/chat-audit/lib/effect.mjs    record (--id C-n | --all) [--project <dir>]   # freeze a change line's 7-day baseline
@@ -70,7 +70,8 @@ transcript shows only a description and a duration; the subagent's own transcrip
 watchdog stalls actually live. Cheap and agent-free, so `extract.md` runs it by default.
 `effect.mjs` answers *did our own changes work*. Every commit that touches agent config — the project's `.claude/`,
 `~/.claude` (a local repo), the repos behind symlinked skills — becomes a row by itself, checked for liveness: the hook
-runs and decides, the skill, agent or tool is used (alive · untested · dead). A `type:"change"` ledger line adds a
+runs and decides, the skill, agent or tool is used (alive · untested · dead; `external` when a script starts it
+headless, where no transcript can name it). A `type:"change"` ledger line adds a
 behaviour signal, counted 7 days before vs since (works · decaying · no-effect · harmful · unclear-window ·
 unmeasurable). `recon.md` runs it first.
 `tokens.mjs` answers *what the spend consists of*: every call re-reads the whole context, so it attributes
