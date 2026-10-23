@@ -120,6 +120,42 @@ if [ -z "$aid_early" ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
   fi
 fi
 
+# A subagent whose definition lists the skill under `skills:` got the skill's full text injected at its start, and that
+# load is no Skill tool call, so the log never shows it. The coder was told in prose to load code-style itself and was
+# bounced 49 times on 30 runs; with the skill preloaded the gate must count the preload. The definition is found by
+# its `name:` (hooks receive it as agent_type), project agents first, then the user's.
+preloaded=""
+atype=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null)
+if [ -n "$aid_early" ] && [ -n "$atype" ]; then
+  preloaded=$(python3 -B - "$atype" "$ROOT/.claude/agents" "$HOME/.claude/agents" <<'PY' 2>/dev/null
+import glob, os, re, sys
+name, dirs = sys.argv[1], sys.argv[2:]
+for d in dirs:
+    for path in sorted(glob.glob(os.path.join(d, "*.md"))):
+        text = open(path, encoding="utf-8", errors="replace").read()
+        m = re.match(r"---\n(.*?)\n---", text, re.S)
+        if not m or not re.search(r"(?m)^name:\s*['\"]?" + re.escape(name) + r"['\"]?\s*$", m.group(1)):
+            continue
+        out, inlist = [], False
+        for line in m.group(1).split("\n"):
+            if inlist:
+                item = re.match(r"\s+-\s*['\"]?([^'\"#]+?)['\"]?\s*$", line)
+                if item:
+                    out.append(item.group(1)); continue
+                inlist = False
+            head = re.match(r"skills:\s*(.*)$", line)
+            if head:
+                rest = head.group(1).strip().strip("[]")
+                if rest:
+                    out += [s.strip().strip("'\"") for s in rest.split(",") if s.strip()]
+                else:
+                    inlist = True
+        print("\n".join(out))
+        sys.exit(0)
+PY
+)
+fi
+
 # Most recent invocation ts of the required skill (ISO8601 UTC -> lexicographic compare valid).
 # Directory-scoped skills are logged with a scope prefix ("myrepo:vault-write"), so accept "<scope>:<skill>" too.
 # Only this session's invocations count: parallel sessions share the log, and another window's /skill must not open
@@ -133,6 +169,9 @@ while IFS=$'\t' read -r s r; do
   [ -z "$s" ] && continue
   if [ -n "$restored" ] && printf '%s\n' "$restored" | grep -qxE "([^:]+:)?${s}"; then
     continue   # re-attached whole after the last compaction, under either name
+  fi
+  if [ -n "$preloaded" ] && printf '%s\n' "$preloaded" | grep -qxE "([^:]+:)?${s}"; then
+    continue   # preloaded into this subagent by its definition's skills:
   fi
   invoked=$(jq -r --arg s "$s" --arg sid "$sid" --arg aid "$aid" \
     'select(.skill==$s or (.skill|endswith(":"+$s))) | select($sid == "" or (.session_id // "") == "" or .session_id == $sid)

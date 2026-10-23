@@ -29,9 +29,13 @@ def skills(ts, *named):
 
 
 class Gate(unittest.TestCase):
-    def run_gate(self, transcript_lines, invocations, agent_id=None):
+    def run_gate(self, transcript_lines, invocations, agent_id=None, agent_type=None, agents=None):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, ".claude", "state"))
+            os.makedirs(os.path.join(root, ".claude", "agents"))
+            for fname, fm in (agents or {}).items():
+                with open(os.path.join(root, ".claude", "agents", fname), "w") as f:
+                    f.write("---\n" + fm + "\n---\n\nbody\n")
             with open(os.path.join(root, ".claude", "skill-gate.config.json"), "w") as f:
                 json.dump({"gates": [{"path_prefix": "brain/", "skill": "vault-write"}]}, f)
             with open(os.path.join(root, ".claude", "state", "skill-invocations.jsonl"), "w") as f:
@@ -44,7 +48,10 @@ class Gate(unittest.TestCase):
                        "transcript_path": transcript, "cwd": root, "session_id": SID}
             if agent_id:
                 payload["agent_id"] = agent_id
+            if agent_type:
+                payload["agent_type"] = agent_type
             env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "SKILL_GATE_LOG")}
+            env["HOME"] = root
             return subprocess.run(["bash", GATE], input=json.dumps(payload), capture_output=True, text=True,
                                   env=env).returncode
 
@@ -75,6 +82,24 @@ class Gate(unittest.TestCase):
     def test_subagent_does_not_inherit_the_main_attachment(self):
         lines = [compact("2026-10-11T12:00:00.000Z"), skills("2026-10-11T12:00:00.000Z", ("vault-write", 1083))]
         self.assertEqual(self.run_gate(lines, [], agent_id="a-1"), 2)
+
+
+    # A subagent whose definition preloads the skill (`skills:`) has its text from the start; no Skill call is logged.
+    def test_subagent_with_the_skill_preloaded_passes(self):
+        agents = {"coder.md": "name: coder\nmodel: opus\nskills:\n  - vault-write"}
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", agents=agents), 0)
+
+    def test_preload_inline_list_and_scoped_name_pass(self):
+        agents = {"x.md": "name: coder\nskills: [pricehub:vault-write, other]"}
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", agents=agents), 0)
+
+    def test_subagent_preloading_another_skill_is_denied(self):
+        agents = {"coder.md": "name: coder\nskills:\n  - code-style"}
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", agents=agents), 2)
+
+    def test_preload_is_found_by_name_not_by_another_agent(self):
+        agents = {"reader.md": "name: reader\nskills:\n  - vault-write", "coder.md": "name: coder"}
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", agents=agents), 2)
 
 
 if __name__ == "__main__":
