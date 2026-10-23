@@ -43,10 +43,14 @@ esac
 # argv array (["bash","-lc","cat .env"]), so arrays are joined and other types stringified
 # instead of reaching the regexes as JSON-escaped text. CR is dropped (CRLF patches).
 input_text() {
+  # Unicode whitespace becomes a plain space: Codex trims it from patch paths (Rust trim),
+  # sed's [[:space:]] does not, so ".env<NBSP>" would otherwise slip past the path patterns.
+  # Non-ASCII letters stay (Cyrillic paths are legitimate).
   jq -r '(.tool_input.command // .tool_input.cmd // .tool_input.input // "")
          | if type=="array" then map(tostring) | join(" ")
            elif type=="string" then .
-           else tostring end' <<<"$input" | tr -d '\r'
+           else tostring end
+         | gsub("[\u0085   -​    　﻿]"; " ")' <<<"$input" | tr -d '\r'
 }
 
 # A relative patch path ("id_rsa", ".git-credentials") must also hit the "*/name" patterns.
