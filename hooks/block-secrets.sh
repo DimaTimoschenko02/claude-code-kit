@@ -24,7 +24,7 @@
 set -u
 
 input=$(cat)
-tool=$(jq -r '.tool_name // ""' <<<"$input")
+tool=$(jq -r '.tool_name // ""' <<<"$input") || { echo "🛑 BLOCKED by block-secrets.sh: could not parse hook payload" >&2; exit 2; }
 
 deny() {
   echo "🛑 BLOCKED by block-secrets.sh: $1" >&2
@@ -46,11 +46,20 @@ input_text() {
   # Unicode whitespace becomes a plain space: Codex trims it from patch paths (Rust trim),
   # sed's [[:space:]] does not, so ".env<NBSP>" would otherwise slip past the path patterns.
   # Non-ASCII letters stay (Cyrillic paths are legitimate).
-  jq -r '(.tool_input.command // .tool_input.cmd // .tool_input.input // "")
-         | if type=="array" then map(tostring) | join(" ")
-           elif type=="string" then .
-           else tostring end
-         | gsub("[\u0085   -​    　﻿]"; " ")' <<<"$input" | tr -d '\r'
+  # Fails closed: a jq error or an input that normalises to nothing is denied, never passed.
+  # The fold runs in perl (linear time): jq's gsub can blow the hook timeout on a large
+  # patch, and a timed-out hook lets the tool call through.
+  local raw out
+  raw=$(jq -r '(.tool_input.command // .tool_input.cmd // .tool_input.input // "")
+               | if type=="array" then map(tostring) | join(" ")
+                 elif type=="string" then .
+                 else tostring end' <<<"$input") || deny "could not parse tool input"
+  out=$(perl -CSD -pe 's/[\x{85}\x{A0}\x{1680}\x{2000}-\x{200B}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}\r]/ /g' <<<"$raw") \
+    || deny "could not normalise tool input"
+  if [ -n "$raw" ] && [ -z "$out" ]; then
+    deny "tool input normalised to nothing"
+  fi
+  printf '%s' "$out"
 }
 
 # A relative patch path ("id_rsa", ".git-credentials") must also hit the "*/name" patterns.
@@ -97,10 +106,10 @@ case "$tool" in
   apply_patch)
     # Codex patch headers name every touched file: "*** Add File: p", "*** Update File: p",
     # "*** Delete File: p", "*** Move to: p".
-    patch=$(input_text)
+    patch=$(input_text) || exit 2
     paths=$(sed -nE 's/^[[:space:]]*\*\*\*[[:space:]]*(Add File|Update File|Delete File|Move to):[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\2/p' <<<"$patch")
     # Fail closed: a non-empty patch with no header we can parse is a format we do not understand.
-    if [ -n "${patch//[[:space:]]/}" ] && [ -z "$paths" ]; then
+    if [[ $patch =~ [^[:space:]] ]] && [ -z "$paths" ]; then
       deny "apply_patch input has no recognisable file headers"
     fi
     while IFS= read -r path; do
@@ -117,7 +126,7 @@ case "$tool" in
     fi
     ;;
   Bash)
-    cmd=$(input_text)
+    cmd=$(input_text) || exit 2
 
     # Known credential-file suffixes / path literals. Kept WITHOUT bare "secret"/"password"
     # words on purpose (see DESIGN CONSTRAINT above).
