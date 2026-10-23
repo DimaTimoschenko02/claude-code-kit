@@ -19,6 +19,11 @@ CONFIG="${CLAUDE_PROJECT_DIR:-$PWD}/.claude/chat-audit.config.json"
 input="$(cat)"
 prompt="$(printf '%s' "$input" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -c 4000)"
 [ -z "$prompt" ] && exit 0
+# Not the user typing: background-task notifications, subagent hand-backs, peer-session messages arrive on the same
+# channel and often talk about sessions and audits themselves.
+case "$prompt" in
+  *'[SYSTEM NOTIFICATION'*|*'<task-notification>'*|*'<cross-session-message'*|*'<agent-message'*|'Another Claude session sent a message'*) exit 0 ;;
+esac
 
 session="$(printf '%s' "$input" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
 [ -z "$session" ] && session="unknown"
