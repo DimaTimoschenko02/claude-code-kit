@@ -90,8 +90,8 @@ export function headFacts(matches: readonly string[]): { startMs?: number; cwd?:
     if (kv[1] === 'timestamp' && out.startMs === undefined) {
       const t = Date.parse(kv[2]!)
       if (!Number.isNaN(t)) out.startMs = t
-    } else if (kv[1] === 'cwd' && out.cwd === undefined) out.cwd = kv[2]!
-    else if (kv[1] === 'originator' && out.origin === undefined) out.origin = kv[2]!
+    } else if (kv[1] === 'cwd' && out.cwd === undefined) out.cwd = oneLine(kv[2]!, 200)
+    else if (kv[1] === 'originator' && out.origin === undefined) out.origin = oneLine(kv[2]!, 40)
   }
   return out
 }
@@ -135,9 +135,14 @@ export function mask(s: string): string {
     .replace(/\b(?=[A-Za-z0-9_+-]*\d)(?=[A-Za-z0-9_+-]*[A-Za-z])[A-Za-z0-9_+-]{32,}={0,2}/g, '…')
 }
 
+/** Replaces C0/C1 control characters (ESC, CSI, BEL, …) so model or command text cannot drive the terminal. */
+export function clean(s: string): string {
+  return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+}
+
 /** One masked line of at most `max` characters. */
 export function oneLine(s: string, max = 140): string {
-  const flat = mask(s.slice(0, 600).replace(/\s+/g, ' ').trim())
+  const flat = mask(clean(s.slice(0, 600)).replace(/\s+/g, ' ').trim())
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
 }
 
@@ -202,8 +207,10 @@ function usageOf(rl: Obj | undefined, at: number): Usage | undefined {
     windows.push({ minutes: num(w.window_minutes) ?? 0, pct, ...(resetsAt === undefined ? {} : { resetsAt: resetsAt * 1000 }) })
   }
   if (windows.length === 0) return undefined
-  const plan = str(rl.plan_type)
-  const reached = str(rl.rate_limit_reached_type)
+  const planRaw = str(rl.plan_type)
+  const reachedRaw = str(rl.rate_limit_reached_type)
+  const plan = planRaw === undefined ? undefined : oneLine(planRaw, 40)
+  const reached = reachedRaw === undefined ? undefined : oneLine(reachedRaw, 60)
   return { windows, at, ...(plan === undefined ? {} : { plan }), ...(reached === undefined ? {} : { reached }) }
 }
 
@@ -348,7 +355,7 @@ export function buildView(recs: Iterable<Rec>, tasks: ReadonlyMap<string, string
     const end = finished ? (r.endAt ?? r.mtimeMs) : now
     runs.push({
       thread: r.thread,
-      label: tasks.get(r.thread) ?? r.prompt ?? r.thread.slice(0, 8),
+      label: oneLine(tasks.get(r.thread) ?? r.prompt ?? r.thread.slice(0, 8), 90),
       cwd: (r.cwd ?? '').split('/').filter(Boolean).pop() ?? '',
       ...(r.origin !== undefined && r.origin !== 'codex_exec' ? { origin: r.origin } : {}),
       phase,

@@ -1,12 +1,18 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { cmdOfJs, fmtDur, fmtTokens, mask, merge, parseTail, promptOf, splitHeaders, taskFile } from '../hooks/parse'
+import { clean, cmdOfJs, fmtDur, fmtTokens, mask, merge, oneLine, parseTail, promptOf, splitHeaders, taskFile } from '../hooks/parse'
 import type { Rec } from '../hooks/parse'
 import { T0, line } from './world'
 
 const REC: Rec = { path: '/home/fake/r.jsonl', thread: 't', size: -1, mtimeMs: T0, isHeadRead: true, phase: 'none' }
 
 describe('parse', () => {
+  test('control characters never reach the terminal', () => {
+    const evil = 'ok\u001b]0;pwned\u0007 \u001b[2J\u009bdone'
+    expect(clean(evil)).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/)
+    expect(oneLine(evil)).toBe('ok ]0;pwned [2J done')
+  })
+
   test('mask hides env values, URL credentials and tokens, keeps the command readable', () => {
     expect(mask('TEST_DATABASE_URL="postgres://u:p@h/db" pnpm test')).toBe('TEST_DATABASE_URL=… pnpm test')
     expect(mask('psql postgres://admin:Kq7vR2mZ8pLw@db.local/app')).toBe('psql postgres://…@db.local/app')
