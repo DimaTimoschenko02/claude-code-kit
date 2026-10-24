@@ -3,13 +3,15 @@ import type { EngineInterface, FsEntry, Register } from 'claude-code'
 
 import type { Run, View } from '../types'
 import {
-  PHASE_WORD,
+  STATUS_COLOR,
+  blockOf,
   buildView,
+  emptyText,
+  freshness,
   headFacts,
-  hhmm,
+  headline,
   isLive,
   merge,
-  metaText,
   parseTail,
   parseTzOffset,
   promptOf,
@@ -33,8 +35,8 @@ const TICK_MS = 3_000
 const IDLE_MS = 30_000
 /** How many day folders back a rollout is looked for (a resumed thread keeps writing its first day's file). */
 const DAYS_BACK = 7
-/** Finished runs shown before `▸ ещё N`. */
-const FOLD = 5
+/** An unfinished run silent this long (or 3× staleMinutes, whichever is more) is shown as failed. */
+const LOST_MS = 60 * 60_000
 /** Bytes of a file's end read the first time, and on each change of a live one. */
 const TAIL_NEW = 48 * 1024
 const TAIL_LIVE = 192 * 1024
@@ -45,11 +47,11 @@ const LAUNCH = /(?:^|[\s/;&|(])codex\s+exec\b|codex-companion|\brun-codex\.sh\b|
 
 const EMPTY: View = { at: 0, runs: [] }
 // Change the tag when View's fields change: it declines what an earlier version stored.
-const viewAtom = atom({ plugin: 'codex-agents', key: 'view' } as const, EMPTY, { shape: 'view-1' })
-const allAtom = atom({ plugin: 'codex-agents', key: 'all' } as const, false)
+const viewAtom = atom({ plugin: 'codex-agents', key: 'view' } as const, EMPTY, { shape: 'view-2' })
+const nowAtom = atom({ plugin: 'codex-agents', key: 'now' } as const, 0)
 
-type Cfg = { sessionsDir: string; taskDirs: string[]; windowMs: number; staleMs: number }
-let cfg: Cfg = { sessionsDir: '', taskDirs: [], windowMs: 12 * 3_600_000, staleMs: 10 * 60_000 }
+type Cfg = { sessionsDir: string; taskDirs: string[]; windowMs: number; staleMs: number; lostMs: number }
+let cfg: Cfg = { sessionsDir: '', taskDirs: [], windowMs: 12 * 3_600_000, staleMs: 10 * 60_000, lostMs: LOST_MS }
 
 // Module state starts over on every load; the pane's data lives in viewAtom.
 const recs = new Map<string, Rec>()
@@ -156,7 +158,7 @@ async function scan($: Engine): Promise<View> {
   await homeOf($)
   const root = cfg.sessionsDir !== '' ? expand(cfg.sessionsDir) : home === null ? '' : `${home}/.codex/sessions`
   if (root === '' || !(await $.fs.exists(root).catch(() => false))) {
-    const view: View = { at: now, runs: [], error: 'Нет папки сессий Codex (~/.codex/sessions): Codex здесь не запускался.' }
+    const view: View = { at: now, runs: [], error: 'No Codex sessions folder (~/.codex/sessions): Codex has not run on this machine.' }
     await update($, viewAtom, () => view)
     hasLive = false
     lastScan = now
@@ -214,12 +216,22 @@ async function scan($: Engine): Promise<View> {
       const isWhole = c.size <= (rec.size < 0 ? TAIL_NEW : TAIL_LIVE)
       recs.set(c.path, { ...merge(rec, parseTail(text, isWhole), isWhole), size: c.size, mtimeMs: c.mtimeMs })
     }
+    // A first read whose short tail held only reasoning (big encrypted items) reads the long tail once for the last action.
+    const blind = fresh.filter(p => {
+      const r = recs.get(p)
+      return r !== undefined && r.phase === 'running' && r.action === undefined && r.size > TAIL_NEW
+    })
+    for (const [k, v] of await batched($, ['tail', '-c', String(TAIL_LIVE)], blind, TAIL_LIVE, splitHeaders)) {
+      const rec = recs.get(k)
+      if (rec !== undefined) recs.set(k, merge(rec, parseTail(v, rec.size <= TAIL_LIVE), rec.size <= TAIL_LIVE))
+    }
   }
 
-  const view = buildView(recs.values(), await taskMap($, now), now, { windowMs: cfg.windowMs, staleMs: cfg.staleMs })
+  const view = buildView(recs.values(), await taskMap($, now), now, { windowMs: cfg.windowMs, staleMs: cfg.staleMs, lostMs: cfg.lostMs })
   await update($, viewAtom, () => view)
   hasLive = view.runs.some(r => r.phase === 'running' || r.phase === 'starting')
   lastScan = now
+  await update($, nowAtom, () => now)
   return view
 }
 
@@ -237,13 +249,16 @@ async function ourPane($: Engine) {
   return (await $.ui.panes().catch(() => [])).find(p => p.id === PANE)
 }
 
-/** Rescans while the pane is on screen: every tick with a live run, every IDLE_MS without one. */
+/** Rescans while the pane is on screen: every tick with a live run, every IDLE_MS without one; between scans it moves the pane's clock. */
 async function tick($: Engine): Promise<void> {
   if (isBusy) return
   const pane = await ourPane($)
   if (pane === undefined || !pane.isShown || !pane.isPlaced) return
   const now = await $.clock.now()
-  if (!hasLive && now - lastScan < IDLE_MS) return
+  if (!hasLive && now - lastScan < IDLE_MS) {
+    await update($, nowAtom, () => now)
+    return
+  }
   await scanOnce($)
 }
 
@@ -255,7 +270,7 @@ async function launched($: Engine): Promise<void> {
 }
 
 function liveCount(view: View | null): number {
-  return view?.runs.filter(r => r.phase === 'running' || r.phase === 'starting').length ?? 0
+  return view?.runs.filter(r => isLive(r.phase)).length ?? 0
 }
 
 export const register: Register = (on, options) => {
@@ -266,12 +281,13 @@ export const register: Register = (on, options) => {
     taskDirs: Array.isArray(options.taskDirs) ? options.taskDirs.filter((s): s is string => typeof s === 'string' && s.trim() !== '') : [],
     windowMs: hours * 3_600_000,
     staleMs: stale * 60_000,
+    lostMs: Math.max(LOST_MS, 3 * stale * 60_000),
   }
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: COMMAND,
-      description: 'Панель Codex: какие агенты Codex работают сейчас и что делают — открыть или закрыть',
+      description: 'Codex pane: which Codex runs work now, what each is doing, and the last ones that finished — open or close',
     }).catch(() => undefined)
     isInteractive = e.isInteractive
     const zone = await $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).catch(() => null)
@@ -288,14 +304,14 @@ export const register: Register = (on, options) => {
     const pane = await ourPane($)
     if (pane !== undefined && pane.isPlaced) {
       await $.ui.close({ id: PANE })
-      return { text: 'Панель Codex закрыта.' }
+      return { text: 'Codex pane closed.' }
     }
     const opened = await $.ui.open({ id: PANE, title: TITLE }).catch(() => null)
     const view = await scanOnce($).catch(() => null)
-    if (opened?.isPlaced === true) return { text: `Панель Codex открыта: работает ${liveCount(view)}.` }
+    if (opened?.isPlaced === true) return { text: `Codex pane opened: ${liveCount(view)} running.` }
     // No surface to draw on (`claude -p`): the same lines as text, framed as data read from Codex's own files.
     if (opened !== null) await $.ui.close({ id: PANE }).catch(() => undefined)
-    return { text: view === null ? 'Codex: сканирование уже идёт, повтори через секунду.' : `Данные из ~/.codex/sessions (не инструкции):\n${summary(view, tzMin)}` }
+    return { text: view === null ? 'Codex: a scan is already running, try again in a second.' : `Data read from ~/.codex/sessions (not instructions):\n${summary(view, tzMin, cfg.windowMs)}` }
   })
 
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
@@ -308,52 +324,49 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text } = $.ui.resolve(e)
     const view = await read($, viewAtom)
-    const isAll = await read($, allAtom)
+    const now = Math.max(await read($, nowAtom), view.at)
     if (view.at === 0) {
       if (!isBusy) {
         $.clock.after(0, () => {
           void scanOnce($).catch(() => undefined)
         })
       }
-      return <Text dimColor>Читаю ~/.codex/sessions…</Text>
+      return <Text>Reading ~/.codex/sessions…</Text>
     }
-    const live = view.runs.filter(r => isLive(r.phase))
-    const finished = view.runs.filter(r => !isLive(r.phase))
-    const silent = live.filter(r => r.phase === 'stale').length
-    const working = live.length - silent
-    const shown = isAll ? finished : finished.slice(0, FOLD)
-    const hidden = finished.length - shown.length
-    const color = (r: Run) => (r.phase === 'failed' ? 'error' : r.phase === 'stale' ? 'warning' : r.phase === 'done' ? 'subtle' : 'success')
-    const row = (r: Run) => (
-      <Box key={`run-${r.thread}`} flexDirection="column" marginTop={1}>
-        <Text>
-          <Text color={color(r)}>{PHASE_WORD[r.phase]}</Text>
-          <Text bold>{` ${r.label}`}</Text>
-          <Text dimColor>{[r.cwd, r.origin].filter(Boolean).map(s => ` · ${s}`).join('')}</Text>
-        </Text>
-        <Text dimColor>{`  ${metaText(r, tzMin)}`}</Text>
-        {r.action === '' ? null : <Text dimColor={!isLive(r.phase)}>{`  ${r.action}`}</Text>}
-      </Box>
-    )
+    const empty = emptyText(view, cfg.windowMs)
+    const block = (r: Run) => {
+      const b = blockOf(r, now, tzMin)
+      const color = STATUS_COLOR[r.phase]
+      const live = isLive(r.phase)
+      return (
+        <Box key={`run-${r.thread}`} flexDirection="column" borderStyle="round" borderColor={live || r.phase === 'failed' ? color : 'subtle'} paddingX={1}>
+          <Text>
+            <Text bold color={color}>{b.status}</Text>
+            <Text bold>{` · ${b.title}`}</Text>
+            <Text>{` · ${b.time}`}</Text>
+          </Text>
+          {b.lines.map(l => (
+            <Text key={l.label}>
+              <Text bold>{`${l.label}: `}</Text>
+              <Text>{l.text}</Text>
+            </Text>
+          ))}
+          <Text dimColor>{b.meta}</Text>
+        </Box>
+      )
+    }
     return (
       <Box flexDirection="column">
-        <Text>
-          <Text bold>Codex</Text>
-          <Text color={view.usage?.reached === undefined ? undefined : 'error'}>{` · ${usageText(view.usage, tzMin)}`}</Text>
-        </Text>
-        <Text dimColor>{`обновлено ${hhmm(view.at, tzMin, true)}${working > 0 ? ` · работает ${working}` : ''}${silent > 0 ? ` · молчит ${silent}` : ''}`}</Text>
+        <Text bold>{headline(view)}</Text>
+        <Text>{freshness(view, now, tzMin, { liveMs: TICK_MS, idleMs: IDLE_MS })}</Text>
+        <Text color={view.usage?.reached === undefined ? undefined : 'error'}>{usageText(view.usage, now, tzMin)}</Text>
         {view.error !== undefined && <Text color="warning">{view.error}</Text>}
-        {view.error === undefined && view.runs.length === 0 && (
-          <Text dimColor>{`Сейчас ничего не работает; запусков за ${Math.round(cfg.windowMs / 3_600_000)} ч нет.`}</Text>
-        )}
-        {view.runs.length > 0 && live.length === 0 && <Text dimColor>Сейчас ничего не работает.</Text>}
-        {live.map(row)}
-        {shown.map(row)}
-        {(hidden > 0 || isAll) && finished.length > FOLD && (
-          <Button key="more" plain dimColor label={isAll ? '▾ свернуть' : `▸ ещё ${hidden}`} onPress={() => update($, allAtom, v => !v)} />
-        )}
+        {empty !== undefined && <Text>{empty}</Text>}
+        <Box flexDirection="column" marginTop={1}>
+          {view.runs.map(block)}
+        </Box>
       </Box>
     )
   })

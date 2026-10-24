@@ -1,10 +1,10 @@
 {
   "name": "codex-agents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Dima Timoschenko"
   },
-  "description": "A side pane «Codex»: which OpenAI Codex runs are working right now and what each is doing (state, time, last command or message, tokens), with the plan's usage on top; read from Codex's own session files, no model calls",
+  "description": "A side pane «Codex»: the OpenAI Codex runs working now and the last ones that finished, each in its own block with a status word (RUNNING, SILENT, DONE, FAILED and why), what it is doing or its result, and how fresh the data is; the plan's limits on top; read from Codex's own session files, no model calls",
   "types": "./types/index.d.ts",
   "userConfig": {
     "taskDirs": {
@@ -17,13 +17,13 @@
     "windowHours": {
       "type": "number",
       "title": "Window, hours",
-      "description": "Runs whose session file changed within this many hours are listed.",
+      "description": "Outer bound: a run whose session file has not changed for this many hours is never listed, even with no newer runs.",
       "default": 12
     },
     "staleMinutes": {
       "type": "number",
       "title": "Silent after, minutes",
-      "description": "An unfinished run whose session file has not changed for this long is shown as silent (◌ молчит) instead of running.",
+      "description": "An unfinished run whose session file has not changed for this long is shown as SILENT; after an hour (or 3× this, whichever is more) it counts as FAILED (no events).",
       "default": 10
     },
     "sessionsDir": {

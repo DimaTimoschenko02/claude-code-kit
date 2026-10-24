@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { clean, cmdOfJs, fmtDur, fmtTokens, mask, merge, oneLine, parseTail, promptOf, splitHeaders, taskFile } from '../hooks/parse'
+import { blockOf, buildView, clean, cmdOfJs, fmtDur, fmtTokens, mask, merge, oneLine, parseTail, promptOf, splitHeaders, taskFile } from '../hooks/parse'
 import type { Rec } from '../hooks/parse'
 import { T0, line } from './world'
 
@@ -35,10 +35,12 @@ describe('parse', () => {
     const done = merge(run, parseTail(['partial', line.complete(T0 + 9_000, 'Готово.\nдетали')].join('\n'), false), false)
     expect(done.phase).toBe('done')
     expect(done.endAt).toBe(T0 + 9_000)
-    expect(done.action).toBe('💬 Готово.')
+    expect(done.result).toBe('Готово.')
+    expect(done.action).toBe('$ ls')
     const again = merge(done, parseTail(['x', line.started(T0 + 60_000)].join('\n'), false), false)
     expect(again.phase).toBe('running')
     expect(again.endAt).toBeUndefined()
+    expect(again.result).toBeUndefined()
     expect(merge(REC, parseTail(['cut-line', line.message(T0, 'hi')].join('\n'), false), false).phase).toBe('running')
     expect(merge(REC, parseTail(line.message(T0, 'hi'), true), true).phase).toBe('none')
   })
@@ -46,7 +48,19 @@ describe('parse', () => {
   test('a failed turn shows why; the usage-limit error in words, never its link', () => {
     const r = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, null, 'usage_limit_exceeded')].join('\n'), true), true)
     expect(r.phase).toBe('failed')
-    expect(r.action).toBe('✖ лимит плана исчерпан')
+    expect(r.error).toBe('usage limit reached')
+    expect(JSON.stringify(r)).not.toContain('example.com')
+  })
+
+  test('a result whose first line is a bare heading carries the next line', () => {
+    const r = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, '1. Findings\n\n- `ui.tsx` drops the empty state')].join('\n'), true), true)
+    expect(r.result).toBe('1. Findings — `ui.tsx` drops the empty state')
+    const plain = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, 'Changed only the two specified files.\nmore')].join('\n'), true), true)
+    expect(plain.result).toBe('Changed only the two specified files.')
+    const short = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, 'Готово.\nдетали')].join('\n'), true), true)
+    expect(short.result).toBe('Готово.')
+    const head = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, '## Summary\n**All** green')].join('\n'), true), true)
+    expect(head.result).toBe('Summary — All green')
   })
 
   test('token_count gives the total and the plan windows', () => {
@@ -59,18 +73,69 @@ describe('parse', () => {
     expect(promptOf('"type":"UserMessage","id":"u","content":[{"type":"text","text":"# Задача 02a — платформа')).toBe('Задача 02a — платформа')
     expect(promptOf('"type":"UserMessage","id":"u","content":[{"type":"text","text":"')).toBeUndefined()
     expect(taskFile('codex-02a.jsonl')).toEqual({ id: '02a', kind: 'events' })
-    expect(taskFile('codex-02a-review.jsonl')).toEqual({ id: '02a ревью', kind: 'events' })
+    expect(taskFile('codex-02a-review.jsonl')).toEqual({ id: '02a review', kind: 'events' })
     expect(taskFile('codex-02a.resume-2.jsonl')).toEqual({ id: '02a', kind: 'events' })
     expect(taskFile('codex-02a.session')).toEqual({ id: '02a', kind: 'session' })
     expect(taskFile('codex-02a.err')).toBeNull()
     const split = splitHeaders('==> /a <==\nx\ny\n\n==> /b <==\nz', ['/a', '/b'])
     expect(split.get('/a')).toBe('x\ny')
     expect(split.get('/b')).toBe('z')
-    expect(fmtDur(45_000)).toBe('45с')
-    expect(fmtDur(23 * 60_000)).toBe('23м')
-    expect(fmtDur(65 * 60_000)).toBe('1ч 05м')
+    expect(fmtDur(45_000)).toBe('45s')
+    expect(fmtDur(23 * 60_000)).toBe('23m')
+    expect(fmtDur(65 * 60_000)).toBe('1h 05m')
     expect(fmtTokens(950)).toBe('950')
     expect(fmtTokens(21_679)).toBe('22k')
     expect(fmtTokens(5_900_000)).toBe('5.9M')
+  })
+
+  const OPTS = { windowMs: 12 * 3_600_000, staleMs: 10 * 60_000, lostMs: 60 * 60_000 }
+  const NOW = T0 + 60 * 60_000
+  const run = (thread: string, startMin: number, phase: Rec['phase'], extra: Partial<Rec> = {}): Rec => ({
+    ...REC,
+    path: `/home/fake/${thread}.jsonl`,
+    thread,
+    prompt: thread,
+    startMs: T0 + startMin * 60_000,
+    turnStart: T0 + startMin * 60_000,
+    mtimeMs: phase === 'running' ? NOW : T0 + (startMin + 1) * 60_000,
+    phase,
+    ...extra,
+  })
+  const labels = (recs: Rec[]) => buildView(recs, new Map(), NOW, OPTS).runs.map(r => r.label)
+
+  test('three finished and one running, the running one newest: the run and the last finished one show', () => {
+    expect(labels([run('f1', 0, 'done'), run('f2', 10, 'failed', { error: 'boom' }), run('f3', 20, 'done'), run('r', 30, 'running')])).toEqual(['r', 'f3'])
+  })
+
+  test('three finished and one running, the running one oldest: it stays, with the two newest finished', () => {
+    expect(labels([run('r', 0, 'running'), run('f1', 10, 'done'), run('f2', 20, 'done'), run('f3', 30, 'done')])).toEqual(['r', 'f3', 'f2'])
+  })
+
+  test('a finished run lives two rounds: shown alone, still shown after one newer start, gone after the second', () => {
+    const done = run('done', 0, 'done')
+    expect(labels([done])).toEqual(['done'])
+    expect(labels([done, run('a', 10, 'running')])).toEqual(['a', 'done'])
+    expect(labels([done, run('a', 10, 'running'), run('b', 20, 'running')])).toEqual(['b', 'a'])
+  })
+
+  test('an unfinished run silent past lostMs is failed and ages out like any finished run', () => {
+    const lost = run('lost', 0, 'running', { mtimeMs: NOW - 70 * 60_000 })
+    const view = buildView([lost], new Map(), NOW, OPTS)
+    expect(view.runs[0]?.phase).toBe('failed')
+    expect(view.runs[0]?.reason).toBe('no events for 1h 10m')
+    expect(labels([lost, run('a', 5, 'done'), run('b', 6, 'done')])).toEqual(['b', 'a'])
+  })
+
+  test('a block names its status in words, the reason, the labelled lines and the meta', () => {
+    const view = buildView(
+      [run('ok', 0, 'done', { result: 'All green', action: '$ pnpm test', tokens: 1_816_357, cwd: '/home/fake/wt-121' }), run('bad', 1, 'failed', { error: 'usage limit reached', action: '$ ls' })],
+      new Map(),
+      NOW,
+      OPTS,
+    )
+    const [bad, ok] = view.runs.map(r => blockOf(r, NOW, 120))
+    expect(ok).toEqual({ status: '✓ DONE', title: 'ok', time: 'took 1m', lines: [{ label: 'result', text: 'All green' }], meta: 'repo wt-121 · 1.8M tokens · started 13:56 · finished 13:57' })
+    expect(bad?.status).toBe('✖ FAILED (usage limit reached)')
+    expect(bad?.lines).toEqual([{ label: 'last', text: '$ ls' }])
   })
 })

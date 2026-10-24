@@ -11,14 +11,20 @@ export type Run = {
   /** Who started it when not the plain CLI (`Claude Code` for the codex plugin). */
   origin?: string
   phase: RunPhase
+  /** When the current turn started (the thread's start before its first turn). */
+  startAt: number
   /** The current turn's time: until now while unfinished, until its end once finished. */
   elapsedMs: number
   /** Since the rollout file last changed. */
   silentMs: number
   /** When the turn finished. */
   endAt?: number
-  /** The last command or agent message, one masked line; the failure for a failed run. */
+  /** The last command or agent message, one masked line. */
   action: string
+  /** A finished turn's final answer, its first line. */
+  result?: string
+  /** Why a failed run failed, in words (`usage limit reached`, `never started`, `no events for 1h 05m`). */
+  reason?: string
   tokens?: number
 }
 
@@ -40,8 +46,8 @@ declare module 'claude-code' {
   interface PluginState {
     'codex-agents': {
       view: Shaped<View>
-      /** The owner unfolded the finished runs past the first few. */
-      all: boolean
+      /** The moment the pane last redrew its clock: the «updated Ns ago» moves with it between scans. */
+      now: number
     }
   }
 }

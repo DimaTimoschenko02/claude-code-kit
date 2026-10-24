@@ -19,8 +19,11 @@ export type Rec = {
   phase: Phase
   turnStart?: number
   endAt?: number
+  /** Why the turn failed, in words. */
   error?: string
   action?: string
+  /** The final answer's first line. */
+  result?: string
   tokens?: number
   usage?: Usage
 }
@@ -113,7 +116,7 @@ export function threadInHead(text: string): string | null {
 /** A wrapper file's task id: `codex-<id>.session`, `codex-<id>.jsonl`, `codex-<id>.resume-N.jsonl`, `codex-<id>-review.jsonl`. */
 export function taskFile(name: string): { id: string; kind: 'session' | 'events' } | null {
   const review = /^codex-(.+)-review\.jsonl$/.exec(name)
-  if (review !== null) return { id: `${review[1]} ревью`, kind: 'events' }
+  if (review !== null) return { id: `${review[1]} review`, kind: 'events' }
   const resume = /^codex-(.+?)\.resume-\d+\.jsonl$/.exec(name)
   if (resume !== null) return { id: resume[1]!, kind: 'events' }
   const events = /^codex-(.+)\.jsonl$/.exec(name)
@@ -196,6 +199,16 @@ function firstLine(text: string | undefined): string | undefined {
   return line === undefined ? undefined : line
 }
 
+/** A final answer's first line; a bare heading (`1. Findings`, `## Summary`, `**Result**`, `Changes:`) takes the next line after it. */
+export function answerLine(text: string | undefined): string | undefined {
+  const raw = (text ?? '').split('\n').map(l => l.trim()).filter(l => l !== '')
+  const flat = (l: string) => l.replace(/^[#>*\s-]+/, '').replace(/\*\*/g, '').trim()
+  const first = raw[0]
+  if (first === undefined) return undefined
+  const isHeading = /^#{1,6}\s/.test(first) || /^\*\*[^*]+\*\*:?$/.test(first) || /^\d+[.)]\s+\S+(?:\s\S+)?:?$/.test(first) || (first.endsWith(':') && first.length < 40)
+  return isHeading && raw[1] !== undefined ? `${flat(first).replace(/:$/, '')} — ${flat(raw[1])}` : flat(first)
+}
+
 function usageOf(rl: Obj | undefined, at: number): Usage | undefined {
   if (rl === undefined) return undefined
   const windows: UsageWindow[] = []
@@ -255,15 +268,13 @@ export function parseTail(text: string, isWhole: boolean): TailFacts {
       if (kind === 'task_started') facts.marker = { kind: 'start', at: (num(p.started_at) ?? 0) * 1000 || at }
       else if (kind === 'task_complete') {
         const err = obj(p.error)
-        const error = str(err?.codex_error_info) ?? str(err?.message)
-        const last = firstLine(str(p.last_agent_message))
+        const code = str(err?.codex_error_info) ?? str(err?.message)
+        const error = code === undefined ? undefined : errorText(code, str(err?.message))
+        const last = answerLine(str(p.last_agent_message))
         facts.marker = { kind: 'complete', at, ...(error === undefined ? {} : { error }), ...(last === undefined ? {} : { last }) }
-        if (error !== undefined) facts.action = `✖ ${errorText(error, str(err?.message))}`
-        else if (last !== undefined) facts.action = `💬 ${last}`
       } else if (kind === 'turn_aborted') {
         const reason = str(p.reason)
         facts.marker = { kind: 'aborted', at, ...(reason === undefined ? {} : { reason }) }
-        facts.action = `✖ прерван${reason === undefined ? '' : `: ${reason}`}`
       } else if (kind === 'token_count') {
         const total = num(obj(obj(p.info)?.total_token_usage)?.total_tokens)
         if (total !== undefined) facts.tokens = total
@@ -300,7 +311,7 @@ export function parseTail(text: string, isWhole: boolean): TailFacts {
 }
 
 function errorText(code: string, message: string | undefined): string {
-  if (code === 'usage_limit_exceeded') return 'лимит плана исчерпан'
+  if (code === 'usage_limit_exceeded') return 'usage limit reached'
   return firstLine(message) ?? code
 }
 
@@ -313,14 +324,16 @@ export function merge(rec: Rec, facts: TailFacts, isWhole: boolean): Rec {
     next.turnStart = m.at
     delete next.endAt
     delete next.error
+    delete next.result
   } else if (m?.kind === 'complete') {
     next.phase = m.error === undefined ? 'done' : 'failed'
     next.endAt = m.at
-    if (m.error !== undefined) next.error = m.error
+    if (m.error !== undefined) next.error = oneLine(m.error, 80)
+    if (m.last !== undefined) next.result = oneLine(m.last)
   } else if (m?.kind === 'aborted') {
     next.phase = 'failed'
     next.endAt = m.at
-    next.error = m.reason ?? 'aborted'
+    next.error = oneLine(`aborted${m.reason === undefined ? '' : `: ${m.reason}`}`, 80)
   } else if (rec.phase === 'none' && !isWhole) {
     // A big file whose tail shows no turn boundary is mid-turn.
     next.phase = 'running'
@@ -331,44 +344,57 @@ export function merge(rec: Rec, facts: TailFacts, isWhole: boolean): Rec {
   return next
 }
 
-export type ViewOptions = { windowMs: number; staleMs: number }
+export type ViewOptions = { windowMs: number; staleMs: number; lostMs: number }
 
-const ORDER: Record<RunPhase, number> = { running: 0, starting: 0, stale: 1, done: 2, failed: 2 }
+/** A finished run leaves the pane once this many runs have started after it. */
+export const KEEP_ROUNDS = 2
 
-/** The pane's data: runs touched within the window, unfinished first, then newest first; the newest usage. */
+const TIME_ORDER = (a: Run, b: Run) => b.startAt - a.startAt
+
+/**
+ * The pane's data: every unfinished run, and a finished one only until KEEP_ROUNDS newer runs have started;
+ * unfinished first, newest start first; the newest usage. An unfinished run silent past `lostMs` counts as failed.
+ */
 export function buildView(recs: Iterable<Rec>, tasks: ReadonlyMap<string, string>, now: number, opts: ViewOptions): View {
-  const runs: (Run & { touched: number })[] = []
+  const all: Run[] = []
   let usage: Usage | undefined
   for (const r of recs) {
     if (r.usage !== undefined && (usage === undefined || r.usage.at > usage.at)) usage = r.usage
     if (now - r.mtimeMs > opts.windowMs) continue
     const silentMs = Math.max(0, now - r.mtimeMs)
-    const start = r.turnStart ?? r.startMs ?? r.mtimeMs
+    const startAt = r.turnStart ?? r.startMs ?? r.mtimeMs
     let phase: RunPhase
-    let action = r.action ?? ''
-    if (r.phase === 'running') phase = silentMs > opts.staleMs ? 'stale' : 'running'
-    else if (r.phase === 'none') {
+    let reason = r.error
+    if (r.phase === 'running') {
+      if (silentMs > opts.lostMs) {
+        phase = 'failed'
+        reason = `no events for ${fmtDur(silentMs)}`
+      } else phase = silentMs > opts.staleMs ? 'stale' : 'running'
+    } else if (r.phase === 'none') {
       phase = silentMs > 120_000 ? 'failed' : 'starting'
-      if (phase === 'failed' && action === '') action = '✖ не стартовал'
+      if (phase === 'failed') reason = 'never started'
     } else phase = r.phase
     const finished = phase === 'done' || phase === 'failed'
     const end = finished ? (r.endAt ?? r.mtimeMs) : now
-    runs.push({
+    all.push({
       thread: r.thread,
       label: oneLine(tasks.get(r.thread) ?? r.prompt ?? r.thread.slice(0, 8), 90),
       cwd: (r.cwd ?? '').split('/').filter(Boolean).pop() ?? '',
       ...(r.origin !== undefined && r.origin !== 'codex_exec' ? { origin: r.origin } : {}),
       phase,
-      elapsedMs: Math.max(0, end - start),
+      startAt,
+      elapsedMs: Math.max(0, end - startAt),
       silentMs,
       ...(finished ? { endAt: end } : {}),
-      action,
+      action: r.action ?? '',
+      ...(finished && r.result !== undefined ? { result: r.result } : {}),
+      ...(phase === 'failed' && reason !== undefined ? { reason } : {}),
       ...(r.tokens === undefined ? {} : { tokens: r.tokens }),
-      touched: r.mtimeMs,
     })
   }
-  runs.sort((a, b) => ORDER[a.phase] - ORDER[b.phase] || b.touched - a.touched)
-  return { at: now, runs: runs.map(({ touched: _t, ...run }) => run), ...(usage === undefined ? {} : { usage }) }
+  const kept = all.filter(r => isLive(r.phase) || all.filter(o => o.startAt > r.startAt).length < KEEP_ROUNDS)
+  const runs = [...kept.filter(r => isLive(r.phase)).sort(TIME_ORDER), ...kept.filter(r => !isLive(r.phase)).sort(TIME_ORDER)]
+  return { at: now, runs, ...(usage === undefined ? {} : { usage }) }
 }
 
 export function isLive(phase: RunPhase): boolean {
@@ -377,10 +403,15 @@ export function isLive(phase: RunPhase): boolean {
 
 export function fmtDur(ms: number): string {
   const s = Math.round(ms / 1000)
-  if (s < 60) return `${s}с`
+  if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
-  if (m < 60) return `${m}м`
-  return `${Math.floor(m / 60)}ч ${String(m % 60).padStart(2, '0')}м`
+  if (m < 60) return `${m}m`
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+}
+
+/** `just now` under two seconds, else `12s ago`. */
+export function ago(ms: number): string {
+  return ms < 2_000 ? 'just now' : `${fmtDur(ms)} ago`
 }
 
 export function fmtTokens(n: number): string {
@@ -401,7 +432,7 @@ export function hhmm(ms: number, tzMin: number, withSeconds = false): string {
   return `${two(d.getUTCHours())}:${two(d.getUTCMinutes())}${withSeconds ? `:${two(d.getUTCSeconds())}` : ''}`
 }
 
-const DAYS = ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб']
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
 function dayTime(ms: number, tzMin: number): string {
   const d = new Date(ms + tzMin * 60_000)
@@ -409,50 +440,101 @@ function dayTime(ms: number, tzMin: number): string {
   return `${DAYS[d.getUTCDay()]} ${two(d.getUTCDate())}.${two(d.getUTCMonth() + 1)} ${hhmm(ms, tzMin)}`
 }
 
-function windowName(minutes: number): string {
-  if (minutes === 10_080) return 'неделя'
-  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440}д`
-  if (minutes >= 60) return `${Math.round(minutes / 60)}ч`
-  return `${minutes}м`
+/** A clock time, with the day once it is more than 18 hours back. */
+function when(ms: number, now: number, tzMin: number): string {
+  return now - ms > 18 * 3_600_000 ? dayTime(ms, tzMin) : hhmm(ms, tzMin)
 }
 
-/** `prolite · неделя 12% · сброс пт 31.10 23:43`, the reached limit first when there is one. */
-export function usageText(u: Usage | undefined, tzMin: number): string {
-  if (u === undefined) return 'план: нет данных'
-  const parts: string[] = []
-  if (u.reached !== undefined) parts.push(`🔴 лимит: ${u.reached}`)
+function windowName(minutes: number): string {
+  if (minutes === 10_080) return 'week'
+  if (minutes >= 1440 && minutes % 1440 === 0) return `${minutes / 1440}d`
+  if (minutes >= 60) return `${Math.round(minutes / 60)}h`
+  return `${minutes}m`
+}
+
+/** `Limits as of 13:57 · prolite · week 7% used, resets Sat 31.10 14:43`, a reached limit right after the time. */
+export function usageText(u: Usage | undefined, now: number, tzMin: number): string {
+  if (u === undefined) return 'Limits: no data yet'
+  const parts = [`Limits as of ${when(u.at, now, tzMin)}`]
+  if (u.reached !== undefined) parts.push(`LIMIT REACHED: ${u.reached}`)
   if (u.plan !== undefined) parts.push(u.plan)
   for (const w of u.windows) {
-    parts.push(`${windowName(w.minutes)} ${Math.round(w.pct)}%${w.resetsAt === undefined ? '' : ` · сброс ${dayTime(w.resetsAt, tzMin)}`}`)
+    parts.push(`${windowName(w.minutes)} ${Math.round(w.pct)}% used${w.resetsAt === undefined ? '' : `, resets ${dayTime(w.resetsAt, tzMin)}`}`)
   }
   return parts.join(' · ')
 }
 
-export const PHASE_WORD: Record<RunPhase, string> = {
-  running: '● работает',
-  starting: '○ запуск',
-  stale: '◌ молчит',
-  done: '✓ готово',
-  failed: '✖ ошибка',
+export const STATUS_WORD: Record<RunPhase, string> = {
+  running: '● RUNNING',
+  starting: '○ STARTING',
+  stale: '◌ SILENT',
+  done: '✓ DONE',
+  failed: '✖ FAILED',
 }
 
-/** The run's meta after its label: time, tokens, and when it ended or how long it has been silent. */
-export function metaText(r: Run, tzMin: number): string {
-  const parts = [fmtDur(r.elapsedMs)]
-  if (r.tokens !== undefined) parts.push(`${fmtTokens(r.tokens)} ток.`)
-  if (r.phase === 'stale') parts.push(`тихо ${fmtDur(r.silentMs)}`)
-  if (r.endAt !== undefined) parts.push(`в ${hhmm(r.endAt, tzMin)}`)
-  return parts.join(' · ')
+/** The theme colour of each status; the block's border takes it too, a finished run's border is dim. */
+export const STATUS_COLOR: Record<RunPhase, 'success' | 'suggestion' | 'warning' | 'error'> = {
+  running: 'success',
+  starting: 'suggestion',
+  stale: 'warning',
+  done: 'success',
+  failed: 'error',
 }
 
-/** Plain text for a surface with no pane (`claude -p`): the runs as data lines. */
-export function summary(view: View, tzMin: number): string {
-  const head = `Codex · ${usageText(view.usage, tzMin)}`
-  if (view.error !== undefined) return `${head}\n${view.error}`
-  if (view.runs.length === 0) return `${head}\nЗа последние часы запусков Codex нет.`
-  const rows = view.runs.slice(0, 12).map(r => {
-    const where = [r.cwd, r.origin].filter(Boolean).join(' · ')
-    return `${PHASE_WORD[r.phase]} ${r.label}${where === '' ? '' : ` · ${where}`} · ${metaText(r, tzMin)}${r.action === '' ? '' : `\n    ${r.action}`}`
-  })
-  return [head, ...rows].join('\n')
+/** One run as the pane and the text answer draw it: a header, labelled lines, a meta line. */
+export type Block = { status: string; title: string; time: string; lines: { label: string; text: string }[]; meta: string }
+
+export function blockOf(r: Run, now: number, tzMin: number): Block {
+  const live = isLive(r.phase)
+  const status =
+    r.phase === 'stale' ? `${STATUS_WORD.stale} ${fmtDur(r.silentMs)}` : r.reason !== undefined ? `${STATUS_WORD[r.phase]} (${r.reason})` : STATUS_WORD[r.phase]
+  const lines: Block['lines'] = []
+  if (live) lines.push({ label: 'doing', text: r.action !== '' ? r.action : r.phase === 'starting' ? 'starting up' : 'thinking (no command or message yet in what was read)' })
+  else if (r.result !== undefined) lines.push({ label: 'result', text: r.result })
+  else if (r.action !== '') lines.push({ label: 'last', text: r.action })
+  const meta: string[] = []
+  if (r.cwd !== '') meta.push(`repo ${r.cwd}`)
+  if (r.origin !== undefined) meta.push(`via ${r.origin}`)
+  if (r.tokens !== undefined) meta.push(`${fmtTokens(r.tokens)} tokens`)
+  meta.push(`started ${when(r.startAt, now, tzMin)}`)
+  meta.push(r.endAt !== undefined ? `finished ${when(r.endAt, now, tzMin)}` : `last event ${ago(r.silentMs)}`)
+  return { status, title: r.label, time: `${live ? 'for' : 'took'} ${fmtDur(r.elapsedMs)}`, lines, meta: meta.join(' · ') }
+}
+
+/** `Codex · 1 running · 1 silent · 2 finished`, or `Codex · nothing running`. */
+export function headline(view: View): string {
+  const n = (phase: RunPhase) => view.runs.filter(r => r.phase === phase).length
+  const working = n('running') + n('starting')
+  const parts = [working > 0 ? `${working} running` : '', n('stale') > 0 ? `${n('stale')} silent` : '']
+  const finished = view.runs.filter(r => !isLive(r.phase)).length
+  if (working + n('stale') === 0) parts.push('nothing running')
+  if (finished > 0) parts.push(`${finished} finished`)
+  return ['Codex', ...parts.filter(Boolean)].join(' · ')
+}
+
+/** `Updated 14:19:36 (12s ago)`, and how often the pane rescans when `rates` are given. */
+export function freshness(view: View, now: number, tzMin: number, rates?: { liveMs: number; idleMs: number }): string {
+  const base = `Updated ${hhmm(view.at, tzMin, true)} (${ago(Math.max(0, now - view.at))})`
+  if (rates === undefined) return base
+  const isWorking = view.runs.some(r => isLive(r.phase))
+  return `${base} · ${isWorking ? `refreshes every ${fmtDur(rates.liveMs)} while a run is live` : `idle, refreshes every ${fmtDur(rates.idleMs)}`}`
+}
+
+/** The line under the header when no run is unfinished. */
+export function emptyText(view: View, windowMs: number): string | undefined {
+  if (view.error !== undefined || view.runs.some(r => isLive(r.phase))) return undefined
+  return view.runs.length === 0 ? `No Codex run is working, and none ran in the last ${Math.round(windowMs / 3_600_000)}h.` : 'No Codex run is working right now.'
+}
+
+/** Plain text for a surface with no pane (`claude -p`): the same blocks as data lines. */
+export function summary(view: View, tzMin: number, windowMs: number): string {
+  const out = [headline(view), freshness(view, view.at, tzMin), usageText(view.usage, view.at, tzMin)]
+  if (view.error !== undefined) out.push(view.error)
+  const empty = emptyText(view, windowMs)
+  if (empty !== undefined) out.push(empty)
+  for (const r of view.runs) {
+    const b = blockOf(r, view.at, tzMin)
+    out.push(`── ${b.status} · ${b.title} · ${b.time}`, ...b.lines.map(l => `   ${l.label}: ${l.text}`), `   ${b.meta}`)
+  }
+  return out.join('\n')
 }
