@@ -30,7 +30,7 @@ def skills(ts, *named):
 
 class Gate(unittest.TestCase):
     def run_gate(self, transcript_lines, invocations, agent_id=None, agent_type=None, agents=None,
-                 agent_lines=(), agent_invocations=(), agent_file=True):
+                 agent_lines=(), agent_invocations=(), agent_file=True, codex=False):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, ".claude", "state"))
             os.makedirs(os.path.join(root, ".claude", "agents"))
@@ -59,8 +59,11 @@ class Gate(unittest.TestCase):
                 payload["agent_id"] = agent_id
             if agent_type:
                 payload["agent_type"] = agent_type
-            env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_PROJECT_DIR", "SKILL_GATE_LOG")}
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("CLAUDE_PROJECT_DIR", "SKILL_GATE_LOG", "CODEX_COMPAT")}
             env["HOME"] = root
+            if codex:
+                env["CODEX_COMPAT"] = "1"
             return subprocess.run(["bash", GATE], input=json.dumps(payload), capture_output=True, text=True,
                                   env=env).returncode
 
@@ -101,6 +104,23 @@ class Gate(unittest.TestCase):
     def test_preload_inline_list_and_scoped_name_pass(self):
         agents = {"x.md": "name: coder\nskills: [pricehub:vault-write, other]"}
         self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", agents=agents), 0)
+
+    def test_codex_agent_definition_does_not_prove_a_skill_was_loaded(self):
+        for declaration in ("skills:\n  - vault-write", "skills: [pricehub:vault-write, other]"):
+            with self.subTest(declaration=declaration):
+                agents = {"coder.md": "name: coder\n" + declaration}
+                self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder",
+                                               agents=agents, codex=True), 2)
+
+    def test_codex_agent_passes_after_its_verified_skill_read(self):
+        agents = {"coder.md": "name: coder\nskills:\n  - vault-write"}
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", agents=agents,
+                                       agent_invocations=["2026-10-11T11:00:00.000Z"], codex=True), 0)
+
+    def test_codex_agent_cannot_use_its_parents_skill_read(self):
+        agents = {"coder.md": "name: coder\nskills:\n  - vault-write"}
+        self.assertEqual(self.run_gate([], ["2026-10-11T11:00:00.000Z"], agent_id="a-1",
+                                       agent_type="coder", agents=agents, codex=True), 2)
 
     def test_subagent_preloading_another_skill_is_denied(self):
         agents = {"coder.md": "name: coder\nskills:\n  - code-style"}

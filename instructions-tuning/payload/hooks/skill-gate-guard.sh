@@ -150,9 +150,11 @@ fi
 # load is no Skill tool call, so the log never shows it. The coder was told in prose to load code-style itself and was
 # bounced 49 times on 30 runs; with the skill preloaded the gate must count the preload. The definition is found by
 # its `name:` (hooks receive it as agent_type), project agents first, then the user's.
+# The native Codex bridge sets CODEX_COMPAT=1: it logs verified full skill reads but does not inject `skills:`.
+# In that mode only the invocation log below proves a load; the Claude definition is not evidence.
 preloaded=""
 atype=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null)
-if [ -n "$aid_early" ] && [ -n "$atype" ]; then
+if [ "${CODEX_COMPAT:-}" != "1" ] && [ -n "$aid_early" ] && [ -n "$atype" ]; then
   preloaded=$(python3 -B - "$atype" "$ROOT/.claude/agents" "$HOME/.claude/agents" <<'PY' 2>/dev/null
 import glob, os, re, sys
 name, dirs = sys.argv[1], sys.argv[2:]

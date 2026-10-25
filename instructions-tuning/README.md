@@ -23,6 +23,10 @@ before touching those files.
   hook is generic — it can gate any skill, not only `instructions-tuning`.
 - **Portability:** drops into any project (plain git repo or notes vault). Requires `jq`.
 
+Claude Code and native Codex use the same gate. Claude injects an agent's declared `skills:`;
+the Codex bridge instead sets `CODEX_COMPAT=1` and logs verified full skill reads for each agent.
+In Codex mode a declaration alone does not unlock the gate; the agent's own read must be logged.
+
 ---
 
 ## Why the gate exists
