@@ -70,6 +70,8 @@ is_sensitive_rel() {
 # Path patterns considered sensitive — any read/write/edit/grep/glob on these is blocked
 is_sensitive_path() {
   local p="$1"
+  # The public variable registry is not a file of configured credentials.
+  case "$p" in .env.example|*/.env.example) return 1 ;; esac
   case "$p" in
     *.env|*.env.*|*/.env|\
     *creds*|*credential*|*secret*|*password*|*passwd|\
@@ -128,6 +130,22 @@ case "$tool" in
   Bash)
     cmd=$(input_text) || exit 2
 
+    # Classify literal arguments, so quotes/globs cannot turn an example exemption into a private-file read.
+    scan_cmd="$cmd"
+    if [[ "$cmd" == *'.env.example'* ]]; then
+      scan_cmd=$(python3 -c '
+import re, shlex, sys
+try:
+    lexer = shlex.shlex(sys.stdin.read(), posix=True, punctuation_chars=";&|<>()")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    public = re.compile(r"(?:[A-Za-z0-9_./-]+/)?\.env\.example")
+    print(" ".join("PUBLIC_ENV_EXAMPLE" if public.fullmatch(token) else token for token in lexer))
+except ValueError:
+    sys.exit(1)
+' <<<"$cmd") || deny "could not classify public registry arguments"
+    fi
+
     # Known credential-file suffixes / path literals. Kept WITHOUT bare "secret"/"password"
     # words on purpose (see DESIGN CONSTRAINT above).
     SENS='(\.env\b|\.env\.|\.mcp\.json\b|\.claude\.json\b|\.credentials\.json\b|\.git-credentials\b|\.pgpass\b|\.netrc\b|\.npmrc\b|\.aws/credentials\b|/\.config/glab-cli/|/glab-cli/config|/\.config/gh/|/gh/hosts\.yml)'
@@ -135,18 +153,18 @@ case "$tool" in
     # Direct file reads of secret files via a known reader command (redundant with the
     # literal-mention rule below, kept as cheap defense-in-depth).
     READERS='\bcat\b|\bhead\b|\btail\b|\bless\b|\bmore\b|\bbat\b|\bxxd\b|\bhexdump\b|\bod\b|\bstrings\b|\bnl\b|\bcut\b|\bpaste\b|\brev\b|\bfold\b|\bfmt\b|\bcolumn\b|\bbase64\b|\bbase32\b|\baw[k]\b|\bs[e]d\b|\btee\b|\bcp\b|\bmv\b|\bdd\b|\bjq\b|\byq\b|\bgrep\b|\begrep\b|\bfgrep\b|\brg\b|\bvi\b|\bvim\b|\bview\b|\bnano\b|\bemacs\b|\bpython3?\b|\bperl\b|\bruby\b|\bnode\b|\bphp\b|\bsource\b|\bmapfile\b|\breadarray\b|\bopenssl\b|\bscp\b|\brsync\b|\bsftp\b|\bcurl\b|\bwget\b|\btar\b'
-    if grep -qE "($READERS)[[:space:]]+[^|;]*$SENS" <<<"$cmd"; then
+    if grep -qE "($READERS)[[:space:]]+[^|;]*$SENS" <<<"$scan_cmd"; then
       deny "command reads a credentials file"
     fi
 
     # Reading a sensitive file via redirect or $(<file)
-    if grep -qE "(<|<<<)[[:space:]]*[^|;&<>()]*$SENS" <<<"$cmd"; then
+    if grep -qE "(<|<<<)[[:space:]]*[^|;&<>()]*$SENS" <<<"$scan_cmd"; then
       deny "command reads a sensitive file via redirect or \$(<...)"
     fi
 
     # ANY mention of the creds-file path literals (the workhorse — catches git show HEAD:.env,
     # python open('.mcp.json'), eval cat .env, scp .mcp.json host:, etc. — anything naming the path)
-    if grep -qE "$SENS" <<<"$cmd"; then
+    if grep -qE "$SENS" <<<"$scan_cmd"; then
       deny "command references a sensitive path literal"
     fi
 
