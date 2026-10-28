@@ -6,6 +6,7 @@
 #   ./install.sh [target]          # copy into <target> (default: current dir)
 #   ./install.sh --link [target]   # symlink the skill and the agent to this clone (gitignored); git pull here updates them
 #   ./install.sh --check [target]  # installed vs package version
+#   --no-register                  # leave settings.json alone: the project runs the hook through its own gate runner
 #
 # The project keeps its own facts in .claude/spec-writer.project.md (seeded from the template, never overwritten):
 # language, which files are specs, extra sections, and what the spec writer would otherwise guess.
@@ -14,12 +15,13 @@ set -euo pipefail
 PKG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PKG_VERSION="$(cat "$PKG_DIR/VERSION")"
 
-MODE="install"; LINK=0; FORCE=0
+MODE="install"; LINK=0; FORCE=0; REGISTER=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE="check"; shift ;;
     --link)  LINK=1; shift ;;
     --force) FORCE=1; shift ;;
+    --no-register) REGISTER=0; shift ;;
     --) shift; break ;;
     -*) echo "unknown flag: $1" >&2; exit 1 ;;
     *) break ;;
@@ -77,6 +79,9 @@ else cp "$PKG_DIR/payload/skills/spec-writer/project-template.md" "$PROJECT_FILE
   echo "seeded spec-writer.project.md — fill it in (language, spec_glob, project facts)" >&2; fi
 
 HOOK='bash "$CLAUDE_PROJECT_DIR/.claude/hooks/spec-lint.sh"'
+# A project that starts its hooks through one runner (a gate table) lists spec-lint there: a settings entry on top
+# would run it twice. Such a project upgrades with --no-register.
+if [ "$REGISTER" = 1 ]; then
 [ -f "$SETTINGS" ] || echo '{}' > "$SETTINGS"
 tmp="$(mktemp "$CLAUDE_DIR/.settings.XXXXXX")"
 if jq --arg h "$HOOK" '
@@ -86,6 +91,7 @@ if jq --arg h "$HOOK" '
           else $g + [{matcher: "Write|Edit", hooks: [{type: "command", command: $h}]}] end)
   ' "$SETTINGS" > "$tmp" && jq empty "$tmp" 2>/dev/null; then mv "$tmp" "$SETTINGS"
 else rm -f "$tmp"; echo "ERROR: settings merge failed; settings.json untouched." >&2; exit 1; fi
+fi
 
 GI="$TARGET/.gitignore"; LSTART="# >>> spec-writer --link >>>"
 if [ "$LINK" = 1 ] && { [ ! -f "$GI" ] || ! grep -qF "$LSTART" "$GI"; }; then
@@ -100,7 +106,7 @@ cat >&2 <<SUMMARY
 spec-writer v$PKG_VERSION installed into $CLAUDE_DIR ($( [ "$LINK" = 1 ] && echo "linked to $PKG_DIR, gitignored" || echo copied ))
   skill:  skills/spec-writer/            write a spec before code goes to another executor
   agent:  agents/spec-builder-check.md   reads the spec as the coder would, lists what it would have to guess
-  hook:   hooks/spec-lint.sh             PostToolUse Write|Edit — blocks a spec file that breaks the contract
+  hook:   hooks/spec-lint.sh             PostToolUse Write|Edit — blocks a spec file that breaks the contract$( [ "$REGISTER" = 1 ] || echo " (NOT registered: --no-register)" )
   config: spec-writer.project.md         language, spec_glob, extra_sections + this project's facts — EDIT IT
   needs:  node (hook), jq (install)
 SUMMARY

@@ -28,7 +28,11 @@ the coder and from risky inputs nobody named — the two things Decisions and «
 ~/claude-code-kit/spec-writer/install.sh --link /path/to/project   # follow this clone (git pull updates it)
 ~/claude-code-kit/spec-writer/install.sh /path/to/project          # a copy
 ~/claude-code-kit/spec-writer/install.sh --check /path/to/project
+~/claude-code-kit/spec-writer/install.sh --no-register /path/to/project  # the project runs hooks through its own runner
 ```
+
+`--no-register` leaves `settings.json` alone: for a project that starts its hooks through one runner and lists
+`spec-lint` in its gate table — a settings entry on top would run the hook twice.
 
 Then fill `.claude/spec-writer.project.md` — frontmatter `language` (ru | en), `spec_glob`, `extra_sections`,
 `split_lines`, and in the body only what the code does not say: where specs live, the contract format, how to measure
