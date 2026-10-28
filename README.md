@@ -56,6 +56,16 @@ gate any skill, not just `instructions-tuning`. Keyed to the context-reset bound
 (one invocation per session / `/compact` window). Its own `README.md` / `install.sh` /
 `VERSION`. See [`instructions-tuning/README.md`](instructions-tuning/README.md).
 
+### spec-writer (`spec-writer/`)
+
+A self-contained, installable package for the spec an AI coder builds a task from without asking: the
+**spec-writer skill** (fixed sections, a short form, a stop rule the coder follows when the spec is silent, a
+Deviations section only the coder edits), the **spec-builder-check agent** (a fresh Sonnet reads the spec as the coder
+and lists what it would have to guess) and the **spec-lint hook** (PostToolUse — blocks a spec file with a missing
+section, an acceptance line without a test or a placeholder). Each project keeps its own facts in
+`.claude/spec-writer.project.md`. Its own `README.md` / `install.sh` / `VERSION`.
+See [`spec-writer/README.md`](spec-writer/README.md).
+
 ### chat-audit (`chat-audit/`)
 
 A self-contained, installable package that audits your **past Claude Code sessions** to find how the work

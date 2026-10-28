@@ -1,0 +1,19 @@
+{
+  "_comment": "The spec's sections — one source for templates, spec-lint and the docs. A heading is matched as `## <title>` in the spec's language. `forms` lists the forms that require the section; `items` is what each entry of a checked section must carry.",
+  "sections": [
+    { "key": "outcome", "ru": "Результат", "en": "Outcome", "forms": ["full", "short"] },
+    { "key": "contract", "ru": "Контракт", "en": "Contract", "forms": ["full"] },
+    { "key": "decisions", "ru": "Решения", "en": "Decisions", "forms": ["full"] },
+    { "key": "acceptance", "ru": "Приёмка", "en": "Acceptance", "forms": ["full", "short"], "items": "numbered-with-check" },
+    { "key": "bites", "ru": "Где укусит", "en": "Where it bites", "forms": ["full"], "items": "bullets-with-check" },
+    { "key": "parts", "ru": "Части", "en": "Parts", "forms": ["full"] },
+    { "key": "silence", "ru": "Если спека молчит", "en": "When the spec is silent", "forms": ["full", "short"] },
+    { "key": "deviations", "ru": "Отклонения", "en": "Deviations", "forms": ["full", "short"], "mayBeEmpty": true }
+  ],
+  "acceptanceLabel": { "ru": "П", "en": "A" },
+  "placeholders": {
+    "ru": ["TBD", "TODO", "FIXME", "по аналогии", "обработать ошибки", "добавить валидацию", "и т\\. ?д\\.", "при необходимости", "где-нибудь"],
+    "en": ["TBD", "TODO", "FIXME", "handle errors", "add (appropriate )?validation", "as appropriate", "as needed", "similar to the above", "etc\\."]
+  },
+  "maxLines": 220
+}

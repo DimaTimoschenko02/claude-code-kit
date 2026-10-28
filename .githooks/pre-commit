@@ -11,7 +11,8 @@
 set -uo pipefail
 
 # Workspace paths, employer/domain names, absolute home paths, personal names.
-PATTERN='~/work|/Users/|sharkscode|casino|bestsrv|dim\.timoschenko|Дим[аеуой]|jira'
+# The name is matched as a whole word: inside a word («необходимости») it is not a name.
+PATTERN='~/work|/Users/|sharkscode|casino|bestsrv|dim\.timoschenko|(^|[^[:alpha:]])Дим[аеуойы]([^[:alpha:]]|$)|jira'
 
 # This file is excluded: it necessarily contains every pattern it looks for.
 # -E on both greps: in BSD grep's BRE, '\+' is a repetition operator, so '^\+\+\+'
