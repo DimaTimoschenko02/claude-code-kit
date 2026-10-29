@@ -1,18 +1,20 @@
-// A side panel per session: the links the main thread's replies carried, grouped under their task, and one line per
-// `result:` the replies delivered. The owner ticks, rewrites, deletes and adds lines in place; what they changed reaches
+// A side panel per session: the tasks the main thread's replies named, each with its card's status and title, the links
+// the replies carried grouped under their task, and one line per `result:` the replies delivered. The owner ticks, rewrites, deletes and adds lines in place; what they changed reaches
 // the model with their next message. The panel lives in $.store per session id, so it outlives restarts and reloads.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Blocker, Item, Panel, Pr } from '../types'
+import type { Blocker, Card, Item, Panel, Pr } from '../types'
 import {
   addNote,
   addOwnerLine,
   capture,
   edit,
   emptyPanel,
+  forget,
   isCard,
   merge,
+  mention,
   nextTurn,
   normalize,
   panelPulls,
@@ -26,12 +28,13 @@ import {
 } from './logic'
 import type { Section, TaskGroup } from './logic'
 import { GH_FIELDS, cardBadge, cardStatus, parsePr, prBadge, pullOf } from './status'
+import { cardTitle, idOfFile, mentionedIds, prefixOf } from './cards'
 import type { Badge } from './status'
 import { markerRegex, waitingLines } from './waiting'
 import { CHROME, blockerText, blockersOf, chromeSignal, hhmm, iconOf, lift, ownerLift, parseTzOffset, raise, signedInHost, validKey } from './blockers'
-import { runs, withLead } from './markup'
+import { plain, runs, withLead } from './markup'
 import type { Run } from './markup'
-import { NO_REFS, blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
+import { NO_REFS, blocked, candidates, fileHref, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
 import type { Refs } from './refs'
 
 type Engine = EngineInterface
@@ -49,7 +52,7 @@ const CODE_COLOR = 'permission'
 
 const panelAtom = atom({ plugin: 'session-panel', key: 'panel' } as const, emptyPanel(0))
 const editingAtom = atom({ plugin: 'session-panel', key: 'editing' } as const, null)
-const statusesAtom = atom({ plugin: 'session-panel', key: 'statuses' } as const, {})
+const cardsAtom = atom({ plugin: 'session-panel', key: 'cards' } as const, {})
 const prsAtom = atom({ plugin: 'session-panel', key: 'prs' } as const, {})
 const openAtom = atom({ plugin: 'session-panel', key: 'open' } as const, [])
 /** An open pull request is asked again at most this often; a merged or closed one not again in this load. */
@@ -192,16 +195,86 @@ async function change($: Engine, fn: (p: Panel) => Panel): Promise<void> {
   if (after.items !== before.items) await resolveRefs($)
 }
 
-/** Every task the panel names gets its card's status, whether or not a reply linked the card itself. */
+// Where each task's card file is: cards sit at any depth under the cards folder (an epic is a folder of its tasks).
+let cardIndex = new Map<string, string>()
+let indexedAt = -Infinity
+/** A card not found starts a new walk of the cards folder at most this often. */
+const REINDEX_MS = 30_000
+/** Folders below the cards folder a walk goes down, and entries it reads at most. */
+const INDEX_DEPTH = 4
+const INDEX_ENTRIES = 5_000
+// A card path → its vault address ('' when the card is no vault note), looked up once per load.
+let cardHrefs = new Map<string, string>()
+
+async function walkCards($: Engine, dir: string, depth: number, into: Map<string, string>, budget: { left: number }): Promise<void> {
+  const entries = await $.fs.list(dir).catch(() => [])
+  for (const entry of entries) {
+    if (budget.left-- <= 0) return
+    if (entry.name.startsWith('.')) continue
+    const path = `${dir}/${entry.name}`
+    if (entry.kind === 'dir' && depth < INDEX_DEPTH) await walkCards($, path, depth + 1, into, budget)
+    if (entry.kind !== 'file') continue
+    const id = idOfFile(entry.name, cfg.pattern)
+    if (id !== undefined && !into.has(id)) into.set(id, path)
+  }
+}
+
+/** Walks the cards folder again unless it was walked within the last half minute; true when it walked. */
+async function reindex($: Engine): Promise<boolean> {
+  if (cfg.cardsDir === '') return false
+  const now = await $.clock.now()
+  if (now - indexedAt < REINDEX_MS) return false
+  indexedAt = now
+  const into = new Map<string, string>()
+  await walkCards($, cfg.cardsDir, 0, into, { left: INDEX_ENTRIES })
+  cardIndex = into
+  return true
+}
+
+/** The ids a reply named that have a card; a card made since the last walk is found by one more walk. */
+async function withCards($: Engine, ids: readonly string[]): Promise<string[]> {
+  if (cfg.cardsDir === '' || ids.length === 0) return []
+  const prefixes = new Set([...cardIndex.keys()].map(prefixOf))
+  const unknown = ids.filter(id => !cardIndex.has(id) && (cardIndex.size === 0 || prefixes.has(prefixOf(id))))
+  if (unknown.length > 0) await reindex($)
+  return ids.filter(id => cardIndex.has(id))
+}
+
+/** Where a card opens: its vault note, when the card's real file lies in the vault. */
+async function cardHref($: Engine, path: string): Promise<string | undefined> {
+  let href = cardHrefs.get(path)
+  if (href === undefined) {
+    const st = await $.fs.stat(path, { resolve: true }).catch(() => null)
+    const real = st?.kind === 'file' ? st.realPath : undefined
+    const note = real === undefined ? undefined : vaultNote(real, where.vault)
+    href = real === undefined || note === undefined ? '' : (fileHref({ abs: real, dir: false, vault: note }) ?? '')
+    cardHrefs.set(path, href)
+  }
+  return href === '' ? undefined : href
+}
+
+/** Every task the panel names gets what its card says — status, title, address — whether or not a reply linked the card. */
 async function refreshCards($: Engine): Promise<void> {
   if (cfg.cardsDir === '') return
-  const statuses: Record<string, string> = {}
-  for (const task of panelTasks(await read($, panelAtom))) {
-    const text = await $.fs.read(`${cfg.cardsDir}/${task}.md`).catch(() => null)
-    const status = text === null ? undefined : cardStatus(text)
-    if (status !== undefined) statuses[task] = status
+  const cards: Record<string, Card> = {}
+  const tasks = panelTasks(await read($, panelAtom))
+  const readCard = async (task: string) => {
+    const path = cardIndex.get(task) ?? `${cfg.cardsDir}/${task}.md`
+    const text = await $.fs.read(path).catch(() => null)
+    return text === null ? null : { path, text: typeof text === 'string' ? text : '' }
   }
-  await update($, statusesAtom, () => statuses)
+  let found = await Promise.all(tasks.map(readCard))
+  // A card moved into an epic's folder since the last walk: walk again and read the missing ones once more.
+  if (found.some(f => f === null) && (await reindex($))) found = await Promise.all(tasks.map(readCard))
+  for (const [n, task] of tasks.entries()) {
+    const f = found[n]
+    if (f === null || f === undefined) continue
+    const status = cardStatus(f.text)
+    const title = cardTitle(f.text)
+    const href = await cardHref($, f.path)
+    cards[task] = { ...(status === undefined ? {} : { status }), ...(title === undefined ? {} : { title }), ...(href === undefined ? {} : { href }) }
+  }
+  await update($, cardsAtom, () => cards)
 }
 
 // One pass at a time; gh missing or failing leaves the rows without a pull request badge, nothing else.
@@ -400,6 +473,9 @@ export const register: Register = (on, options) => {
     gh = 0
     ghRan = false
     await locate($, e.cwd)
+    cardHrefs = new Map()
+    indexedAt = -Infinity
+    await reindex($)
     await sync($)
     laterPrs($, true)
     const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
@@ -470,7 +546,9 @@ export const register: Register = (on, options) => {
     // Every reply counts, carrying links or not: freshness is measured in the work done since.
     // The «Ждёт тебя» block replaces its section; a reply without one leaves it as it was.
     const wait = waitingLines(e.answer, cfg.wait)
-    await change($, p => setWaiting(merge(nextTurn(p), got, pattern), wait))
+    // A task the reply only named gets a row too, when it has a card: the owner reads what the number is about.
+    const named = await withCards($, mentionedIds(e.answer, pattern))
+    await change($, p => setWaiting(mention(merge(nextTurn(p), got, pattern), named), wait))
     await refreshCards($)
     laterPrs($, false)
     return r
@@ -496,13 +574,15 @@ export const register: Register = (on, options) => {
     const editing = await read($, editingAtom)
     const prs: Readonly<Record<string, Pr>> = await read($, prsAtom)
     const unfolded: readonly string[] = await read($, openAtom)
-    const v = view(panel, { statuses: await read($, statusesAtom), prs, doneStatuses: cfg.doneStatuses })
-    // Every place a line names — `#140`, a sha, a path, an address, a task with its card here — is a link where it stands.
-    const places = {
-      ...(await read($, refsAtom)),
-      cards: new Map(panel.items.filter(isCard).map(i => [i.task!, i.href!] as const)),
-      task: cfg.pattern,
-    }
+    const cards: Readonly<Record<string, Card>> = await read($, cardsAtom)
+    const statuses: Record<string, string> = {}
+    for (const [task, c] of Object.entries(cards)) if (c.status !== undefined) statuses[task] = c.status
+    const v = view(panel, { statuses, prs, doneStatuses: cfg.doneStatuses })
+    // Every place a line names — `#140`, a sha, a path, an address, a task with its card — is a link where it stands.
+    const cardLinks = new Map<string, string>()
+    for (const [task, c] of Object.entries(cards)) if (c.href !== undefined) cardLinks.set(task, c.href)
+    for (const i of panel.items.filter(isCard)) cardLinks.set(i.task!, i.href!)
+    const places = { ...(await read($, refsAtom)), cards: cardLinks, task: cfg.pattern }
 
     // A line's markdown drawn as styled runs; inside a link item a run's own link is drawn as its label alone.
     const inline = (list: Run[], id: string, linkable: boolean) =>
@@ -534,6 +614,13 @@ export const register: Register = (on, options) => {
       if (known === undefined) return null
       const b = prBadge(known)
       return <Text key={`ps-${key}`} {...look(b)}>{` ${b.text}`}</Text>
+    }
+    // What the task is about, from its card: drawn after the badges unless the card's link label already says it.
+    const title = (g: TaskGroup) => {
+      const t = cards[g.task]?.title
+      if (t === undefined) return null
+      if (g.card !== undefined && plain(g.card.text).toLowerCase().includes(t.toLowerCase())) return null
+      return <Text key={`tt-${g.task}`} {...(g.closed ? { dimColor: true } : {})}>{`  ${t}`}</Text>
     }
     // A task row's badges: the card's status, then each pull request with its number linked.
     const badges = (g: TaskGroup) => {
@@ -607,16 +694,22 @@ export const register: Register = (on, options) => {
         ) : (
           <Button key={`f-${g.task}`} plain dimColor label={isOpen ? '▾' : '▸'} onPress={() => flip($, key)} />
         )
+      const id = <Text key={`hi-${g.task}`} bold>{g.task}</Text>
+      const href = places.cards.get(g.task)
+      // A task named only in passing: its id opens its card; ✕ hides it until a reply names it again.
+      const named = g.children.length === 0 && (panel.mentioned ?? []).some(m => m.task === g.task)
       const head =
         g.card !== undefined ? (
-          row(g.card, 0, [arrow, <Text key={`fs-${g.task}`}> </Text>], badges(g))
+          row(g.card, 0, [arrow, <Text key={`fs-${g.task}`}> </Text>], [...badges(g), title(g)])
         ) : (
           <Box key={`h-${g.task}`} flexDirection="row">
             {arrow}
             <Text key={`hs-${g.task}`}> </Text>
             <Box key={`hb-${g.task}`} flexGrow={1} flexShrink={1}>
-              <Text wrap="wrap"><Text bold>{g.task}</Text>{badges(g)}</Text>
+              <Text wrap="wrap">{href === undefined ? id : linkTo(href, [id])}{badges(g)}{title(g)}</Text>
             </Box>
+            {named ? <Text key={`hg-${g.task}`}> </Text> : null}
+            {named ? <Button key={`hx-${g.task}`} plain dimColor label="✕" onPress={() => change($, p => forget(p, g.task))} /> : null}
           </Box>
         )
       return [head, ...(isOpen ? g.children.map(c => row(c, 4)) : [])]
@@ -675,7 +768,7 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column">
         {blockerBox}
         {restart === '' ? null : <Text dimColor wrap="wrap">перезапуск: {restart}</Text>}
-        {panel.items.length === 0 && walls.length === 0 ? <Text dimColor>Пока пусто: ссылки и итоги из ответов появятся здесь.</Text> : null}
+        {panel.items.length === 0 && (panel.mentioned ?? []).length === 0 && walls.length === 0 ? <Text dimColor>Пока пусто: задачи, ссылки и итоги из ответов появятся здесь.</Text> : null}
         {block('Ждёт тебя', v.waiting.map(i => row(i)))}
         {block('Задачи', taskRows)}
         {block('Ссылки', items(v.links, 'links'))}

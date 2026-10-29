@@ -13,6 +13,12 @@ export type Item = {
   seen?: number
 }
 
+/** A task a reply named by its id: `seen` is that reply's `Panel.turn`. */
+export type Mention = { task: string; seen: number }
+
+/** What a task's card says (see hooks/cards.ts): its status and title, and its vault address when it is a vault note. */
+export type Card = { status?: string; title?: string; href?: string }
+
 /** Something only the owner can physically do; one per key, up until the condition is seen gone. */
 export type Blocker = {
   /** `chrome`, `login:<host>`, `vpn`, `app:<name>`…: a later call with the same key rewrites or clears it. */
@@ -28,6 +34,11 @@ export type Panel = {
   items: Item[]
   /** Absent on panels stored before blockers existed. */
   blockers?: Blocker[]
+  /**
+   * Tasks the replies named in passing, with a card behind them: each with the reply that last named it. The latest
+   * reply's ids come last, in the order it named them. Absent on panels stored before mentions counted.
+   */
+  mentioned?: Mention[]
   /** Addresses the owner deleted: a later reply carrying them again does not bring them back. */
   dropped: string[]
   /** The owner's changes not yet shown to the model. */
@@ -62,8 +73,8 @@ declare module 'claude-code' {
     'session-panel': {
       panel: Panel
       editing: string | null
-      /** A task id → its card's frontmatter `status:`, for every task the panel names that has a card file. */
-      statuses: Record<string, string>
+      /** A task id → what its card says, for every task the panel names that has a card file. */
+      cards: Record<string, Card>
       /** `owner/repo#n` → the pull request's state. */
       prs: Record<string, Pr>
       /** What the owner unfolded: `more:<section>`, `closed`, `task:<id>`. */

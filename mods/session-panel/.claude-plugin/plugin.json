@@ -4,13 +4,13 @@
   "author": {
     "name": "Dima Timoschenko"
   },
-  "description": "A side panel per session: blockers only the owner can clear in a red frame on top (put up by the model or, for a disconnected Chrome extension, by itself; taken down when the condition is seen gone), one row per task with its card status and pull request state, the links the replies carried, and one line per delivered result; only what recent replies carried shows, the rest folds behind one line; the owner ticks, edits, deletes and adds lines in place",
+  "description": "A side panel per session: blockers only the owner can clear in a red frame on top (put up by the model or, for a disconnected Chrome extension, by itself; taken down when the condition is seen gone), one row per task — every task a reply names whose card exists, besides those its links carry — with its card status, its card title and pull request state, the id opening the card, the links the replies carried, and one line per delivered result; only what recent replies carried shows, the rest folds behind one line; the owner ticks, edits, deletes and adds lines in place",
   "types": "./types/index.d.ts",
   "userConfig": {
     "cardsDir": {
       "type": "string",
       "title": "Task cards folder",
-      "description": "Absolute path of the folder with task cards named <TASK-ID>.md: the frontmatter status of every task the panel names shows on its row, and a done status closes the task.",
+      "description": "Absolute path of the folder with task cards named <TASK-ID>.md, at any depth (an epic may be a folder of its tasks): every task id a reply names whose card is here gets a row with the card's frontmatter status and title, the id opening the card; a done status closes the task.",
       "default": ""
     },
     "doneStatuses": {

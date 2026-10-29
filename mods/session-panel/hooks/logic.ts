@@ -1,4 +1,4 @@
-import type { Item, Panel, Pr } from '../types'
+import type { Item, Mention, Panel, Pr } from '../types'
 import { plain } from './markup'
 import { isDoneStatus, isTerminal, pullOf } from './status'
 
@@ -9,6 +9,8 @@ export const MAX_ITEMS = 200
 export const FRESH_REPLIES = 15
 /** Fresh lines a section shows before the rest fold behind «ещё N». */
 export const SECTION_CAP = 5
+/** Tasks named in passing that the panel remembers; past this, the ones named longest ago go. */
+export const MAX_MENTIONS = 100
 
 export type Captured = { links: { href: string; label: string }[]; results: string[] }
 
@@ -284,12 +286,35 @@ export function remove(panel: Panel, id: string): Panel {
   }
 }
 
+/**
+ * The tasks a reply named, each brought to this reply: the reply's ids move to the end in the order it named them,
+ * so among tasks named in one reply the first named stays first.
+ */
+export function mention(panel: Panel, ids: readonly string[]): Panel {
+  if (ids.length === 0) return panel
+  const had = panel.mentioned ?? []
+  const named = new Set(ids)
+  let kept: Mention[] = [...had.filter(m => !named.has(m.task)), ...ids.map(task => ({ task, seen: panel.turn }))]
+  if (kept.length > MAX_MENTIONS) {
+    const out = new Set([...kept].map((m, n) => ({ m, n })).sort((a, b) => a.m.seen - b.m.seen || a.n - b.n).slice(0, kept.length - MAX_MENTIONS).map(x => x.m))
+    kept = kept.filter(m => !out.has(m))
+  }
+  return { ...panel, mentioned: kept }
+}
+
+/** The owner hides a task named only in passing; a later reply naming it brings it back, as new work on it. */
+export function forget(panel: Panel, task: string): Panel {
+  const had = panel.mentioned ?? []
+  if (!had.some(m => m.task === task)) return panel
+  return { ...panel, mentioned: had.filter(m => m.task !== task) }
+}
+
 // A task id becomes a file name in the cards folder: nothing that could step out of it.
 const SAFE_TASK = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/
 
 /** Every task the panel names — by a link, a result or a note — whose card file may say its status. */
 export function panelTasks(panel: Panel): string[] {
-  const ids = panel.items.flatMap(i => (i.task === undefined ? [] : [i.task]))
+  const ids = [...panel.items.flatMap(i => (i.task === undefined ? [] : [i.task])), ...(panel.mentioned ?? []).map(m => m.task)]
   return [...new Set(ids)].filter(t => SAFE_TASK.test(t) && !t.includes('..'))
 }
 
@@ -355,6 +380,11 @@ export function view(panel: Panel, ctx: ViewContext): PanelView {
     else if (item.kind === 'note') notes.push(item)
     else if (item.task === undefined) links.push(item)
     else groups.set(item.task, [...(groups.get(item.task) ?? []), item])
+  }
+  // A task a reply only named, with no link of its own, still gets its row.
+  for (const m of panel.mentioned ?? []) {
+    touched.set(m.task, Math.max(touched.get(m.task) ?? -1, m.seen))
+    if (!groups.has(m.task)) groups.set(m.task, [])
   }
   const tasks: TaskGroup[] = [...groups].map(([task, items]) => {
     const card = items.find(isCard)
