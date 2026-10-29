@@ -1,7 +1,8 @@
 // Pure parsing of Codex rollout files (~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl) and the
 // pane's text; register.tsx does the reading.
 import type { Run, RunPhase, Usage, UsageWindow, View } from '../types'
-import { describeCommand, describeJs, noteLine, shortPath } from './doing'
+import { describeCommand, describeJs, mask, noteLine, shortPath } from './doing'
+export { mask } from './doing'
 import type { ParsedCmd } from './doing'
 
 export type Phase = 'running' | 'done' | 'failed' | 'none'
@@ -204,18 +205,6 @@ export function taskFile(name: string): { id: string; kind: 'session' | 'events'
   const session = /^codex-(.+)\.session$/.exec(name)
   if (session !== null) return { id: session[1]!, kind: 'session' }
   return null
-}
-
-/** Hides what may be a secret in a command or message line: env assignments, URL credentials, tokens. */
-export function mask(s: string): string {
-  return s
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1…@')
-    .replace(/\b([A-Z][A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)/g, '$1=…')
-    .replace(/\b([a-z_]*(?:token|secret|passw(?:or)?d|pass|api_?key|auth)[a-z_]*)=("[^"]*"|'[^']*'|\S+)/gi, '$1=…')
-    .replace(/(--?(?:token|secret|password|passwd|api-key|apikey|auth)[= ])\S+/gi, '$1…')
-    .replace(/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 …')
-    .replace(/\b(?:sk|pk|rk|ghp|gho|ghs|ghu|github_pat|xox[abpr]|glpat|AKIA)[-_A-Za-z0-9]{12,}/g, '…')
-    .replace(/\b(?=[A-Za-z0-9_+-]*\d)(?=[A-Za-z0-9_+-]*[A-Za-z])[A-Za-z0-9_+-]{32,}={0,2}/g, '…')
 }
 
 /** Replaces C0/C1 control characters (ESC, CSI, BEL, …) so model or command text cannot drive the terminal. */

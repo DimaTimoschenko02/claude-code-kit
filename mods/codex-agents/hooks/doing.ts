@@ -7,6 +7,18 @@ export type ParsedCmd = { type?: string; cmd?: string; name?: string; path?: str
 
 const MAX = 70
 
+/** Hides what may be a secret in a command or message line: env assignments, URL credentials, tokens. */
+export function mask(s: string): string {
+  return s
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1…@')
+    .replace(/\b([A-Z][A-Z0-9_]*)=("[^"]*"|'[^']*'|\S+)/g, '$1=…')
+    .replace(/\b([a-z_]*(?:token|secret|passw(?:or)?d|pass|api_?key|auth)[a-z_]*)=("[^"]*"|'[^']*'|\S+)/gi, '$1=…')
+    .replace(/(--?(?:token|secret|password|passwd|api-key|apikey|auth)[= ])\S+/gi, '$1…')
+    .replace(/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{8,}/g, '$1 …')
+    .replace(/\b(?:sk|pk|rk|ghp|gho|ghs|ghu|github_pat|xox[abpr]|glpat|AKIA)[-_A-Za-z0-9]{12,}/g, '…')
+    .replace(/\b(?=[A-Za-z0-9_+-]*\d)(?=[A-Za-z0-9_+-]*[A-Za-z])[A-Za-z0-9_+-]{32,}={0,2}/g, '…')
+}
+
 /** Commands that set the stage and say nothing about the work (used only when nothing else is there). */
 const NOISE = new Set(['cd', 'mkdir', 'export', 'set', 'echo', 'printf', 'true', 'false', 'sleep', 'source', '.', 'unset', 'pushd', 'popd', 'trap', 'exit', 'wait', 'date', 'pwd', 'which', 'command', 'type', 'test', '[', 'clear', 'local'])
 const READ = new Set(['cat', 'sed', 'nl', 'head', 'tail', 'less', 'more', 'bat', 'wc', 'jq', 'xxd', 'od', 'strings', 'file', 'stat', 'md5', 'shasum', 'diff'])
@@ -102,6 +114,20 @@ function programOf(seg: string): { prog: string; args: string[] } | null {
 }
 
 const plain = (args: string[]) => args.filter(a => !a.startsWith('-'))
+/** Up to two subcommand-like words (`run gate`, `pr view`): a flag's value and anything that is not a plain lowercase word stay out, so a token passed as an argument never reaches the line. */
+function subcommands(args: string[]): string[] {
+  const out: string[] = []
+  for (let i = 0; i < args.length && out.length < 2; i++) {
+    const a = args[i]!
+    if (a.startsWith('-')) {
+      if (!a.includes('=') && args[i + 1] !== undefined && !args[i + 1]!.startsWith('-')) i++
+      continue
+    }
+    if (/^[a-z][a-z0-9:._-]{0,23}$/.test(a)) out.push(a)
+    else break
+  }
+  return out
+}
 /** The last argument that looks like a file (has a dot or a slash), else the last plain one. */
 function target(args: string[]): string | undefined {
   const p = plain(args)
@@ -144,9 +170,9 @@ function phrase(prog: string, args: string[], heredoc: boolean): string {
     return sub === undefined ? 'git' : `git ${sub}`
   }
   if (prog === 'npm' || prog === 'pnpm' || prog === 'yarn' || prog === 'bun') {
-    return cap(`${prog} ${plain(args).slice(0, 2).join(' ')}`.trim(), 40)
+    return cap(`${prog} ${subcommands(args).join(' ')}`.trim(), 40)
   }
-  if (prog === 'npx' || prog === 'bunx') return cap(`npx ${plain(args).slice(0, 2).join(' ')}`.trim(), 40)
+  if (prog === 'npx' || prog === 'bunx') return cap(`npx ${subcommands(args).join(' ')}`.trim(), 40)
   if (prog === 'vitest' || prog === 'jest' || prog === 'pytest') return 'running tests'
   if (prog === 'tsc') return 'type-checking'
   if (prog === 'apply_patch' || prog === 'patch') return 'editing files'
@@ -159,14 +185,21 @@ function phrase(prog: string, args: string[], heredoc: boolean): string {
   if (prog === 'mv' || prog === 'cp') return `${prog === 'mv' ? 'moving' : 'copying'} ${shortPath(target(args) ?? 'files')}`
   if (prog === 'ps' || prog === 'pgrep' || prog === 'lsof') return 'checking processes'
   if (prog === 'docker' || prog === 'kubectl' || prog === 'gh' || prog === 'psql' || prog === 'make' || prog === 'cargo' || prog === 'go') {
-    return cap(`${prog} ${plain(args).slice(0, 2).join(' ')}`.trim(), 40)
+    return cap(`${prog} ${subcommands(args).join(' ')}`.trim(), 40)
   }
-  const t = target(args)
-  return cap(t === undefined ? prog : `${prog} ${shortPath(t)}`, 40)
+  // An unknown program shows only a file it works on: its other arguments may be anything, a secret included.
+  const file = plain(args).reverse().find(a => /[./]/.test(a) && !/^\d/.test(a) && !a.includes('$('))
+  return cap(file === undefined ? prog : `${prog} ${shortPath(file.replace(/[?#].*$/, ''))}`, 40)
 }
 
 /** A shell command as a short phrase: its first command that does the work, `+N` for the others that do. */
 export function describeCommand(cmd: string, parsed?: readonly ParsedCmd[]): string | undefined {
+  // Masked going in and coming out: the phrase is built from pieces of the command, and the pane is on screen.
+  const out = describeRaw(mask(cmd), parsed)
+  return out === undefined ? undefined : mask(out)
+}
+
+function describeRaw(cmd: string, parsed?: readonly ParsedCmd[]): string | undefined {
   const known = (parsed ?? []).filter(p => p.type === 'read' || p.type === 'list_files' || p.type === 'search')
   if (parsed !== undefined && parsed.length > 0 && known.length === parsed.length) {
     const p = known[0]!

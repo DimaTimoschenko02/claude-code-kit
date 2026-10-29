@@ -72,3 +72,32 @@ describe('names from the process list', () => {
     expect(clipWords('short', 80)).toBe('short')
   })
 })
+
+describe('describeCommand never shows a secret', () => {
+  const secrets = ['hunter2secretvalue', 'Zq9xK2mP7vL4', 'sk-live-abcdefghijklmnop']
+  const cmds = [
+    'curl -H "Authorization: Bearer Zq9xK2mP7vL4abcd" https://api.example.com/v1',
+    'mytool --api-key hunter2secretvalue run',
+    'mytool --key hunter2secretvalue',
+    'mytool hunter2secretvalue',
+    'gh --token Zq9xK2mP7vL4 pr list',
+    'docker login -p hunter2secretvalue registry.example.com',
+    'npm --registry-token Zq9xK2mP7vL4 publish',
+    'npx some-cli Zq9xK2mP7vL4',
+    'TOKEN=sk-live-abcdefghijklmnop node build.js',
+    'deploy https://user:hunter2secretvalue@host.example.com/x',
+    'fetcher https://host.example.com/a.json?token=Zq9xK2mP7vL4',
+  ]
+  for (const cmd of cmds) {
+    test(cmd, () => {
+      const out = describeCommand(cmd) ?? ''
+      for (const s of secrets) expect(out).not.toContain(s)
+    })
+  }
+
+  test('keeps the useful words', () => {
+    expect(describeCommand('npm run gate')).toBe('npm run gate')
+    expect(describeCommand('gh --repo me/x pr view')).toBe('gh pr view')
+    expect(describeCommand('mytool build/out.json')).toBe('mytool out.json')
+  })
+})
