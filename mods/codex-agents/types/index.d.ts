@@ -4,8 +4,13 @@ export type RunPhase = 'running' | 'starting' | 'stale' | 'done' | 'failed'
 /** One Codex thread (one rollout file) as the pane draws it. */
 export type Run = {
   thread: string
-  /** The task id a wrapper's files name, else the prompt's first line. */
+  /** The task id a wrapper's files name, else the `-o` file's stem of a live `codex exec`, a native role, the prompt's first line. */
   label: string
+  /** The prompt's first line (the brief's heading) when the label is something else. */
+  title?: string
+  /** The model and reasoning effort the newest turn ran with. */
+  model?: string
+  effort?: string
   /** Basename of the run's working directory. */
   cwd: string
   /** Who started it when not the plain CLI (`Claude Code` for the codex plugin). */
@@ -19,8 +24,14 @@ export type Run = {
   silentMs: number
   /** When the turn finished. */
   endAt?: number
-  /** The last command or agent message, one masked line. */
+  /** The last command or tool call as a phrase (`reading SKILL.md`, `viewing A07/grid_01.jpg`), one masked line; '' when none. */
   action: string
+  /** Since that action. */
+  actionAgoMs?: number
+  /** The agent's last commentary, its first sentence. */
+  note?: string
+  /** Since that remark. */
+  noteAgoMs?: number
   /** A finished turn's final answer, its first line. */
   result?: string
   /** Why a failed run failed, in words (`usage limit reached`, `never started`, `no events for 1h 05m`). */
@@ -48,6 +59,8 @@ declare module 'claude-code' {
       view: Shaped<View>
       /** The moment the pane last redrew its clock: the «updated Ns ago» moves with it between scans. */
       now: number
+      /** Thread id → the `-o` file stem of the `codex exec` that ran it, learned while the process lived. */
+      labels: Shaped<Record<string, string>>
     }
   }
 }

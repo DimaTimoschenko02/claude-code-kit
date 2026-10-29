@@ -1,6 +1,8 @@
 // Pure parsing of Codex rollout files (~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<thread>.jsonl) and the
 // pane's text; register.tsx does the reading.
 import type { Run, RunPhase, Usage, UsageWindow, View } from '../types'
+import { describeCommand, describeJs, noteLine, shortPath } from './doing'
+import type { ParsedCmd } from './doing'
 
 export type Phase = 'running' | 'done' | 'failed' | 'none'
 
@@ -14,14 +16,23 @@ export type Rec = {
   startMs?: number
   cwd?: string
   origin?: string
+  /** A native Codex role (`agent_role`) or subagent kind (`review`) the head names. */
+  role?: string
   prompt?: string
+  model?: string
+  effort?: string
   isHeadRead: boolean
   phase: Phase
   turnStart?: number
   endAt?: number
   /** Why the turn failed, in words. */
   error?: string
+  /** The last command or tool call, as a phrase, and when it happened. */
   action?: string
+  actionAt?: number
+  /** The agent's last commentary, its first sentence, and when it said it. */
+  note?: string
+  noteAt?: number
   /** The final answer's first line. */
   result?: string
   tokens?: number
@@ -33,7 +44,10 @@ export type TailFacts = {
   marker?: { kind: 'start'; at: number } | { kind: 'complete'; at: number; error?: string; last?: string } | { kind: 'aborted'; at: number; reason?: string }
   tokens?: number
   usage?: Usage
-  action?: string
+  action?: { text: string; at: number }
+  note?: { text: string; at: number }
+  model?: string
+  effort?: string
 }
 
 const THREAD = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/
@@ -44,9 +58,9 @@ export function threadOf(name: string): string | null {
 }
 
 /** Splits `tail -c`/`head -c` output over several files at their `==> path <==` headers (one file prints none). */
-export function splitHeaders(stdout: string, paths: readonly string[]): Map<string, string> {
+export function splitHeaders(stdout: string, paths: readonly string[], isAlwaysHeaded = false): Map<string, string> {
   const out = new Map<string, string>()
-  if (paths.length === 1) {
+  if (paths.length === 1 && !isAlwaysHeaded) {
     out.set(paths[0]!, stdout)
     return out
   }
@@ -70,6 +84,57 @@ export function splitHeaders(stdout: string, paths: readonly string[]): Map<stri
   return out
 }
 
+/** The rollout lines the pane reads; everything else (reasoning blobs, tool outputs with images) is left on disk. */
+export const TAIL_KINDS = ['turn_context', 'task_started', 'task_complete', 'turn_aborted', 'token_count', 'item_completed', 'custom_tool_call', 'function_call', 'agent_message', 'exec_command_begin', 'exec_command_end'] as const
+/** Lines kept per file after the filter: the newest ones decide what the pane says. */
+export const TAIL_LINES = 24
+
+/** The tail script reads from a whole MiB block: `skip` counts these. */
+export const BLOCK = 1024 * 1024
+
+/** Turn boundaries: the newest two are kept from the whole range, however far back they lie. */
+export const MARKER_KINDS = ['task_started', 'task_complete', 'turn_aborted'] as const
+
+/**
+ * `sh -c TAIL_SCRIPT sh <skip> <path> [<skip> <path>…]`: for each file, a `==> path <==` header, then from block
+ * <skip> on, among the lines whose type the pane reads: the last two turn boundaries, the last token count and the
+ * last agent remark wherever they lie, then the newest TAIL_LINES, command outputs blanked. A plain `tail -c` of a run
+ * that views images held only one base64 output, and the pane said «thinking» on a run 24 minutes in; `dd` seeks
+ * where BSD `tail -c` took 0.3 s per 8 MB. The kept lines come first, so a newer one among the last lines still wins.
+ */
+export const TAIL_SCRIPT = String.raw`export LC_ALL=C; while [ $# -gt 1 ]; do k=$1; f=$2; shift 2; printf '==> %s <==\n' "$f"; dd if="$f" bs=${BLOCK} skip="$k" 2>/dev/null | grep -a -E '"type":"(${TAIL_KINDS.join('|')})"' | awk '/"type":"(${MARKER_KINDS.join('|')})"/ { m1 = m2; m2 = $0 } /"type":"token_count"/ { t = $0 } /"type":"(AgentMessage|agent_message)"/ { a = $0 } { r[NR % ${TAIL_LINES}] = $0 } END { if (m1 != "") print m1; if (m2 != "") print m2; if (t != "") print t; if (a != "") print a; for (i = (NR > ${TAIL_LINES} ? NR - ${TAIL_LINES} + 1 : 1); i <= NR; i++) print r[i % ${TAIL_LINES}] }' | sed -E 's/"aggregated_output":"([^"\\]|\\.)*"/"aggregated_output":""/g'; done`
+
+/** A `codex exec` command line's `-o <file>` stem (`…/out/p2_scan1.last.txt` → `p2_scan1`); null without one. */
+export function stemOf(args: string): string | null {
+  const m = /(?:^|\s)(?:-o|--output-last-message)(?:=|\s+)(\S+)/.exec(args)
+  if (m === null) return null
+  const base = (m[1]!.replace(/^['"]|['"]$/g, '').split('/').pop() ?? '').replace(/(?:\.last)?\.(?:txt|md|json|log)$/i, '').replace(/\.last$/, '')
+  return base === '' ? null : oneLine(base, 40)
+}
+
+/** A `ps -o pid=,args=` line of a Codex CLI run (the native binary, not its node launcher): pid and args. */
+export function codexProc(line: string): { pid: number; args: string } | null {
+  const m = /^\s*(\d+)\s+(.*)$/.exec(line)
+  if (m === null) return null
+  const args = m[2]!
+  if (/^\S*node\s/.test(args) || !/(?:^|[\s/])codex\s+exec\s/.test(args)) return null
+  return { pid: Number(m[1]), args }
+}
+
+/** `lsof -Fpn` output → pid → the rollout thread it has open. */
+export function lsofThreads(stdout: string): Map<number, string> {
+  const out = new Map<number, string>()
+  let pid = 0
+  for (const line of stdout.split('\n')) {
+    if (line.startsWith('p')) pid = Number(line.slice(1)) || 0
+    else if (line.startsWith('n') && pid > 0) {
+      const thread = threadOf(line.slice(1).split('/').pop() ?? '')
+      if (thread !== null) out.set(pid, thread)
+    }
+  }
+  return out
+}
+
 /** Splits `grep -H -o` output into each file's matches, in order. */
 export function splitGrep(stdout: string, paths: readonly string[]): Map<string, string[]> {
   const out = new Map<string, string[]>()
@@ -84,19 +149,34 @@ export function splitGrep(stdout: string, paths: readonly string[]): Map<string,
   return out
 }
 
-/** session_meta's start, cwd and originator from the head grep's matches. */
-export function headFacts(matches: readonly string[]): { startMs?: number; cwd?: string; origin?: string } {
-  const out: { startMs?: number; cwd?: string; origin?: string } = {}
+/** session_meta's start, cwd, originator and role from the head grep's matches. */
+export function headFacts(matches: readonly string[]): { startMs?: number; cwd?: string; origin?: string; role?: string } {
+  const out: { startMs?: number; cwd?: string; origin?: string; role?: string } = {}
   for (const m of matches) {
-    const kv = /^\{?"(timestamp|cwd|originator)":"([^"]*)"$/.exec(m)
+    const kv = /^\{?"(timestamp|cwd|originator|agent_role|subagent)":"([^"]*)"$/.exec(m)
     if (kv === null) continue
     if (kv[1] === 'timestamp' && out.startMs === undefined) {
       const t = Date.parse(kv[2]!)
       if (!Number.isNaN(t)) out.startMs = t
     } else if (kv[1] === 'cwd' && out.cwd === undefined) out.cwd = oneLine(kv[2]!, 200)
     else if (kv[1] === 'originator' && out.origin === undefined) out.origin = oneLine(kv[2]!, 40)
+    else if ((kv[1] === 'agent_role' || kv[1] === 'subagent') && out.role === undefined && kv[2] !== '') out.role = oneLine(kv[2]!, 40)
   }
   return out
+}
+
+/** Model and reasoning effort from a `turn_context` line (Codex names both there, per turn). */
+export function contextOf(line: string | undefined): { model?: string; effort?: string } {
+  if (line === undefined) return {}
+  let p: Obj | undefined
+  try {
+    p = obj(obj(JSON.parse(line))?.payload)
+  } catch {
+    return {}
+  }
+  const model = str(p?.model)
+  const effort = str(p?.effort) ?? str(p?.reasoning_effort)
+  return { ...(model === undefined || model === '' ? {} : { model: oneLine(model, 40) }), ...(effort === undefined || effort === '' ? {} : { effort: oneLine(effort, 20) }) }
 }
 
 /** The prompt's first line from the UserMessage grep match (the match stops at the first escape or quote). */
@@ -143,6 +223,15 @@ export function clean(s: string): string {
   return s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
 }
 
+/** A line of at most `max` characters cut at a word boundary (a dangling `(` or `,` goes too), `…` marking the cut. */
+export function clipWords(s: string, max: number): string {
+  if (s.length <= max) return s
+  const head = s.slice(0, max)
+  const space = head.lastIndexOf(' ')
+  const cut = space >= max * 0.6 ? head.slice(0, space) : head.slice(0, max - 1)
+  return `${cut.replace(/[\s,;:(\[{–—-]+$/, '')}…`
+}
+
 /** One masked line of at most `max` characters. */
 export function oneLine(s: string, max = 140): string {
   const flat = mask(clean(s.slice(0, 600)).replace(/\s+/g, ' ').trim())
@@ -173,6 +262,7 @@ const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : und
 const num = (v: unknown): number | undefined => (typeof v === 'number' && Number.isFinite(v) ? v : undefined)
 
 const LINE_KINDS = [
+  '"type":"turn_context"',
   '"type":"task_started"',
   '"type":"task_complete"',
   '"type":"turn_aborted"',
@@ -227,23 +317,40 @@ function usageOf(rl: Obj | undefined, at: number): Usage | undefined {
   return { windows, at, ...(plan === undefined ? {} : { plan }), ...(reached === undefined ? {} : { reached }) }
 }
 
-/** The action an item describes, as a line with its glyph; undefined for items that are not one. */
-function itemAction(item: Obj): string | undefined {
+type Act = { kind: 'action' | 'note'; text: string }
+
+/** What an item says the run is doing: a phrase for a command, an image view or an edit, the commentary of a message. */
+function itemAction(item: Obj): Act | undefined {
   const type = str(item.type)
   if (type === 'CommandExecution' || type === 'command_execution') {
     const cmd = commandText(item.command)
-    return cmd === undefined ? undefined : `$ ${cmd}`
+    const parsed = Array.isArray(item.parsed_cmd) ? (item.parsed_cmd.map(obj).filter(Boolean) as ParsedCmd[]) : undefined
+    const text = cmd === undefined ? undefined : describeCommand(cmd, parsed)
+    return text === undefined ? undefined : { kind: 'action', text }
   }
   if (type === 'AgentMessage' || type === 'agent_message') {
     const parts = Array.isArray(item.content) ? item.content.map(c => str(obj(c)?.text) ?? '').join('') : str(item.text)
-    const line = firstLine(parts)
-    return line === undefined ? undefined : `💬 ${line}`
+    const text = noteLine(parts)
+    return text === undefined ? undefined : { kind: 'note', text }
+  }
+  if (type === 'ImageView' || type === 'image_view') {
+    const path = str(item.path)
+    return path === undefined ? undefined : { kind: 'action', text: `viewing ${shortPath(path, 2)}` }
   }
   if (type === 'FileChange' || type === 'file_change') {
     const changes = obj(item.changes)
-    const names = changes === undefined ? [] : Object.keys(changes).map(p => p.split('/').pop() ?? p)
-    return names.length === 0 ? undefined : `✎ ${names.slice(0, 4).join(', ')}${names.length > 4 ? ` (+${names.length - 4})` : ''}`
+    const names = changes === undefined ? [] : Object.keys(changes).map(p => shortPath(p))
+    return names.length === 0 ? undefined : { kind: 'action', text: `editing ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` +${names.length - 3}` : ''}` }
   }
+  if (type === 'WebSearch' || type === 'web_search') {
+    const q = str(item.query)
+    return { kind: 'action', text: q === undefined ? 'searching the web' : `searching the web: ${q}` }
+  }
+  if (type === 'McpToolCall' || type === 'mcp_tool_call') {
+    const tool = str(item.tool)
+    return { kind: 'action', text: tool === undefined ? 'calling a tool' : `tool ${str(item.server) === undefined ? '' : `${str(item.server)} `}${tool}` }
+  }
+  if (type === 'ContextCompaction') return { kind: 'action', text: 'compacting its context' }
   return undefined
 }
 
@@ -252,6 +359,11 @@ export function parseTail(text: string, isWhole: boolean): TailFacts {
   const facts: TailFacts = {}
   const lines = text.split('\n')
   if (!isWhole) lines.shift()
+  const act = (a: Act | undefined, at: number) => {
+    if (a === undefined) return
+    if (a.kind === 'note') facts.note = { text: a.text, at }
+    else facts.action = { text: a.text, at }
+  }
   for (const line of lines) {
     if (!line.startsWith('{') || !LINE_KINDS.some(k => line.includes(k))) continue
     let o: Obj
@@ -264,7 +376,11 @@ export function parseTail(text: string, isWhole: boolean): TailFacts {
     const p = obj(o.payload)
     if (p === undefined) continue
     const kind = str(p.type)
-    if (o.type === 'event_msg') {
+    if (o.type === 'turn_context') {
+      const c = contextOf(line)
+      if (c.model !== undefined) facts.model = c.model
+      if (c.effort !== undefined) facts.effort = c.effort
+    } else if (o.type === 'event_msg') {
       if (kind === 'task_started') facts.marker = { kind: 'start', at: (num(p.started_at) ?? 0) * 1000 || at }
       else if (kind === 'task_complete') {
         const err = obj(p.error)
@@ -282,28 +398,29 @@ export function parseTail(text: string, isWhole: boolean): TailFacts {
         if (usage !== undefined) facts.usage = usage
       } else if (kind === 'item_completed') {
         const item = obj(p.item)
-        const action = item === undefined ? undefined : itemAction(item)
-        if (action !== undefined) facts.action = action
+        act(item === undefined ? undefined : itemAction(item), at)
       } else if (kind === 'agent_message') {
-        const line = firstLine(str(p.message))
-        if (line !== undefined) facts.action = `💬 ${line}`
+        const text = noteLine(str(p.message))
+        if (text !== undefined) facts.note = { text, at }
       } else if (kind === 'exec_command_begin' || kind === 'exec_command_end') {
         const cmd = commandText(p.command)
-        if (cmd !== undefined) facts.action = `$ ${cmd}`
+        const text = cmd === undefined ? undefined : describeCommand(cmd)
+        if (text !== undefined) facts.action = { text, at }
       }
     } else if (o.type === 'response_item') {
       if (kind === 'custom_tool_call') {
-        const cmd = cmdOfJs(str(p.input) ?? '')
-        if (cmd !== undefined) facts.action = `$ ${cmd}`
-        else if (str(p.name) !== undefined) facts.action = `⚙ ${str(p.name)}`
+        const input = str(p.input) ?? ''
+        const text = describeJs(input, cmdOfJs(input)) ?? (str(p.name) === undefined ? undefined : `tool ${str(p.name)}`)
+        if (text !== undefined) facts.action = { text, at }
       } else if (kind === 'function_call') {
         let args: Obj | undefined
         try {
           args = obj(JSON.parse(str(p.arguments) ?? '{}'))
         } catch {}
         const cmd = commandText(args?.cmd) ?? commandText(args?.command)
-        if (cmd !== undefined) facts.action = `$ ${cmd}`
-        else if (str(p.name) !== undefined) facts.action = `⚙ ${str(p.name)}`
+        const name = str(p.name)
+        const text = cmd !== undefined ? describeCommand(cmd) : name === 'view_image' && str(args?.path) !== undefined ? `viewing ${shortPath(str(args?.path)!, 2)}` : name === undefined ? undefined : `tool ${name}`
+        if (text !== undefined) facts.action = { text, at }
       }
     }
   }
@@ -340,7 +457,16 @@ export function merge(rec: Rec, facts: TailFacts, isWhole: boolean): Rec {
   }
   if (facts.tokens !== undefined) next.tokens = facts.tokens
   if (facts.usage !== undefined) next.usage = facts.usage
-  if (facts.action !== undefined) next.action = oneLine(facts.action)
+  if (facts.model !== undefined) next.model = facts.model
+  if (facts.effort !== undefined) next.effort = facts.effort
+  if (facts.action !== undefined && facts.action.at >= (rec.actionAt ?? 0)) {
+    next.action = oneLine(facts.action.text, 80)
+    next.actionAt = facts.action.at
+  }
+  if (facts.note !== undefined && facts.note.at >= (rec.noteAt ?? 0)) {
+    next.note = oneLine(facts.note.text, 120)
+    next.noteAt = facts.note.at
+  }
   return next
 }
 
@@ -376,9 +502,16 @@ export function buildView(recs: Iterable<Rec>, tasks: ReadonlyMap<string, string
     } else phase = r.phase
     const finished = phase === 'done' || phase === 'failed'
     const end = finished ? (r.endAt ?? r.mtimeMs) : now
+    const name = tasks.get(r.thread) ?? r.role
+    // The brief's heading is the label when nothing else names the run, and then no `task:` line repeats it.
+    const title = r.prompt === undefined || name === undefined ? undefined : clipWords(oneLine(r.prompt, 200), 80)
+    const label = clipWords(oneLine(name ?? r.prompt ?? r.thread.slice(0, 8), 200), 60)
     all.push({
       thread: r.thread,
-      label: oneLine(tasks.get(r.thread) ?? r.prompt ?? r.thread.slice(0, 8), 90),
+      label,
+      ...(title === undefined ? {} : { title }),
+      ...(r.model === undefined ? {} : { model: r.model }),
+      ...(r.effort === undefined ? {} : { effort: r.effort }),
       cwd: (r.cwd ?? '').split('/').filter(Boolean).pop() ?? '',
       ...(r.origin !== undefined && r.origin !== 'codex_exec' ? { origin: r.origin } : {}),
       phase,
@@ -387,6 +520,9 @@ export function buildView(recs: Iterable<Rec>, tasks: ReadonlyMap<string, string
       silentMs,
       ...(finished ? { endAt: end } : {}),
       action: r.action ?? '',
+      ...(r.actionAt === undefined ? {} : { actionAgoMs: Math.max(0, now - r.actionAt) }),
+      ...(r.note === undefined ? {} : { note: r.note }),
+      ...(r.noteAt === undefined ? {} : { noteAgoMs: Math.max(0, now - r.noteAt) }),
       ...(finished && r.result !== undefined ? { result: r.result } : {}),
       ...(phase === 'failed' && reason !== undefined ? { reason } : {}),
       ...(r.tokens === undefined ? {} : { tokens: r.tokens }),
@@ -484,21 +620,35 @@ export const STATUS_COLOR: Record<RunPhase, 'success' | 'suggestion' | 'warning'
 /** One run as the pane and the text answer draw it: a header, labelled lines, a meta line. */
 export type Block = { status: string; title: string; time: string; lines: { label: string; text: string }[]; meta: string }
 
+/** A remark older than this gets its age shown. */
+export const NOTE_FRESH_MS = 2 * 60_000
+
 export function blockOf(r: Run, now: number, tzMin: number): Block {
   const live = isLive(r.phase)
   const status =
     r.phase === 'stale' ? `${STATUS_WORD.stale} ${fmtDur(r.silentMs)}` : r.reason !== undefined ? `${STATUS_WORD[r.phase]} (${r.reason})` : STATUS_WORD[r.phase]
   const lines: Block['lines'] = []
-  if (live) lines.push({ label: 'doing', text: r.action !== '' ? r.action : r.phase === 'starting' ? 'starting up' : 'thinking (no command or message yet in what was read)' })
-  else if (r.result !== undefined) lines.push({ label: 'result', text: r.result })
+  if (r.title !== undefined) lines.push({ label: 'task', text: r.title })
+  const action = r.action === '' ? undefined : `${r.action}${r.actionAgoMs === undefined ? '' : ` · ${ago(r.actionAgoMs)}`}`
+  if (live) {
+    // The agent's own words say what it is on; the last command only says where it is right now.
+    if (r.note !== undefined) {
+      // An old remark still says what it is on, but its age says so too.
+      const old = r.noteAgoMs !== undefined && r.noteAgoMs > NOTE_FRESH_MS ? ` · ${ago(r.noteAgoMs)}` : ''
+      lines.push({ label: 'doing', text: `${r.note}${old}` })
+      if (action !== undefined) lines.push({ label: 'now', text: action })
+    } else lines.push({ label: 'doing', text: action ?? (r.phase === 'starting' ? 'starting up' : 'thinking') })
+  } else if (r.result !== undefined) lines.push({ label: 'result', text: r.result })
+  else if (r.note !== undefined) lines.push({ label: 'last', text: r.note })
   else if (r.action !== '') lines.push({ label: 'last', text: r.action })
   const meta: string[] = []
   if (r.cwd !== '') meta.push(`repo ${r.cwd}`)
   if (r.origin !== undefined) meta.push(`via ${r.origin}`)
   if (r.tokens !== undefined) meta.push(`${fmtTokens(r.tokens)} tokens`)
   meta.push(`started ${when(r.startAt, now, tzMin)}`)
-  meta.push(r.endAt !== undefined ? `finished ${when(r.endAt, now, tzMin)}` : `last event ${ago(r.silentMs)}`)
-  return { status, title: r.label, time: `${live ? 'for' : 'took'} ${fmtDur(r.elapsedMs)}`, lines, meta: meta.join(' · ') }
+  if (r.endAt !== undefined) meta.push(`finished ${when(r.endAt, now, tzMin)}`)
+  const model = r.model === undefined ? undefined : `${r.model}${r.effort === undefined ? '' : ` ${r.effort}`}`
+  return { status, title: model === undefined ? r.label : `${r.label} · ${model}`, time: `${live ? 'for' : 'took'} ${fmtDur(r.elapsedMs)}`, lines, meta: meta.join(' · ') }
 }
 
 /** `Codex · 1 running · 1 silent · 2 finished`, or `Codex · nothing running`. */

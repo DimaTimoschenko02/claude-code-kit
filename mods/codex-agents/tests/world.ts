@@ -3,6 +3,8 @@ import { mock } from 'claude-code/testing'
 import type { Engine, MockClock } from 'claude-code/testing'
 import type { FsEntry, On, ProcessRunResult } from 'claude-code'
 
+import { BLOCK, MARKER_KINDS, TAIL_KINDS, TAIL_LINES, TAIL_SCRIPT } from '../hooks/parse'
+
 export const HOME = '/home/fake'
 export const DAY = `${HOME}/.codex/sessions/2026/10/24`
 export const WRAP = `${HOME}/wrap`
@@ -28,6 +30,13 @@ export const line = {
   js: (at: number, input: string) => JSON.stringify({ timestamp: iso(at), type: 'response_item', payload: { type: 'custom_tool_call', status: 'completed', name: 'exec', input } }),
   command: (at: number, cmd: string) =>
     JSON.stringify({ timestamp: iso(at), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'CommandExecution', command: ['/bin/zsh', '-lc', cmd], aggregated_output: 'SECRET OUTPUT LINE', exit_code: 0 } } }),
+  context: (at: number, model = 'gpt-6.1-sol', effort = 'high') =>
+    JSON.stringify({ timestamp: iso(at), type: 'turn_context', payload: { turn_id: 't1', cwd: '/home/fake/proj/shop', approval_policy: 'never', sandbox_policy: { type: 'workspace-write' }, model, comp_hash: '3000', effort, summary: 'none' } }),
+  image: (at: number, path: string) => JSON.stringify({ timestamp: iso(at), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'ImageView', id: 'i1', path: `file://${path}` } } }),
+  /** A view_image call's output: one base64 image the size of a real one, the line a plain tail read alone. */
+  imageOutput: (at: number) => JSON.stringify({ timestamp: iso(at), type: 'response_item', payload: { type: 'custom_tool_call_output', output: [{ type: 'input_image', image_url: `data:image/jpeg;base64,${'A'.repeat(300_000)}` }] } }),
+  parsed: (at: number, cmd: string, parsed: object[]) =>
+    JSON.stringify({ timestamp: iso(at), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'CommandExecution', command: ['/bin/zsh', '-lc', cmd], parsed_cmd: parsed, aggregated_output: 'SECRET OUTPUT LINE', exit_code: 0 } } }),
   message: (at: number, text: string) =>
     JSON.stringify({ timestamp: iso(at), type: 'event_msg', payload: { type: 'item_completed', item: { type: 'AgentMessage', id: 'm1', content: [{ type: 'Text', text }], phase: 'commentary' } } }),
   tokens: (at: number, total: number, used = 7, plan = 'prolite') =>
@@ -44,7 +53,10 @@ export const line = {
     JSON.stringify({ timestamp: iso(at), type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1', last_agent_message: last, ...(error === undefined ? {} : { error: { message: 'You hit your usage limit. Visit https://example.com', codex_error_info: error } }) } }),
 }
 
-export type World = { files: Map<string, string>; mtimes: Map<string, number>; opened: string[]; placed: boolean; clock: MockClock; runs: string[][] }
+/** A live process `ps` lists; `rollout` is the file `lsof` shows it holding open. */
+export type Proc = { pid: number; args: string; rollout?: string }
+
+export type World = { files: Map<string, string>; mtimes: Map<string, number>; opened: string[]; placed: boolean; clock: MockClock; runs: string[][]; procs: Proc[] }
 
 function grep(argv: readonly string[], files: Map<string, string>): string {
   const patterns: string[] = []
@@ -64,7 +76,8 @@ function grep(argv: readonly string[], files: Map<string, string>): string {
       const hits: { at: number; text: string }[] = []
       for (const pat of patterns) for (const m of l.matchAll(new RegExp(pat, 'g'))) hits.push({ at: m.index, text: m[0] })
       if (hits.length === 0) continue
-      for (const h of hits.sort((a, b) => a.at - b.at)) out.push(`${p}:${h.text}`)
+      if (argv.includes('-o')) for (const h of hits.sort((a, b) => a.at - b.at)) out.push(`${p}:${h.text}`)
+      else out.push(`${p}:${l}`)
       break
     }
   }
@@ -79,9 +92,35 @@ function headTail(argv: readonly string[], files: Map<string, string>): string {
   return paths.map(p => `==> ${p} <==\n${cut(files.get(p) ?? '')}`).join('\n')
 }
 
+/** `sh -c TAIL_SCRIPT sh <skip> <path>…` the way the script does it: blocks skipped, lines filtered, outputs blanked. */
+function tailScript(args: readonly string[], files: Map<string, string>): string {
+  const kinds = new RegExp(`"type":"(${TAIL_KINDS.join('|')})"`)
+  const out: string[] = []
+  for (let i = 0; i + 1 < args.length; i += 2) {
+    const path = args[i + 1]!
+    out.push(`==> ${path} <==`)
+    const text = (files.get(path) ?? '').slice(Number(args[i]) * BLOCK)
+    const markers = new RegExp(`"type":"(${MARKER_KINDS.join('|')})"`)
+    const lines = text.split('\n').filter(l => kinds.test(l))
+    const lastOf = (re: RegExp) => lines.filter(l => re.test(l)).slice(-1)
+    out.push(...lines.filter(l => markers.test(l)).slice(-2), ...lastOf(/"type":"token_count"/), ...lastOf(/"type":"(AgentMessage|agent_message)"/))
+    const kept = lines.map(l => l.replace(/"aggregated_output":"([^"\\]|\\.)*"/g, '"aggregated_output":""'))
+    out.push(...kept.slice(-TAIL_LINES))
+  }
+  return out.length === 0 ? '' : `${out.join('\n')}\n`
+}
+
+function lsof(argv: readonly string[], procs: Proc[]): string {
+  const pids = (argv[2] ?? '').split(',').map(Number)
+  return procs
+    .filter(p => pids.includes(p.pid))
+    .flatMap(p => [`p${p.pid}`, 'n/dev/null', ...(p.rollout === undefined ? [] : [`n${p.rollout}`])])
+    .join('\n')
+}
+
 /** The engine beneath the mod over a fake disk; `placed: false` plays a session with no surface (`claude -p`). */
 export function world(on: On, now = T0 + 23 * 60_000): World {
-  const w: World = { files: new Map(), mtimes: new Map(), opened: [], placed: true, clock: mock.clock(on, { now }), runs: [] }
+  const w: World = { files: new Map(), mtimes: new Map(), opened: [], placed: true, clock: mock.clock(on, { now }), runs: [], procs: [] }
   mock.env(on, { HOME })
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
@@ -114,7 +153,21 @@ export function world(on: On, now = T0 + 23 * 60_000): World {
   on('process.run', (_$, e) => {
     w.runs.push([...e.argv])
     const tool = e.argv[0]
-    const stdout = tool === 'date' ? '+0200\n' : tool === 'grep' ? grep(e.argv, w.files) : tool === 'tail' || tool === 'head' ? headTail(e.argv, w.files) : ''
+    const isTail = tool === 'sh' && e.argv[2] === TAIL_SCRIPT
+    const stdout =
+      tool === 'date'
+        ? '+0200\n'
+        : tool === 'grep'
+          ? grep(e.argv, w.files)
+          : tool === 'tail' || tool === 'head'
+            ? headTail(e.argv, w.files)
+            : isTail
+              ? tailScript(e.argv.slice(4), w.files)
+              : tool === 'ps'
+                ? w.procs.map(p => `${String(p.pid).padStart(6)} ${p.args}`).join('\n')
+                : tool === 'lsof'
+                  ? lsof(e.argv, w.procs)
+                  : ''
     const res: ProcessRunResult = { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false }
     return { value: res }
   })
@@ -141,6 +194,7 @@ export function running02a(w: World): string {
   put(w, path, [
     line.meta(THREAD, T0, '/home/fake/proj/shop'),
     line.started(T0),
+    line.context(T0),
     line.prompt(T0, '# Задача 02a — платформа Nest\n\nДлинная спека, которую нельзя показывать целиком'),
     line.message(T0 + 5_000, 'Сначала проверю рабочую копию'),
     line.command(T0 + 60_000, 'git status --short'),

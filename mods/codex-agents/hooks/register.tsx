@@ -3,20 +3,27 @@ import type { EngineInterface, FsEntry, Register } from 'claude-code'
 
 import type { Run, View } from '../types'
 import {
+  BLOCK,
   STATUS_COLOR,
+  TAIL_LINES,
+  TAIL_SCRIPT,
   blockOf,
   buildView,
+  codexProc,
+  contextOf,
   emptyText,
   freshness,
   headFacts,
   headline,
   isLive,
+  lsofThreads,
   merge,
   parseTail,
   parseTzOffset,
   promptOf,
   splitGrep,
   splitHeaders,
+  stemOf,
   summary,
   taskFile,
   threadInHead,
@@ -37,18 +44,23 @@ const IDLE_MS = 30_000
 const DAYS_BACK = 7
 /** An unfinished run silent this long (or 3× staleMinutes, whichever is more) is shown as failed. */
 const LOST_MS = 60 * 60_000
-/** Bytes of a file's end read the first time, and on each change of a live one. */
-const TAIL_NEW = 48 * 1024
-const TAIL_LIVE = 192 * 1024
-/** One `tail` call reads at most this much, under the 4 MiB stdout cap. */
+/** MiB blocks of a file's end read the first time; a changed file is read again from a block before its old end. */
+const TAIL_NEW_BLOCKS = 8
+/** One call's output stays under the 4 MiB stdout cap: a file's filtered tail is TAIL_LINES lines, ~16 KB each at most. */
 const BATCH_BYTES = 3 * 1024 * 1024
+const TAIL_OUT = TAIL_LINES * 16 * 1024
+/** How long a new `codex exec` process is asked again for the rollout it opens (it creates the file in its first second). */
+const PROC_RETRY_MS = 30_000
+/** Labels kept across reloads. */
+const LABELS_MAX = 64
 /** A Bash call that starts a Codex run: the CLI, the codex plugin's runtime, the owner's wrapper scripts. */
 const LAUNCH = /(?:^|[\s/;&|(])codex\s+exec\b|codex-companion|\brun-codex\.sh\b|\breview-codex\.sh\b/
 
 const EMPTY: View = { at: 0, runs: [] }
 // Change the tag when View's fields change: it declines what an earlier version stored.
-const viewAtom = atom({ plugin: 'codex-agents', key: 'view' } as const, EMPTY, { shape: 'view-2' })
+const viewAtom = atom({ plugin: 'codex-agents', key: 'view' } as const, EMPTY, { shape: 'view-3' })
 const nowAtom = atom({ plugin: 'codex-agents', key: 'now' } as const, 0)
+const labelsAtom = atom({ plugin: 'codex-agents', key: 'labels' } as const, {} as Record<string, string>, { shape: 'labels-1' })
 
 type Cfg = { sessionsDir: string; taskDirs: string[]; windowMs: number; staleMs: number; lostMs: number }
 let cfg: Cfg = { sessionsDir: '', taskDirs: [], windowMs: 12 * 3_600_000, staleMs: 10 * 60_000, lostMs: LOST_MS }
@@ -57,6 +69,8 @@ let cfg: Cfg = { sessionsDir: '', taskDirs: [], windowMs: 12 * 3_600_000, staleM
 const recs = new Map<string, Rec>()
 const tasks = new Map<string, { mtimeMs: number; size: number; thread: string | null }>()
 let dayDirs: { at: number; root: string; dirs: string[] } | null = null
+/** Live `codex exec` processes: their `-o` stem and the thread lsof found open, once found. */
+const procs = new Map<number, { stem: string | null; thread: string | null; seenAt: number }>()
 let home: string | null = null
 let tzMin = 0
 let isInteractive = false
@@ -152,6 +166,49 @@ async function taskMap($: Engine, now: number): Promise<Map<string, string>> {
   return map
 }
 
+/**
+ * Labels the live `codex exec` runs by their `-o` file (`p2_scan1`): `ps` names the processes and their arguments,
+ * `lsof` (once per new process) the rollout each has open. Three runs of one brief shared its heading, so the
+ * heading alone could not tell them apart.
+ */
+async function procLabels($: Engine, now: number): Promise<void> {
+  const ps = await $.process.run(['ps', '-axww', '-o', 'pid=,args='], { timeoutMs: 5_000 }).catch(() => null)
+  if (ps === null) return
+  const alive = new Set<number>()
+  const ask: number[] = []
+  for (const line of ps.stdout.split('\n')) {
+    const p = codexProc(line)
+    if (p === null) continue
+    alive.add(p.pid)
+    const known = procs.get(p.pid)
+    const entry = known ?? { stem: stemOf(p.args), thread: null, seenAt: now }
+    if (known === undefined) procs.set(p.pid, entry)
+    if (entry.stem !== null && entry.thread === null && now - entry.seenAt <= PROC_RETRY_MS) ask.push(p.pid)
+  }
+  for (const pid of [...procs.keys()]) if (!alive.has(pid)) procs.delete(pid)
+  if (ask.length === 0) return
+  const lsof = await $.process.run(['lsof', '-p', ask.join(','), '-Fpn'], { timeoutMs: 5_000 }).catch(() => null)
+  if (lsof === null) return
+  const found: [string, string][] = []
+  for (const [pid, thread] of lsofThreads(lsof.stdout)) {
+    const entry = procs.get(pid)
+    if (entry === undefined || entry.stem === null) continue
+    entry.thread = thread
+    found.push([thread, entry.stem])
+  }
+  if (found.length === 0) return
+  await update($, labelsAtom, cur => {
+    const next = { ...cur }
+    for (const [thread, stem] of found) {
+      delete next[thread]
+      next[thread] = stem
+    }
+    const keys = Object.keys(next)
+    for (const k of keys.slice(0, Math.max(0, keys.length - LABELS_MAX))) delete next[k]
+    return next
+  })
+}
+
 /** Reads what changed under the sessions folder and stores the pane's view. */
 async function scan($: Engine): Promise<View> {
   const now = await $.clock.now()
@@ -190,44 +247,62 @@ async function scan($: Engine): Promise<View> {
 
   const unread = [...recs.values()].filter(r => !r.isHeadRead).map(r => r.path)
   if (unread.length > 0) {
-    const metas = await batched($, ['grep', '-m1', '-o', '-H', '-E', '-e', '^\\{"timestamp":"[^"]*"', '-e', '"cwd":"[^"]*"', '-e', '"originator":"[^"]*"'], unread, 400, splitGrep)
+    const metas = await batched(
+      $,
+      ['grep', '-m1', '-o', '-H', '-E', '-e', '^\\{"timestamp":"[^"]*"', '-e', '"cwd":"[^"]*"', '-e', '"originator":"[^"]*"', '-e', '"agent_role":"[^"]*"', '-e', '"subagent":"[^"]*"'],
+      unread,
+      500,
+      splitGrep,
+    )
+    // The first turn's context names the model and effort (≈10 KB a line, near the head).
+    const contexts = await batched($, ['grep', '-m1', '-H', '-F', '"type":"turn_context"'], unread, 40_000, splitGrep)
     const prompts = await batched($, ['grep', '-m1', '-o', '-H', '-E', '"type":"UserMessage","id":"[^"]*","content":\\[\\{"type":"text","text":"[^"\\\\]{0,200}'], unread, 600, splitGrep)
     for (const path of unread) {
       const rec = recs.get(path)
       if (rec === undefined) continue
       const head = headFacts(metas.get(path) ?? [])
       const prompt = promptOf(prompts.get(path)?.[0])
-      // A file just created may not carry its prompt yet: read the head again while it is young.
-      const isHeadRead = prompt !== undefined || now - rec.mtimeMs > 120_000
-      recs.set(path, { ...rec, ...head, ...(prompt === undefined ? {} : { prompt }), isHeadRead })
+      const context = contextOf(contexts.get(path)?.[0])
+      // A file just created may not carry its prompt or first turn yet: read the head again while it is young.
+      const isHeadRead = (prompt !== undefined && context.model !== undefined) || now - rec.mtimeMs > 120_000
+      recs.set(path, { ...rec, ...head, ...(rec.model === undefined ? context : {}), ...(prompt === undefined ? {} : { prompt }), isHeadRead })
     }
   }
 
   if (changed.length > 0) {
-    const fresh = changed.filter(c => (recs.get(c.path)?.size ?? -1) < 0).map(c => c.path)
-    const live = changed.filter(c => (recs.get(c.path)?.size ?? -1) >= 0).map(c => c.path)
+    // A new file is read from its last TAIL_NEW_BLOCKS MiB; a grown one from the block before its old end.
+    const reads = changed.map(c => {
+      const old = recs.get(c.path)?.size ?? -1
+      const skip = old < 0 ? Math.max(0, Math.floor(c.size / BLOCK) - TAIL_NEW_BLOCKS) : Math.max(0, Math.floor(old / BLOCK) - 1)
+      return { ...c, skip }
+    })
     const tails = new Map<string, string>()
-    for (const [k, v] of await batched($, ['tail', '-c', String(TAIL_NEW)], fresh, TAIL_NEW, splitHeaders)) tails.set(k, v)
-    for (const [k, v] of await batched($, ['tail', '-c', String(TAIL_LIVE)], live, TAIL_LIVE, splitHeaders)) tails.set(k, v)
-    for (const c of changed) {
+    for (let i = 0; i < reads.length; ) {
+      const part = reads.slice(i, i + Math.max(1, Math.floor(BATCH_BYTES / TAIL_OUT)))
+      i += part.length
+      const argv = ['sh', '-c', TAIL_SCRIPT, 'sh', ...part.flatMap(r => [String(r.skip), r.path])]
+      const res = await $.process.run(argv, { timeoutMs: 10_000 }).catch(() => null)
+      if (res === null) continue
+      for (const [k, v] of splitHeaders(res.stdout, part.map(r => r.path), true)) tails.set(k, v)
+    }
+    for (const c of reads) {
       const rec = recs.get(c.path)
       const text = tails.get(c.path)
       if (rec === undefined || text === undefined) continue
-      const isWhole = c.size <= (rec.size < 0 ? TAIL_NEW : TAIL_LIVE)
+      const isWhole = c.skip === 0
       recs.set(c.path, { ...merge(rec, parseTail(text, isWhole), isWhole), size: c.size, mtimeMs: c.mtimeMs })
-    }
-    // A first read whose short tail held only reasoning (big encrypted items) reads the long tail once for the last action.
-    const blind = fresh.filter(p => {
-      const r = recs.get(p)
-      return r !== undefined && r.phase === 'running' && r.action === undefined && r.size > TAIL_NEW
-    })
-    for (const [k, v] of await batched($, ['tail', '-c', String(TAIL_LIVE)], blind, TAIL_LIVE, splitHeaders)) {
-      const rec = recs.get(k)
-      if (rec !== undefined) recs.set(k, merge(rec, parseTail(v, rec.size <= TAIL_LIVE), rec.size <= TAIL_LIVE))
     }
   }
 
-  const view = buildView(recs.values(), await taskMap($, now), now, { windowMs: cfg.windowMs, staleMs: cfg.staleMs, lostMs: cfg.lostMs })
+  // A live run nothing names yet: ask the processes for its `-o` file.
+  const wrapped = await taskMap($, now)
+  const known = await read($, labelsAtom)
+  const unnamed = [...recs.values()].some(r => (r.phase === 'running' || r.phase === 'none') && now - r.mtimeMs < cfg.staleMs && !wrapped.has(r.thread) && known[r.thread] === undefined)
+  if (unnamed) await procLabels($, now)
+  const labels = new Map(Object.entries(await read($, labelsAtom)))
+  for (const [thread, id] of wrapped) labels.set(thread, id)
+
+  const view = buildView(recs.values(), labels, now, { windowMs: cfg.windowMs, staleMs: cfg.staleMs, lostMs: cfg.lostMs })
   await update($, viewAtom, () => view)
   hasLive = view.runs.some(r => r.phase === 'running' || r.phase === 'starting')
   lastScan = now
