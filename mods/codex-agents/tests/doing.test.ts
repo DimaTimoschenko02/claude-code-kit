@@ -56,9 +56,9 @@ describe('names from the process list', () => {
   })
 
   test('the native binary of a codex exec, not its node launcher or another codex command', () => {
-    expect(codexProc(' 68390 /home/fake/.nvm/lib/node_modules/@openai/codex/vendor/bin/codex exec -m x -o /t/a.txt hi')?.pid).toBe(68390)
-    expect(codexProc(' 68378 node /home/fake/.nvm/bin/codex exec -m x -o /t/a.txt hi')).toBeNull()
-    expect(codexProc(' 12 /usr/local/bin/codex app-server')).toBeNull()
+    expect(codexProc(' 68390 68378 /home/fake/.nvm/lib/node_modules/@openai/codex/vendor/bin/codex exec -m x -o /t/a.txt hi')).toEqual({ pid: 68390, ppid: 68378, args: '/home/fake/.nvm/lib/node_modules/@openai/codex/vendor/bin/codex exec -m x -o /t/a.txt hi' })
+    expect(codexProc(' 68378 900 node /home/fake/.nvm/bin/codex exec -m x -o /t/a.txt hi')).toBeNull()
+    expect(codexProc(' 12 1 /usr/local/bin/codex app-server')).toBeNull()
     expect(codexProc('continuation of a prompt line')).toBeNull()
   })
 

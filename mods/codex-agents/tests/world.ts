@@ -10,6 +10,12 @@ export const DAY = `${HOME}/.codex/sessions/2026/10/24`
 export const WRAP = `${HOME}/wrap`
 export const T0 = Date.UTC(2026, 9, 24, 11, 56, 36)
 export const THREAD = '01a16dc5-1c6a-7772-a7a2-b541ef2c0fb1'
+/** This Claude session, another one, and this Claude process's pid (the parent of its Bash shells). */
+export const SID = '72aa0000-0000-4000-8000-00000000c1a0'
+export const OTHER = '9bbb0000-0000-4000-8000-00000000c1a0'
+export const CLAUDE_PID = 4242
+/** The codex plugin's job records for one workspace. */
+export const COMPANION = `${HOME}/.claude/plugins/data/codex-openai-codex/state/shop-0a1b/state.json`
 
 export const PANE = {
   plugin: 'codex-agents',
@@ -53,10 +59,11 @@ export const line = {
     JSON.stringify({ timestamp: iso(at), type: 'event_msg', payload: { type: 'task_complete', turn_id: 't1', last_agent_message: last, ...(error === undefined ? {} : { error: { message: 'You hit your usage limit. Visit https://example.com', codex_error_info: error } }) } }),
 }
 
-/** A live process `ps` lists; `rollout` is the file `lsof` shows it holding open. */
-export type Proc = { pid: number; args: string; rollout?: string }
+/** A live process `ps` lists, under `ppid` (1 when not given); `rollout` is the file `lsof` shows it holding open. */
+export type Proc = { pid: number; ppid?: number; args: string; rollout?: string }
 
-export type World = { files: Map<string, string>; mtimes: Map<string, number>; opened: string[]; placed: boolean; clock: MockClock; runs: string[][]; procs: Proc[] }
+/** `shown: false` plays a pane the owner has behind another tab. */
+export type World = { files: Map<string, string>; mtimes: Map<string, number>; opened: string[]; placed: boolean; shown: boolean; clock: MockClock; runs: string[][]; procs: Proc[] }
 
 function grep(argv: readonly string[], files: Map<string, string>): string {
   const patterns: string[] = []
@@ -99,7 +106,10 @@ function tailScript(args: readonly string[], files: Map<string, string>): string
   for (let i = 0; i + 1 < args.length; i += 2) {
     const path = args[i + 1]!
     out.push(`==> ${path} <==`)
-    const text = (files.get(path) ?? '').slice(Number(args[i]) * BLOCK)
+    const skip = Number(args[i])
+    const from = (files.get(path) ?? '').slice(skip * BLOCK)
+    // From a later block the first line is partial: the script drops it before anything else.
+    const text = skip > 0 ? from.slice(from.indexOf('\n') + 1) : from
     const markers = new RegExp(`"type":"(${MARKER_KINDS.join('|')})"`)
     const lines = text.split('\n').filter(l => kinds.test(l))
     const lastOf = (re: RegExp) => lines.filter(l => re.test(l)).slice(-1)
@@ -120,12 +130,13 @@ function lsof(argv: readonly string[], procs: Proc[]): string {
 
 /** The engine beneath the mod over a fake disk; `placed: false` plays a session with no surface (`claude -p`). */
 export function world(on: On, now = T0 + 23 * 60_000): World {
-  const w: World = { files: new Map(), mtimes: new Map(), opened: [], placed: true, clock: mock.clock(on, { now }), runs: [], procs: [] }
+  const w: World = { files: new Map(), mtimes: new Map(), opened: [], placed: true, shown: true, clock: mock.clock(on, { now }), runs: [], procs: [] }
   mock.env(on, { HOME })
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
+  on('session.id', () => ({ value: SID }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('tool.call', () => ({ result: 'ok' }) as never)
-  on('ui.panes', () => ({ value: w.opened.map(id => ({ id, title: 'Codex', isShown: true, isFocused: false, isPlaced: w.placed })) }))
+  on('ui.panes', () => ({ value: w.opened.map(id => ({ id, title: 'Codex', isShown: w.shown, isFocused: false, isPlaced: w.placed })) }))
   on('ui.open', (_$, e) => {
     if (!w.opened.includes(e.id)) w.opened.push(e.id)
     return { value: w.placed ? { isPlaced: true } : { isPlaced: false, reason: 'no-surface' } } as never
@@ -163,8 +174,10 @@ export function world(on: On, now = T0 + 23 * 60_000): World {
             ? headTail(e.argv, w.files)
             : isTail
               ? tailScript(e.argv.slice(4), w.files)
+              : tool === 'sh' && e.argv[2] === 'echo $PPID'
+                ? `${CLAUDE_PID}\n`
               : tool === 'ps'
-                ? w.procs.map(p => `${String(p.pid).padStart(6)} ${p.args}`).join('\n')
+                ? w.procs.map(p => `${String(p.pid).padStart(6)} ${String(p.ppid ?? 1).padStart(6)} ${p.args}`).join('\n')
                 : tool === 'lsof'
                   ? lsof(e.argv, w.procs)
                   : ''
@@ -187,9 +200,24 @@ export function append(w: World, path: string, lines: string[], at = w.clock.now
 
 export const rollout = (thread: string) => `${DAY}/rollout-2026-10-24T13-56-36-${thread}.jsonl`
 
+/** The codex plugin records a job of `session` on `thread` (its state.json lists every job). */
+export function companionJob(w: World, thread: string, session = SID): void {
+  const prev = w.files.get(COMPANION)
+  const jobs = prev === undefined ? [] : (JSON.parse(prev) as { jobs: object[] }).jobs
+  jobs.push({ id: `task-${jobs.length}`, kind: 'task', sessionId: session, status: 'running', threadId: thread })
+  w.files.set(COMPANION, JSON.stringify({ version: 1, config: {}, jobs }))
+  w.mtimes.set(COMPANION, w.clock.now() + jobs.length)
+}
+
+/** A wrapper's owner file: the Claude session that launched task `id`. */
+export function ownerFile(w: World, id: string, session = SID): void {
+  put(w, `${WRAP}/codex-${id}.owner`, [session])
+}
+
 /** The owner's running task 02a, launched through the wrapper: it names the thread on its event log's first line. */
-export function running02a(w: World): string {
+export function running02a(w: World, session = SID): string {
   const path = rollout(THREAD)
+  ownerFile(w, '02a', session)
   put(w, `${WRAP}/codex-02a.jsonl`, [`{"type":"thread.started","thread_id":"${THREAD}"}`, '{"type":"turn.started"}'])
   put(w, path, [
     line.meta(THREAD, T0, '/home/fake/proj/shop'),

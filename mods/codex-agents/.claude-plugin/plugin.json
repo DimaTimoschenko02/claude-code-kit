@@ -1,17 +1,17 @@
 {
   "name": "codex-agents",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": {
     "name": "Dima Timoschenko"
   },
-  "description": "A side pane «Codex»: the OpenAI Codex runs working now and the last ones that finished, each in its own block — status word (RUNNING, SILENT, DONE, FAILED and why), label (wrapper id, codex exec -o name, role or prompt), model and effort, the brief's heading as task, the agent's last remark, the current step as a short phrase instead of code, a finished run's result in one line; the plan's limits on top; read from Codex's own session files, no model calls",
+  "description": "A side pane «Codex»: the OpenAI Codex runs working now and the last ones that finished, each in its own block — status word (RUNNING, SILENT, DONE, FAILED and why), label (wrapper id, codex exec -o name, role or prompt), model and effort, the brief's heading as task, the agent's last remark, the current step as a short phrase instead of code, a finished run's result in one line; only the runs this Claude session launched (the rest counted in one line), a resumed run judged by its latest turn; the plan's limits on top; read from Codex's own session files, no model calls",
   "types": "./types/index.d.ts",
   "userConfig": {
     "taskDirs": {
       "type": "string",
       "multiple": true,
       "title": "Wrapper folders",
-      "description": "Absolute (or ~/) folders where wrapper scripts keep codex-<id>.session, codex-<id>.jsonl or codex-<id>-review.jsonl: a run whose thread id one of them names is labelled by <id> instead of its prompt's first line.",
+      "description": "Absolute (or ~/) folders where wrapper scripts keep codex-<id>.session, codex-<id>.jsonl or codex-<id>-review.jsonl: a run whose thread id one of them names is labelled by <id> instead of its prompt's first line; codex-<id>.owner (codex-<id>-review.owner) holds the Claude session id that launched it, so only that session's pane lists it.",
       "default": []
     },
     "windowHours": {

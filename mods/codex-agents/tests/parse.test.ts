@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { blockOf, buildView, clean, cmdOfJs, fmtDur, fmtTokens, mask, merge, oneLine, parseTail, promptOf, splitHeaders, taskFile } from '../hooks/parse'
+import { blockOf, buildView, clean, cmdOfJs, companionOwners, fmtDur, fmtTokens, hiddenText, isUnder, mask, merge, oneLine, ownerOf, parseTail, promptOf, splitHeaders, summary, taskFile } from '../hooks/parse'
 import type { Rec } from '../hooks/parse'
 import { T0, line } from './world'
 
@@ -29,42 +29,42 @@ describe('parse', () => {
   })
 
   test('the newest turn boundary decides the phase; a big tail with none is mid-turn', () => {
-    const run = merge(REC, parseTail([line.started(T0), line.command(T0 + 1, 'ls')].join('\n'), true), true)
+    const run = merge(REC, parseTail([line.started(T0), line.command(T0 + 1, 'ls')].join('\n')), true)
     expect(run.phase).toBe('running')
     expect(run.action).toBe('listing files')
-    const done = merge(run, parseTail(['partial', line.complete(T0 + 9_000, 'Готово.\nдетали')].join('\n'), false), false)
+    const done = merge(run, parseTail(['partial', line.complete(T0 + 9_000, 'Готово.\nдетали')].join('\n')), false)
     expect(done.phase).toBe('done')
     expect(done.endAt).toBe(T0 + 9_000)
     expect(done.result).toBe('Готово.')
     expect(done.action).toBe('listing files')
-    const again = merge(done, parseTail(['x', line.started(T0 + 60_000)].join('\n'), false), false)
+    const again = merge(done, parseTail(['x', line.started(T0 + 60_000)].join('\n')), false)
     expect(again.phase).toBe('running')
     expect(again.endAt).toBeUndefined()
     expect(again.result).toBeUndefined()
-    expect(merge(REC, parseTail(['cut-line', line.message(T0, 'hi')].join('\n'), false), false).phase).toBe('running')
-    expect(merge(REC, parseTail(line.message(T0, 'hi'), true), true).phase).toBe('none')
+    expect(merge(REC, parseTail(['cut-line', line.message(T0, 'hi')].join('\n')), false).phase).toBe('running')
+    expect(merge(REC, parseTail(line.message(T0, 'hi')), true).phase).toBe('none')
   })
 
   test('a failed turn shows why; the usage-limit error in words, never its link', () => {
-    const r = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, null, 'usage_limit_exceeded')].join('\n'), true), true)
+    const r = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, null, 'usage_limit_exceeded')].join('\n')), true)
     expect(r.phase).toBe('failed')
     expect(r.error).toBe('usage limit reached')
     expect(JSON.stringify(r)).not.toContain('example.com')
   })
 
   test('a result whose first line is a bare heading carries the next line', () => {
-    const r = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, '1. Findings\n\n- `ui.tsx` drops the empty state')].join('\n'), true), true)
+    const r = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, '1. Findings\n\n- `ui.tsx` drops the empty state')].join('\n')), true)
     expect(r.result).toBe('1. Findings — `ui.tsx` drops the empty state')
-    const plain = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, 'Changed only the two specified files.\nmore')].join('\n'), true), true)
+    const plain = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, 'Changed only the two specified files.\nmore')].join('\n')), true)
     expect(plain.result).toBe('Changed only the two specified files.')
-    const short = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, 'Готово.\nдетали')].join('\n'), true), true)
+    const short = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, 'Готово.\nдетали')].join('\n')), true)
     expect(short.result).toBe('Готово.')
-    const head = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, '## Summary\n**All** green')].join('\n'), true), true)
+    const head = merge(REC, parseTail([line.started(T0), line.complete(T0 + 1, '## Summary\n**All** green')].join('\n')), true)
     expect(head.result).toBe('Summary — All green')
   })
 
   test('token_count gives the total and the plan windows', () => {
-    const r = merge(REC, parseTail(line.tokens(T0, 4_179_930, 12.5), true), true)
+    const r = merge(REC, parseTail(line.tokens(T0, 4_179_930, 12.5)), true)
     expect(r.tokens).toBe(4_179_930)
     expect(r.usage).toEqual({ plan: 'prolite', windows: [{ minutes: 10080, pct: 12.5, resetsAt: Date.UTC(2026, 9, 31, 12, 43) }], at: T0 })
   })
@@ -137,5 +137,96 @@ describe('parse', () => {
     expect(ok).toEqual({ status: '✓ DONE', title: 'ok', time: 'took 1m', lines: [{ label: 'result', text: 'All green' }], meta: 'repo wt-121 · 1.8M tokens · started 13:56 · finished 13:57' })
     expect(bad?.status).toBe('✖ FAILED (usage limit reached)')
     expect(bad?.lines).toEqual([{ label: 'last', text: '$ ls' }])
+  })
+
+  describe('a resumed thread: Codex appends the new turn to the old file', () => {
+    const M = 60_000
+    // Turn 1 ran 0–40 min; a review started at 49 min and finished; the resume (turn 2) started at 54 min.
+    const turn1 = [line.started(T0), line.message(T0 + 5 * M, 'Первый круг: читаю спеку'), line.command(T0 + 30 * M, 'npm run check'), line.complete(T0 + 40 * M, 'П1–П5 готовы.')]
+    const turn2 = [line.started(T0 + 54 * M), line.command(T0 + 55 * M, 'git diff --stat')]
+    const review = run('review', 49, 'done', { endAt: T0 + 52 * M })
+
+    test('turn 1 complete + turn 2 in progress: RUNNING, timed from turn 2, on top, no remark of turn 1', () => {
+      const rec = merge({ ...REC, thread: 'resumed', prompt: 'resumed', startMs: T0, mtimeMs: NOW }, parseTail([...turn1, ...turn2].join('\n')), true)
+      expect(rec.phase).toBe('running')
+      expect(rec.turnStart).toBe(T0 + 54 * M)
+      expect(rec.note).toBeUndefined()
+      expect(rec.action).toBe('git diff')
+      const view = buildView([review, rec], new Map(), NOW, OPTS)
+      expect(view.runs.map(r => [r.label, r.phase])).toEqual([
+        ['resumed', 'running'],
+        ['review', 'done'],
+      ])
+      expect(view.runs[0]?.startAt).toBe(T0 + 54 * M)
+      expect(view.runs[0]?.elapsedMs).toBe(6 * M)
+    })
+
+    test('the same seen in two reads: turn 1 done first, then the resume', () => {
+      const first = merge({ ...REC, thread: 'resumed', startMs: T0 }, parseTail(turn1.join('\n')), true)
+      expect(first.phase).toBe('done')
+      const second = merge(first, parseTail(turn2.join('\n')), false)
+      expect(second.phase).toBe('running')
+      expect(second.endAt).toBeUndefined()
+      expect(second.result).toBeUndefined()
+      expect(second.note).toBeUndefined()
+    })
+
+    test('turn 2 complete: DONE with turn 2 result and end; it counts as started at turn 2 for the two-rounds rule', () => {
+      const end = [...turn1, ...turn2, line.complete(T0 + 58 * M, 'Все три замечания обработаны.')]
+      const rec = merge({ ...REC, thread: 'resumed', prompt: 'resumed', startMs: T0, mtimeMs: T0 + 58 * M }, parseTail(end.join('\n')), true)
+      expect(rec.phase).toBe('done')
+      expect(rec.endAt).toBe(T0 + 58 * M)
+      expect(rec.result).toBe('Все три замечания обработаны.')
+      // Two runs started after turn 1: by its first start it would be gone; by its newest it stays, first — and the
+      // resume is a newer start for `a`, which leaves.
+      const view = buildView([run('a', 45, 'done'), review, rec], new Map(), NOW, OPTS)
+      expect(view.runs.map(r => r.label)).toEqual(['resumed', 'review'])
+      expect(view.runs[0]?.endAt).toBe(T0 + 58 * M)
+      expect(view.runs[0]?.elapsedMs).toBe(4 * M)
+    })
+  })
+
+  test('who launched a run: owner files, the codex plugin records, the process tree', () => {
+    expect(taskFile('codex-04.owner')).toEqual({ id: '04', kind: 'owner' })
+    expect(taskFile('codex-04-review.owner')).toEqual({ id: '04 review', kind: 'owner' })
+    expect(ownerOf('72aa0000-0000-4000-8000-00000000c1a0\n')).toBe('72aa0000-0000-4000-8000-00000000c1a0')
+    expect(ownerOf('')).toBeNull()
+    expect(ownerOf('a b; rm -rf ~')).toBeNull()
+    const state = JSON.stringify({
+      version: 1,
+      jobs: [
+        { id: 'task-1', sessionId: '78715727-294b-44fb-9a68-62a436175710', threadId: '01a16b0a-7783-7061-9aa1-139d68f33b93' },
+        { id: 'task-2', sessionId: '78715727-294b-44fb-9a68-62a436175710' },
+        { id: 'task-3', sessionId: 'x y', threadId: '01a16b0a-7783-7061-9aa1-139d68f33b94' },
+      ],
+    })
+    expect(companionOwners(state)).toEqual([['01a16b0a-7783-7061-9aa1-139d68f33b93', '78715727-294b-44fb-9a68-62a436175710']])
+    expect(companionOwners('{not json')).toEqual([])
+    const parents = new Map([
+      [30, 20],
+      [20, 10],
+      [10, 1],
+      [40, 1],
+    ])
+    expect(isUnder(30, 10, parents)).toBe(true)
+    expect(isUnder(40, 10, parents)).toBe(false)
+    expect(isUnder(99, 10, parents)).toBe(false)
+    const loop = new Map([
+      [5, 6],
+      [6, 5],
+    ])
+    expect(isUnder(5, 10, loop)).toBe(false)
+  })
+
+  test("only this session's runs are listed; the rest are counted, the two-rounds rule among its own", () => {
+    const mine = new Set(['r', 'f3'])
+    const recs = [run('f1', 0, 'done'), run('f3', 20, 'done'), run('x', 30, 'running'), run('y', 40, 'done'), run('r', 10, 'running')]
+    const view = buildView(recs, new Map(), NOW, { ...OPTS, isMine: t => mine.has(t) })
+    expect(view.runs.map(r => r.label)).toEqual(['r', 'f3'])
+    expect(view.hidden).toEqual({ runs: 3, live: 1 })
+    expect(hiddenText(view)).toBe('Hidden: 3 runs not launched from this session (1 running).')
+    expect(summary(view, 60, OPTS.windowMs).split('\n').pop()).toBe('Hidden: 3 runs not launched from this session (1 running).')
+    expect(hiddenText(buildView([run('y', 40, 'done')], new Map(), NOW, { ...OPTS, isMine: () => false }))).toBe('Hidden: 1 run not launched from this session.')
+    expect(buildView(recs, new Map(), NOW, OPTS).hidden).toBeUndefined()
   })
 })

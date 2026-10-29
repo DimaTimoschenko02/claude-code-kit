@@ -51,6 +51,8 @@ export type View = {
   usage?: Usage
   /** Why the scan could not read the sessions folder. */
   error?: string
+  /** Runs in the window not launched from this session (another session's, or none's), left out of `runs`. */
+  hidden?: { runs: number; live: number }
 }
 
 declare module 'claude-code' {
@@ -61,6 +63,8 @@ declare module 'claude-code' {
       now: number
       /** Thread id → the `-o` file stem of the `codex exec` that ran it, learned while the process lived. */
       labels: Shaped<Record<string, string>>
+      /** Thread id → when this session first knew the run as its own (a launch it saw, a wrapper's or the codex plugin's record). */
+      owned: Shaped<Record<string, number>>
     }
   }
 }

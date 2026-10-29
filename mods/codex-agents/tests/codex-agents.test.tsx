@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 
-import { DAY, HOME, PANE, T0, THREAD, WRAP, append, cx, line, put, rollout, running02a, start, world } from './world'
+import { CLAUDE_PID, DAY, HOME, OTHER, PANE, T0, THREAD, WRAP, append, companionJob, cx, line, ownerFile, put, rollout, running02a, start, world } from './world'
 import type { World } from './world'
 
 const OPTIONS = { options: { taskDirs: ['~/wrap'] } }
@@ -23,6 +23,7 @@ const headers = (texts: string[]) => texts.filter(t => HEADERS.test(t) && t.incl
 
 /** A run that started at `at` and finished a minute later (or failed with `error`). */
 function finished(w: World, thread: string, at: number, prompt: string, error?: string): void {
+  companionJob(w, thread)
   put(w, rollout(thread), [line.meta(thread, at, '/home/fake/proj/shop'), line.started(at), line.prompt(at, prompt), line.complete(at + 60_000, error === undefined ? 'Done.' : null, error)], at + 60_000)
 }
 
@@ -113,6 +114,8 @@ describe('the running run', () => {
     const resumed = '01a16dd0-0000-7000-8000-000000000002'
     put(w, `${WRAP}/codex-02a-review.jsonl`, [`{"type":"thread.started","thread_id":"${review}"}`])
     put(w, `${WRAP}/codex-01.session`, [resumed])
+    ownerFile(w, '02a-review')
+    ownerFile(w, '01')
     for (const t of [review, resumed]) put(w, rollout(t), [line.meta(t, T0, '/home/fake/proj/shop'), line.started(T0), line.prompt(T0, '# Review brief\n')])
     await start($)
     await cx($)
@@ -144,6 +147,8 @@ describe("the owner's codex exec batch: three runs of one brief", () => {
   const brief = { shots: '# Pass 2a: where the gun points while the kart is airborne (original SmashKarts)', scan: '# Pass 2b: a complete list of vertical events, small bumps, wall hits and turns (original SmashKarts)' }
 
   function batch(w: World): void {
+    // The Bash tool's shell under this Claude process ran the three.
+    w.procs.push({ pid: 900, ppid: CLAUDE_PID, args: '/bin/zsh -c codex exec … & codex exec … & wait' })
     for (const [n, thread] of Object.entries(threads)) {
       const path = rollout(thread)
       const heading = n === 'shots' ? brief.shots : brief.scan
@@ -158,8 +163,9 @@ describe("the owner's codex exec batch: three runs of one brief", () => {
         line.tokens(T0 + 22 * 60_000 + 31_000, 3_100_000),
       ])
       // The node launcher and the native binary carry the same arguments; only the binary holds the rollout open.
-      w.procs.push({ pid: 1000 + w.procs.length, args: `node ${exec(n, heading)}` })
-      w.procs.push({ pid: 1000 + w.procs.length, args: exec(n, heading), rollout: path })
+      const launcher = 1000 + w.procs.length
+      w.procs.push({ pid: launcher, ppid: 900, args: `node ${exec(n, heading)}` })
+      w.procs.push({ pid: launcher + 1, ppid: launcher, args: exec(n, heading), rollout: path })
     }
   }
 
@@ -178,7 +184,7 @@ describe("the owner's codex exec batch: three runs of one brief", () => {
     // lsof is asked for the native binaries alone, once.
     const lsofs = w.runs.filter(r => r[0] === 'lsof')
     expect(lsofs.length).toBe(1)
-    expect(lsofs[0]?.[2]?.split(',').map(Number).sort()).toEqual([1001, 1003, 1005])
+    expect(lsofs[0]?.[2]?.split(',').map(Number).sort()).toEqual([1002, 1004, 1006])
   })
 
   test('the names outlive the processes and a reload of the mod', OPTIONS, async ($, on) => {
@@ -198,16 +204,18 @@ describe("the owner's codex exec batch: three runs of one brief", () => {
     expect(has(texts, /^task: Pass 2a: where the gun points while the kart is airborne \(original SmashKarts\)$/)).toBe(true)
   })
 
-  test('a run with no -o file and no wrapper is named by its brief heading, and no lsof is asked', OPTIONS, async ($, on) => {
+  test('a run with no -o file and no wrapper is named by its brief heading, its process asked once', OPTIONS, async ($, on) => {
     const w = world(on)
     put(w, `${DAY}/rollout-2026-10-24T13-56-36-${threads.shots}.jsonl`, [line.meta(threads.shots, T0, '/home/fake/proj/karts'), line.started(T0), line.context(T0, 'gpt-6.1-sol', 'medium'), line.prompt(T0, `${brief.shots}\n`)])
-    w.procs.push({ pid: 7, args: `/home/fake/bin/codex exec -m gpt-6.1-sol "${brief.shots}"`, rollout: rollout(threads.shots) })
+    w.procs.push({ pid: 7, ppid: CLAUDE_PID, args: `/home/fake/bin/codex exec -m gpt-6.1-sol "${brief.shots}"`, rollout: rollout(threads.shots) })
     await start($)
     await cx($)
     const texts = await screen($)
     expect(has(texts, /^● RUNNING · Pass 2a: where the gun points while the kart is airborne… · gpt-6\.1-sol medium · for 23m$/)).toBe(true)
     expect(has(texts, /^task: /)).toBe(false)
-    expect(w.runs.some(r => r[0] === 'lsof')).toBe(false)
+    await w.clock.advance(9_000)
+    expect(w.runs.filter(r => r[0] === 'lsof').length).toBe(1)
+    expect(w.runs.filter(r => r[0] === 'ps').length).toBe(1)
   })
 })
 
@@ -224,11 +232,13 @@ describe('finished runs: the last ones only', () => {
       line.complete(T0 + 125_000, 'db: нужен ревьюер БД\n\n1. детали'),
     ], T0 + 125_000)
     put(w, rollout(failed), [line.meta(failed, T0, '/tmp'), line.started(T0), line.prompt(T0, 'Reply with OK'), line.complete(T0 + 2_000, null, 'usage_limit_exceeded')], T0 + 2_000)
+    companionJob(w, done)
+    companionJob(w, failed)
     await start($)
     await cx($)
     const texts = await screen($)
     expect(texts[0]).toBe('Codex · nothing running · 2 finished')
-    expect(has(texts, /^No Codex run is working right now\.$/)).toBe(true)
+    expect(has(texts, /^No Codex run from this session is working right now\.$/)).toBe(true)
     expect(has(texts, /^Updated 14:19:36 \(just now\) · idle, refreshes every 30s$/)).toBe(true)
     expect(has(texts, /^✓ DONE · You are the reviewer\. · took 2m$/)).toBe(true)
     expect(has(texts, /^task: /)).toBe(false)
@@ -255,6 +265,7 @@ describe('finished runs: the last ones only', () => {
     const next = '01a16dd0-0000-7000-8000-0000000000e4'
     await w.clock.advance(3_000)
     put(w, rollout(next), [line.meta(next, w.clock.now(), '/home/fake/proj/shop'), line.started(w.clock.now()), line.prompt(w.clock.now(), 'fourth')])
+    companionJob(w, next)
     await w.clock.advance(3_000)
     texts = await screen($)
     expect(headers(texts).map(t => t.split(' · ')[1])).toEqual(['fourth', '02a'])
@@ -270,7 +281,7 @@ describe('finished runs: the last ones only', () => {
     const texts = await screen($)
     expect(texts[0]).toBe('Codex · nothing running')
     expect(texts[2]).toBe('Limits as of Sat 24.10 13:56 · prolite · week 41% used, resets Sat 31.10 14:43')
-    expect(has(texts, /^No Codex run is working, and none ran in the last 12h\.$/)).toBe(true)
+    expect(has(texts, /^No Codex run from this session is working, and none ran in the last 12h\.$/)).toBe(true)
     expect(has(texts, HEADERS)).toBe(false)
   })
 

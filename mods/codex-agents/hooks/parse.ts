@@ -43,6 +43,8 @@ export type Rec = {
 /** What one read of a file's tail says; absent fields were not in it. */
 export type TailFacts = {
   marker?: { kind: 'start'; at: number } | { kind: 'complete'; at: number; error?: string; last?: string } | { kind: 'aborted'; at: number; reason?: string }
+  /** The newest turn start, even when that turn's end came after it in the same read. */
+  started?: number
   tokens?: number
   usage?: Usage
   action?: { text: string; at: number }
@@ -102,8 +104,10 @@ export const MARKER_KINDS = ['task_started', 'task_complete', 'turn_aborted'] as
  * last agent remark wherever they lie, then the newest TAIL_LINES, command outputs blanked. A plain `tail -c` of a run
  * that views images held only one base64 output, and the pane said «thinking» on a run 24 minutes in; `dd` seeks
  * where BSD `tail -c` took 0.3 s per 8 MB. The kept lines come first, so a newer one among the last lines still wins.
+ * A read from a later block starts mid-line: the script drops that first line before the filter, because after the
+ * reordering the first printed line is a kept marker, and dropping it there lost a lone turn boundary.
  */
-export const TAIL_SCRIPT = String.raw`export LC_ALL=C; while [ $# -gt 1 ]; do k=$1; f=$2; shift 2; printf '==> %s <==\n' "$f"; dd if="$f" bs=${BLOCK} skip="$k" 2>/dev/null | grep -a -E '"type":"(${TAIL_KINDS.join('|')})"' | awk '/"type":"(${MARKER_KINDS.join('|')})"/ { m1 = m2; m2 = $0 } /"type":"token_count"/ { t = $0 } /"type":"(AgentMessage|agent_message)"/ { a = $0 } { r[NR % ${TAIL_LINES}] = $0 } END { if (m1 != "") print m1; if (m2 != "") print m2; if (t != "") print t; if (a != "") print a; for (i = (NR > ${TAIL_LINES} ? NR - ${TAIL_LINES} + 1 : 1); i <= NR; i++) print r[i % ${TAIL_LINES}] }' | sed -E 's/"aggregated_output":"([^"\\]|\\.)*"/"aggregated_output":""/g'; done`
+export const TAIL_SCRIPT = String.raw`export LC_ALL=C; while [ $# -gt 1 ]; do k=$1; f=$2; shift 2; printf '==> %s <==\n' "$f"; dd if="$f" bs=${BLOCK} skip="$k" 2>/dev/null | if [ "$k" -gt 0 ]; then sed 1d; else cat; fi | grep -a -E '"type":"(${TAIL_KINDS.join('|')})"' | awk '/"type":"(${MARKER_KINDS.join('|')})"/ { m1 = m2; m2 = $0 } /"type":"token_count"/ { t = $0 } /"type":"(AgentMessage|agent_message)"/ { a = $0 } { r[NR % ${TAIL_LINES}] = $0 } END { if (m1 != "") print m1; if (m2 != "") print m2; if (t != "") print t; if (a != "") print a; for (i = (NR > ${TAIL_LINES} ? NR - ${TAIL_LINES} + 1 : 1); i <= NR; i++) print r[i % ${TAIL_LINES}] }' | sed -E 's/"aggregated_output":"([^"\\]|\\.)*"/"aggregated_output":""/g'; done`
 
 /** A `codex exec` command line's `-o <file>` stem (`…/out/p2_scan1.last.txt` → `p2_scan1`); null without one. */
 export function stemOf(args: string): string | null {
@@ -113,13 +117,58 @@ export function stemOf(args: string): string | null {
   return base === '' ? null : oneLine(base, 40)
 }
 
-/** A `ps -o pid=,args=` line of a Codex CLI run (the native binary, not its node launcher): pid and args. */
-export function codexProc(line: string): { pid: number; args: string } | null {
-  const m = /^\s*(\d+)\s+(.*)$/.exec(line)
-  if (m === null) return null
-  const args = m[2]!
-  if (/^\S*node\s/.test(args) || !/(?:^|[\s/])codex\s+exec\s/.test(args)) return null
-  return { pid: Number(m[1]), args }
+/** A `ps -o pid=,ppid=,args=` line: the process and its parent. */
+export function psLine(line: string): { pid: number; ppid: number; args: string } | null {
+  const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)
+  return m === null ? null : { pid: Number(m[1]), ppid: Number(m[2]), args: m[3]! }
+}
+
+/** A `ps -o pid=,ppid=,args=` line of a Codex CLI run (the native binary, not its node launcher). */
+export function codexProc(line: string): { pid: number; ppid: number; args: string } | null {
+  const p = psLine(line)
+  if (p === null) return null
+  // The node launcher holds no file; a shell whose command line runs codex (the Bash tool's zsh) is not the run either.
+  if (/^(?:\S*\/)?(?:node|(?:ba|z|da|k)?sh)\s/.test(p.args) || !/(?:^|[\s/])codex\s+exec\s/.test(p.args)) return null
+  return p
+}
+
+/** Whether `pid` runs under `root` (its parent, its parent's parent…) in a pid → ppid map from `ps`. */
+export function isUnder(pid: number, root: number, parents: ReadonlyMap<number, number>): boolean {
+  let cur = pid
+  for (let i = 0; i < 64 && cur > 1; i++) {
+    const up = parents.get(cur)
+    if (up === undefined) return false
+    if (up === root) return true
+    cur = up
+  }
+  return false
+}
+
+const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{7,99}$/
+const THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/** The Claude Code session id a wrapper's `codex-<id>.owner` file holds; null for anything else. */
+export function ownerOf(text: string): string | null {
+  const id = text.trim()
+  return SESSION_ID.test(id) ? id : null
+}
+
+/** Thread → Claude Code session from the codex plugin's `state.json` (its jobs carry both). */
+export function companionOwners(text: string): [string, string][] {
+  let jobs: unknown
+  try {
+    jobs = obj(JSON.parse(text))?.jobs
+  } catch {
+    return []
+  }
+  if (!Array.isArray(jobs)) return []
+  const out: [string, string][] = []
+  for (const j of jobs) {
+    const thread = str(obj(j)?.threadId)
+    const session = str(obj(j)?.sessionId)
+    if (thread !== undefined && session !== undefined && THREAD_ID.test(thread) && SESSION_ID.test(session)) out.push([thread, session])
+  }
+  return out
 }
 
 /** `lsof -Fpn` output → pid → the rollout thread it has open. */
@@ -194,8 +243,15 @@ export function threadInHead(text: string): string | null {
   return /"thread_id":"([0-9a-f-]{36})"/.exec(text)?.[1] ?? null
 }
 
-/** A wrapper file's task id: `codex-<id>.session`, `codex-<id>.jsonl`, `codex-<id>.resume-N.jsonl`, `codex-<id>-review.jsonl`. */
-export function taskFile(name: string): { id: string; kind: 'session' | 'events' } | null {
+/**
+ * A wrapper file's task id: `codex-<id>.session`, `codex-<id>.jsonl`, `codex-<id>.resume-N.jsonl`, `codex-<id>-review.jsonl`,
+ * and the session that launched it: `codex-<id>.owner`, `codex-<id>-review.owner`.
+ */
+export function taskFile(name: string): { id: string; kind: 'session' | 'events' | 'owner' } | null {
+  const reviewOwner = /^codex-(.+)-review\.owner$/.exec(name)
+  if (reviewOwner !== null) return { id: `${reviewOwner[1]} review`, kind: 'owner' }
+  const owner = /^codex-(.+)\.owner$/.exec(name)
+  if (owner !== null) return { id: owner[1]!, kind: 'owner' }
   const review = /^codex-(.+)-review\.jsonl$/.exec(name)
   if (review !== null) return { id: `${review[1]} review`, kind: 'events' }
   const resume = /^codex-(.+?)\.resume-\d+\.jsonl$/.exec(name)
@@ -343,11 +399,10 @@ function itemAction(item: Obj): Act | undefined {
   return undefined
 }
 
-/** Reads a tail of a rollout file; `isWhole` when it holds the file from its first byte (no partial first line). */
-export function parseTail(text: string, isWhole: boolean): TailFacts {
+/** Reads the tail script's lines of one rollout file (whole lines only: the script drops a partial first one). */
+export function parseTail(text: string): TailFacts {
   const facts: TailFacts = {}
   const lines = text.split('\n')
-  if (!isWhole) lines.shift()
   const act = (a: Act | undefined, at: number) => {
     if (a === undefined) return
     if (a.kind === 'note') facts.note = { text: a.text, at }
@@ -370,7 +425,10 @@ export function parseTail(text: string, isWhole: boolean): TailFacts {
       if (c.model !== undefined) facts.model = c.model
       if (c.effort !== undefined) facts.effort = c.effort
     } else if (o.type === 'event_msg') {
-      if (kind === 'task_started') facts.marker = { kind: 'start', at: (num(p.started_at) ?? 0) * 1000 || at }
+      if (kind === 'task_started') {
+        facts.marker = { kind: 'start', at: (num(p.started_at) ?? 0) * 1000 || at }
+        facts.started = facts.marker.at
+      }
       else if (kind === 'task_complete') {
         const err = obj(p.error)
         const code = str(err?.codex_error_info) ?? str(err?.message)
@@ -424,10 +482,23 @@ function errorText(code: string, message: string | undefined): string {
 /** A rec after one tail read: the newest marker decides the phase; what the tail lacks stays as it was. */
 export function merge(rec: Rec, facts: TailFacts, isWhole: boolean): Rec {
   const next: Rec = { ...rec }
+  // A new turn (a resumed thread appends it to its old file): the run is timed and ordered from it, and the last
+  // turn's remark and step are not what it does now.
+  if (facts.started !== undefined && facts.started > (rec.turnStart ?? -1)) {
+    next.turnStart = facts.started
+    if ((next.noteAt ?? 0) < facts.started) {
+      delete next.note
+      delete next.noteAt
+    }
+    if ((next.actionAt ?? 0) < facts.started) {
+      delete next.action
+      delete next.actionAt
+    }
+  }
+  const turn = next.turnStart ?? 0
   const m = facts.marker
   if (m?.kind === 'start') {
     next.phase = 'running'
-    next.turnStart = m.at
     delete next.endAt
     delete next.error
     delete next.result
@@ -448,18 +519,18 @@ export function merge(rec: Rec, facts: TailFacts, isWhole: boolean): Rec {
   if (facts.usage !== undefined) next.usage = facts.usage
   if (facts.model !== undefined) next.model = facts.model
   if (facts.effort !== undefined) next.effort = facts.effort
-  if (facts.action !== undefined && facts.action.at >= (rec.actionAt ?? 0)) {
+  if (facts.action !== undefined && facts.action.at >= (next.actionAt ?? 0) && facts.action.at >= turn) {
     next.action = oneLine(facts.action.text, 80)
     next.actionAt = facts.action.at
   }
-  if (facts.note !== undefined && facts.note.at >= (rec.noteAt ?? 0)) {
+  if (facts.note !== undefined && facts.note.at >= (next.noteAt ?? 0) && facts.note.at >= turn) {
     next.note = oneLine(facts.note.text, 120)
     next.noteAt = facts.note.at
   }
   return next
 }
 
-export type ViewOptions = { windowMs: number; staleMs: number; lostMs: number }
+export type ViewOptions = { windowMs: number; staleMs: number; lostMs: number; isMine?: (thread: string) => boolean }
 
 /** A finished run leaves the pane once this many runs have started after it. */
 export const KEEP_ROUNDS = 2
@@ -469,13 +540,22 @@ const TIME_ORDER = (a: Run, b: Run) => b.startAt - a.startAt
 /**
  * The pane's data: every unfinished run, and a finished one only until KEEP_ROUNDS newer runs have started;
  * unfinished first, newest start first; the newest usage. An unfinished run silent past `lostMs` counts as failed.
+ * A run's start, end and order are its newest turn's: a resumed thread is a new run in its old file.
+ * With `isMine`, only this session's runs are listed and the rest only counted (`hidden`); the limits stay the account's.
  */
 export function buildView(recs: Iterable<Rec>, tasks: ReadonlyMap<string, string>, now: number, opts: ViewOptions): View {
   const all: Run[] = []
   let usage: Usage | undefined
+  const hidden = { runs: 0, live: 0 }
   for (const r of recs) {
     if (r.usage !== undefined && (usage === undefined || r.usage.at > usage.at)) usage = r.usage
     if (now - r.mtimeMs > opts.windowMs) continue
+    if (opts.isMine !== undefined && !opts.isMine(r.thread)) {
+      hidden.runs++
+      const silent = now - r.mtimeMs
+      if ((r.phase === 'running' && silent <= opts.lostMs) || (r.phase === 'none' && silent <= 120_000)) hidden.live++
+      continue
+    }
     const silentMs = Math.max(0, now - r.mtimeMs)
     const startAt = r.turnStart ?? r.startMs ?? r.mtimeMs
     let phase: RunPhase
@@ -519,7 +599,14 @@ export function buildView(recs: Iterable<Rec>, tasks: ReadonlyMap<string, string
   }
   const kept = all.filter(r => isLive(r.phase) || all.filter(o => o.startAt > r.startAt).length < KEEP_ROUNDS)
   const runs = [...kept.filter(r => isLive(r.phase)).sort(TIME_ORDER), ...kept.filter(r => !isLive(r.phase)).sort(TIME_ORDER)]
-  return { at: now, runs, ...(usage === undefined ? {} : { usage }) }
+  return { at: now, runs, ...(usage === undefined ? {} : { usage }), ...(hidden.runs === 0 ? {} : { hidden }) }
+}
+
+/** The pane's footer: how many runs of other sessions (or of none) it leaves out. */
+export function hiddenText(view: View): string | undefined {
+  const h = view.hidden
+  if (h === undefined || h.runs === 0) return undefined
+  return `Hidden: ${h.runs} ${h.runs === 1 ? 'run' : 'runs'} not launched from this session${h.live > 0 ? ` (${h.live} running)` : ''}.`
 }
 
 export function isLive(phase: RunPhase): boolean {
@@ -662,7 +749,9 @@ export function freshness(view: View, now: number, tzMin: number, rates?: { live
 /** The line under the header when no run is unfinished. */
 export function emptyText(view: View, windowMs: number): string | undefined {
   if (view.error !== undefined || view.runs.some(r => isLive(r.phase))) return undefined
-  return view.runs.length === 0 ? `No Codex run is working, and none ran in the last ${Math.round(windowMs / 3_600_000)}h.` : 'No Codex run is working right now.'
+  return view.runs.length === 0
+    ? `No Codex run from this session is working, and none ran in the last ${Math.round(windowMs / 3_600_000)}h.`
+    : 'No Codex run from this session is working right now.'
 }
 
 /** Plain text for a surface with no pane (`claude -p`): the same blocks as data lines. */
@@ -675,5 +764,7 @@ export function summary(view: View, tzMin: number, windowMs: number): string {
     const b = blockOf(r, view.at, tzMin)
     out.push(`── ${b.status} · ${b.title} · ${b.time}`, ...b.lines.map(l => `   ${l.label}: ${l.text}`), `   ${b.meta}`)
   }
+  const hidden = hiddenText(view)
+  if (hidden !== undefined) out.push(hidden)
   return out.join('\n')
 }
