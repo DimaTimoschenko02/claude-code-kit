@@ -8,6 +8,12 @@ const TERMS = JSON.stringify({
   'точка основного': 'точка останова',
   'точку основного': 'точку останова',
 })
+
+/**
+ * The fixture's files are keyed by POSIX paths; the engine resolves `/home/x` to `C:\home\x` on Windows before a
+ * hook sees it. One key for both: slashes, no drive.
+ */
+const key = (p: string): string => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 const ME = { kind: 'composer' } as const
 const PRESENTATION = { isFullscreen: true, columns: 120 }
 const HOUR = 60 * 60 * 1000
@@ -26,7 +32,11 @@ type World = {
 }
 
 /** The engine beneath the plugin: clock, env, files, toasts, the prompt queue. */
-function world(on: On, files: Record<string, string> = { [TERMS_PATH]: TERMS }): World {
+function world(
+  on: On,
+  files: Record<string, string> = { [TERMS_PATH]: TERMS },
+  env: Record<string, string> = { HOME },
+): World {
   const w: World = {
     clock: mock.clock(on, { now: 1_700_000_000_000 }),
     files: new Map(Object.entries(files).map(([path, text]) => [path, { text, mtimeMs: 1 }])),
@@ -35,14 +45,14 @@ function world(on: On, files: Record<string, string> = { [TERMS_PATH]: TERMS }):
     toasts: [],
     reads: 0,
   }
-  mock.env(on, { HOME })
+  mock.env(on, env)
   on('fs.stat', ($, e) => {
-    const file = w.files.get(e.path)
+    const file = w.files.get(key(e.path))
     if (file === undefined) return { deny: `ENOENT: ${e.path}` }
     return { value: { kind: 'file', size: file.text.length, mtimeMs: file.mtimeMs, isLink: false } }
   })
   on('fs.read', ($, e) => {
-    const file = w.files.get(e.path)
+    const file = w.files.get(key(e.path))
     if (file === undefined) return { deny: `ENOENT: ${e.path}` }
     w.reads += 1
     return { value: file.text }
@@ -334,6 +344,17 @@ describe('terms', () => {
     const w = world(on, {})
     expect((await say($, 'точка основного')).text).toBe('точка основного')
     expect(w.submitted[0]?.context).toBeUndefined()
+  })
+
+  test('no HOME (the Claude process on Windows): the dictionary is read from USERPROFILE', async ($, on) => {
+    world(on, { [TERMS_PATH]: TERMS }, { USERPROFILE: HOME })
+    expect((await say($, 'точка основного')).text).toBe('точка останова')
+  })
+
+  test('neither HOME nor USERPROFILE: prompts pass untouched, nothing is read', async ($, on) => {
+    const w = world(on, { [TERMS_PATH]: TERMS }, {})
+    expect((await say($, 'точка основного')).text).toBe('точка основного')
+    expect(w.reads).toBe(0)
   })
 })
 

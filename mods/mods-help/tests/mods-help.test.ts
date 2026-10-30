@@ -2,8 +2,12 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { CommandInfo, CommandSpec, On } from 'claude-code'
 
+import { toSlash } from '../hooks/paths'
+
 const KIT = '/home/fake/kit/mods'
-const DIRS = [`${KIT}/dictate`, `${KIT}/stop-point/`, `${KIT}/mods-help`, '/home/fake/not-a-mod'].join(':')
+const DIR_LIST = [`${KIT}/dictate`, `${KIT}/stop-point/`, `${KIT}/mods-help`, '/home/fake/not-a-mod']
+// The engine rewrites `/home/x` to `C:\home\x` on Windows: look files up by the path without drive and backslashes.
+const fixtureKey = (p: string) => toSlash(p).replace(/^[A-Za-z]:/, '')
 const MANIFESTS: Record<string, string> = {
   [`${KIT}/dictate/.claude-plugin/plugin.json`]: JSON.stringify({ name: 'dictate', description: 'Voice batch' }),
   [`${KIT}/stop-point/.claude-plugin/plugin.json`]: JSON.stringify({ name: 'stop-point', description: 'Stop point gate' }),
@@ -16,11 +20,11 @@ const COMMANDS: CommandInfo[] = [
   { name: 'brainstorm', description: 'a marketplace skill', source: 'plugin', plugin: 'superpowers' },
 ]
 
-function world(on: On) {
+function world(on: On, env: Record<string, string> = { CLAUDE_CODE_PLUGIN_DIRS: DIR_LIST.join(':') }) {
   const registered: CommandSpec[] = []
-  mock.env(on, { CLAUDE_CODE_PLUGIN_DIRS: DIRS })
+  mock.env(on, env)
   on('fs.read', ($, e) => {
-    const text = MANIFESTS[e.path]
+    const text = MANIFESTS[fixtureKey(e.path)]
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text }
   })
   on('command.list', () => ({ value: COMMANDS }))
@@ -44,6 +48,17 @@ describe('/mods', () => {
     expect(text).not.toContain('compact')
     expect(text).not.toContain('brainstorm')
     expect(text).not.toContain('/mods')
+    expect(text).not.toContain('not-a-mod')
+  })
+
+  test('on Windows the list is `;`-separated and holds drive letters and backslashes', async ($, on) => {
+    world(on, {
+      OS: 'Windows_NT',
+      CLAUDE_CODE_PLUGIN_DIRS: ['C:\\home\\fake\\kit\\mods\\dictate', `C:${KIT}/stop-point/`, 'C:/home/fake/not-a-mod'].join(';'),
+    })
+    const { text } = await run($)
+    expect(text).toContain('/pack — Пачка диктовки (dictate)')
+    expect(text).toContain('stop-point — Stop point gate')
     expect(text).not.toContain('not-a-mod')
   })
 

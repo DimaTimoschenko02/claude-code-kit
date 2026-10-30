@@ -21,12 +21,14 @@ import {
   lastDefects,
   withDefect,
 } from '../hooks/logic'
+import { fixturePath } from './fixture-path'
 
 const ROOT = '/home/fake/proj'
 const HOME = '/home/fake'
 const SID = '11111111-2222-3333-4444-555555555555'
 const START = Date.UTC(2026, 9, 12, 9, 0)
 const USAGE = { input_tokens: 9000, output_tokens: 400, cache_read_input_tokens: 7000, cache_creation_input_tokens: 0 }
+const STATE = `${HOME}/.claude/state/observer`
 const LOG = `${HOME}/.claude/state/observer/checks.log`
 const DEFECTS = `${HOME}/.claude/state/observer/defects.md`
 const FINDINGS = `${HOME}/.claude/state/observer/${SID}.md`
@@ -45,6 +47,9 @@ type World = {
   box: string
   refuse: 'no_composer' | 'dialog' | null
   toasts: string[]
+  /** The state folder's listing, and every process the mod ran. */
+  state: { name: string; kind: 'file' | 'dir'; size: number; mtimeMs: number; isLink: boolean }[]
+  runs: string[][]
 }
 
 const answered = (text: string): ModelCompleteResult => ({ isAnswered: true, text, usage: USAGE })
@@ -53,7 +58,7 @@ const SILENT = 'NOTES:\n- смотрю\nOUT:\n'
 /** The second block: notes, facts and the delta (the first is the cached prefix). */
 const changing = (c: Call | undefined): string => c?.req.promptBlocks?.[1]?.text ?? ''
 
-function world(on: On, opts: { env?: Record<string, string> } = {}): World {
+function world(on: On, opts: { env?: Record<string, string>; home?: false } = {}): World {
   const w: World = {
     files: new Map([
       [`${ROOT}/.claude/CLAUDE.md`, '# Project rules\nThinking aloud is not a decision.'],
@@ -69,8 +74,10 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
     box: '',
     refuse: null,
     toasts: [],
+    state: [],
+    runs: [],
   }
-  mock.env(on, { HOME, CLAUDE_CODE_PLUGIN_DIRS: '/home/fake/kit/mods/stop-point:/home/fake/kit/mods/observer', ...opts.env })
+  mock.env(on, { ...(opts.home === false ? {} : { HOME }), CLAUDE_CODE_PLUGIN_DIRS: '/home/fake/kit/mods/stop-point:/home/fake/kit/mods/observer', ...opts.env })
   on('session.root', () => ({ value: ROOT }))
   on('session.cwd', () => ({ value: ROOT }))
   on('session.id', () => ({ value: SID }))
@@ -95,24 +102,30 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
     ],
   }))
   on('fs.stat', (_$, e) => {
-    const f = w.files.get(e.path)
+    const path = fixturePath(e.path)
+    const f = w.files.get(path)
     if (f === undefined) return { deny: `ENOENT ${e.path}` }
-    return { value: { kind: 'file' as const, size: f.length, mtimeMs: START, isLink: false, ...(e.resolve ? { realPath: e.path } : {}) } }
+    return { value: { kind: 'file' as const, size: f.length, mtimeMs: START, isLink: false, ...(e.resolve ? { realPath: path } : {}) } }
   })
   on('fs.read', (_$, e) => {
-    const f = w.files.get(e.path)
+    const f = w.files.get(fixturePath(e.path))
     return f === undefined ? { deny: `ENOENT ${e.path}` } : { value: f }
   })
   on('fs.list', (_$, e) => {
-    if (e.path === ROOT) return { value: [{ name: 'app', kind: 'dir' as const, size: 0, mtimeMs: START, isLink: false }] }
-    if (e.path === `${ROOT}/bin`) return { value: [{ name: 'task-pr', kind: 'file' as const, size: 1, mtimeMs: START, isLink: false }] }
+    const path = fixturePath(e.path)
+    if (path === ROOT) return { value: [{ name: 'app', kind: 'dir' as const, size: 0, mtimeMs: START, isLink: false }] }
+    if (path === `${ROOT}/bin`) return { value: [{ name: 'task-pr', kind: 'file' as const, size: 1, mtimeMs: START, isLink: false }] }
+    if (path === STATE) return { value: w.state }
     return { deny: `ENOENT ${e.path}` }
   })
   on('fs.write', (_$, e) => {
-    w.files.set(e.path, e.text)
+    w.files.set(fixturePath(e.path), e.text)
     return { value: undefined }
   })
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', (_$, e) => {
+    w.runs.push([...e.argv])
+    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   on('model.complete', (_$, e) =>
     new Promise(resolve => {
       const n = w.calls.length + 1
@@ -621,5 +634,69 @@ describe('pure parts', () => {
     expect(cut).toContain('bin/task-pr')
     expect(cut).toContain('/task — ours')
     expect(cut).toMatch(/…\[\d+ more commands left out\]$/)
+  })
+})
+
+describe('Windows', () => {
+  const KNOW = () => answered('NOTES:\n- n\nOUT:\nKNOW: На проде выполнен revoke connect — проверь бэкап.')
+  const DAY = 24 * 60 * 60 * 1000
+  const OLD = '0aaaaaaa-0000-0000-0000-000000000000.md'
+  const FRESH = '0bbbbbbb-0000-0000-0000-000000000000.md'
+
+  test('no HOME: the state goes under USERPROFILE', async ($, on) => {
+    const w = world(on, { home: false, env: { USERPROFILE: HOME } })
+    await start($)
+    w.reply = KNOW
+    w.messages = [owner('x'), said('y')]
+    await reply($)
+    await w.clock.settle()
+    expect(w.files.get(FINDINGS)).toMatch(/KNOW: На проде выполнен revoke connect/)
+  })
+
+  test('neither HOME nor USERPROFILE: no check and nothing written at the drive root', async ($, on) => {
+    const w = world(on, { home: false })
+    await start($)
+    w.messages = [owner('x'), said('y')]
+    await reply($)
+    await w.clock.settle()
+    expect(w.calls).toHaveLength(0)
+    expect([...w.files.keys()].filter(p => p.startsWith('/.claude'))).toEqual([])
+    expect(w.runs).toEqual([])
+  })
+
+  test('CLAUDE_CODE_PLUGIN_DIRS is split on ; and backslash folders name their mods', async ($, on) => {
+    const w = world(on, { env: { OS: 'Windows_NT', CLAUDE_CODE_PLUGIN_DIRS: 'C:\\kit\\mods\\stop-point;C:\\kit\\mods\\observer\\' } })
+    await start($)
+    w.messages = [owner('x'), said('y')]
+    await reply($)
+    await w.clock.settle()
+    expect(w.calls[0]?.req.promptBlocks?.[0]?.text).toContain('Mods loaded from CLAUDE_CODE_PLUGIN_DIRS: observer, stop-point')
+  })
+
+  test('a hook named by a backslash path counts by its file name', () => {
+    expect(errorHit('Edit', 'PreToolUse:Edit hook error: [C:\\Users\\me\\.claude\\hooks\\skill-gate-guard.sh]: blocked')?.key).toBe(
+      'hook:PreToolUse:skill-gate-guard.sh',
+    )
+  })
+
+  const stateFolder = (w: World) => {
+    const file = (name: string, mtimeMs: number) => ({ name, kind: 'file' as const, size: 1, mtimeMs, isLink: false })
+    w.state = [file(OLD, START - 31 * DAY), file(FRESH, START - DAY), file('defects.md', START - 90 * DAY), file('checks.log', START - 90 * DAY)]
+  }
+
+  test('only findings files over a month old are pruned, with rm off Windows', async ($, on) => {
+    const w = world(on)
+    stateFolder(w)
+    await start($)
+    expect(w.runs).toEqual([['rm', '-f', '--', `${STATE}/${OLD}`]])
+  })
+
+  test('on Windows the same files are pruned by node: no rm, and find is DOS find', async ($, on) => {
+    const w = world(on, { env: { OS: 'Windows_NT' } })
+    stateFolder(w)
+    await start($)
+    expect(w.runs).toHaveLength(1)
+    expect(w.runs[0]?.slice(0, 2)).toEqual(['node', '-e'])
+    expect(w.runs[0]?.slice(3)).toEqual([`${STATE}/${OLD}`])
   })
 })

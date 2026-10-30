@@ -53,6 +53,7 @@ import {
   thresholdOf,
   withDefect,
 } from './logic'
+import { basename, joinPath, listSeparator, toSlash } from './paths'
 
 const SESSION = atom({ plugin: 'observer', key: 'session' } as const, INITIAL)
 const BAND = atom({ plugin: 'observer', key: 'band' } as const, null as ObserverBand)
@@ -61,7 +62,9 @@ const COMMAND = 'observer'
 /** The band goes after this many owner prompts: a finding he has typed past twice is stale. */
 const BAND_PROMPTS = 2
 /** A findings file's name: the session id, a UUID. Pruning touches nothing else in the folder. */
-const FINDINGS_NAME = '????????-????-????-????-????????????.md'
+const FINDINGS_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.md$/i
+/** Findings files older than this are pruned at session start. */
+const FINDINGS_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 type Config = {
   sid: string
@@ -75,6 +78,7 @@ type Config = {
   defectsPath: string
   /** Checks run here: an interactive session, or a headless one the owner opted in with CLAUDE_OBSERVER_HEADLESS=1. */
   active: boolean
+  isWindows: boolean
 }
 
 let cached: Promise<Config> | null = null
@@ -93,24 +97,32 @@ function config($: EngineInterface): Promise<Config> {
 }
 
 async function load($: EngineInterface): Promise<Config> {
-  const [root, cwd, sid, home, headless] = await Promise.all([
+  const [root, cwd, sid, posixHome, profile, os, headless] = await Promise.all([
     $.session.root(),
     $.session.cwd(),
     $.session.id(),
     $.env.get('HOME'),
+    // Windows: the engine's environment has no HOME (Git Bash sets it only for its own children).
+    $.env.get('USERPROFILE'),
+    $.env.get('OS'),
     $.env.get('CLAUDE_OBSERVER_HEADLESS'),
   ])
-  const dir = `${home ?? ''}/.claude/state/observer`
+  const rawHome = posixHome ?? profile
+  // Never '' or '/': the state would land under the drive's root.
+  if (rawHome === undefined || rawHome === '') throw new Error('neither HOME nor USERPROFILE is set')
+  const home = toSlash(rawHome).replace(/\/+$/, '')
+  const dir = joinPath(home, '.claude/state/observer')
   return {
     sid,
-    root,
-    cwd,
-    home: home ?? '',
+    root: toSlash(root),
+    cwd: toSlash(cwd),
+    home,
     dir,
     findingsPath: `${dir}/${sid}.md`,
     logPath: `${dir}/checks.log`,
     defectsPath: `${dir}/defects.md`,
     active: interactive !== false || headless === '1',
+    isWindows: os === 'Windows_NT',
   }
 }
 
@@ -152,7 +164,7 @@ async function inventory($: EngineInterface, c: Config): Promise<Inventory> {
     $.env.get('CLAUDE_CODE_PLUGIN_DIRS').catch(() => undefined),
   ])
   const b = usage?.context.breakdown
-  const mods = (dirsEnv ?? '').split(':').filter(d => d !== '').map(d => d.replace(/\/+$/, '').split('/').pop() ?? '')
+  const mods = (dirsEnv ?? '').split(listSeparator(c.isWindows)).filter(d => d !== '').map(basename)
   const binDirs = new Set([`${c.root}/bin`, `${c.cwd}/bin`])
   const top = await $.fs.list(c.root).catch(() => [])
   for (const e of top.filter(e => e.kind === 'dir' && !e.name.startsWith('.')).slice(0, 30)) binDirs.add(`${c.root}/${e.name}/bin`)
@@ -417,6 +429,21 @@ async function commandText($: EngineInterface, args: string): Promise<string> {
   return lines.join('\n')
 }
 
+/**
+ * Findings files of sessions over a month old go. $.fs has no delete, so a process removes the listed ones: `rm`, or
+ * `node` on Windows (no `rm` there, and `find` is DOS find). Best effort: a failure leaves the files.
+ */
+async function pruneFindings($: EngineInterface, c: Config): Promise<void> {
+  const cutoff = (await $.clock.now()) - FINDINGS_TTL_MS
+  const entries = await $.fs.list(c.dir).catch(() => [])
+  const stale = entries.filter(e => e.kind === 'file' && FINDINGS_NAME.test(e.name) && e.mtimeMs < cutoff).map(e => `${c.dir}/${e.name}`)
+  if (stale.length === 0) return
+  const argv = c.isWindows
+    ? ['node', '-e', 'for (const f of process.argv.slice(1)) require("fs").rmSync(f, { force: true })', ...stale]
+    : ['rm', '-f', '--', ...stale]
+  await $.process.run(argv, { timeoutMs: 5000 }).catch(() => null)
+}
+
 const tilde = (path: string, home: string): string => (home !== '' && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path)
 
 /** «в чат»: the line into the prompt box (after a draft, never over it); no box at all → sent as the mod's message. */
@@ -445,7 +472,7 @@ async function toChat($: EngineInterface, band: NonNullable<ObserverBand>): Prom
 async function saveDefect($: EngineInterface, band: NonNullable<ObserverBand>): Promise<void> {
   try {
     const c = await config($)
-    const project = c.root.replace(/\/+$/, '').split('/').pop() ?? ''
+    const project = basename(c.root)
     const line = defectLine({ at: band.at, kind: band.kind, fact: band.fact === true, text: band.text, project, sid: c.sid })
     const old = await $.fs.read(c.defectsPath).catch(() => '')
     const next = withDefect(old, line, band.text)
@@ -471,10 +498,7 @@ export const register: Register = on => {
           immediate: true,
         })
         .catch(err => $.ui.log(`observer: /${COMMAND} not registered: ${String(err)}`, { to: 'debug' }))
-      const c = await config($)
-      await $.process
-        .run(['find', c.dir, '-maxdepth', '1', '-type', 'f', '-name', FINDINGS_NAME, '-mtime', '+30', '-delete'], { timeoutMs: 5000 })
-        .catch(() => null)
+      await pruneFindings($, await config($))
       // a check claimed by the instance before a reload died with it; the next reply's check covers its delta
       await change($, v => (v.checking === null ? v : { ...v, checking: null, dirty: false }))
     } catch {

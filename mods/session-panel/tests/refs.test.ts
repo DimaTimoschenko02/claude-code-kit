@@ -2,12 +2,14 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { emptyPanel, taskRegex } from '../hooks/logic'
+import { emptyPanel, lastSegment, taskRegex } from '../hooks/logic'
 import { plain, runs } from '../hooks/markup'
 import type { Run } from '../hooks/markup'
-import { blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks } from '../hooks/refs'
+import { blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote } from '../hooks/refs'
 import type { Places } from '../hooks/refs'
 import type { Panel } from '../types'
+import { basename, dirname, isAbsolute, isRoot, joinPath, listSeparator, toSlash } from '../hooks/paths'
+import { fixturePath } from './fixture-path'
 
 const REPO = 'https://github.com/acme/app'
 // The owner's own line: a PR named by its number inside Cyrillic text with «» quotes.
@@ -159,7 +161,9 @@ const PANE = { plugin: 'session-panel', component: 'Pane', requestId: 'session-p
 
 type Calls = { git: string[][]; stats: string[] }
 
-function world(on: On, panel: Panel): Calls {
+type Shape = { env?: Record<string, string>; backslash?: boolean }
+
+function world(on: On, panel: Panel, shape: Shape = {}): Calls {
   const calls: Calls = { git: [], stats: [] }
   const store = new Map<string, unknown>([[`panel:${SID}`, panel]])
   on('store.get', (_$, e) => ({ value: store.get(e.key) }))
@@ -173,7 +177,7 @@ function world(on: On, panel: Panel): Calls {
   })
   on('store.keys', () => ({ value: [...store.keys()] }))
   mock.clock(on, { now: 1_000 })
-  mock.env(on, { HOME: '/home/fake' })
+  mock.env(on, shape.env ?? { HOME: '/home/fake' })
   on('session.id', () => ({ value: SID }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__session-panel__${e.name}` } }))
@@ -211,11 +215,12 @@ function world(on: On, panel: Panel): Calls {
     '/home/fake/proj/brain/tasks/PH-95.md': { kind: 'file', realPath: '/home/fake/mind/tasks/PH-95.md', isLink: true },
   }
   on('fs.stat', (_$, e) => {
-    calls.stats.push(e.path)
-    const f = disk[e.path]
+    const path = fixturePath(e.path)
+    calls.stats.push(path)
+    const f = disk[path]
     return f === undefined
       ? { deny: `ENOENT ${e.path}` }
-      : { value: { kind: f.kind, size: 1, mtimeMs: 0, isLink: f.isLink === true, ...(e.resolve ? { realPath: f.realPath } : {}) } }
+      : { value: { kind: f.kind, size: 1, mtimeMs: 0, isLink: f.isLink === true, ...(e.resolve ? { realPath: shape.backslash === true ? f.realPath.replace(/\//g, '\\') : f.realPath } : {}) } }
   })
   return calls
 }
@@ -268,5 +273,70 @@ describe('the pane links in place', () => {
     // Git is asked once for both shas, the disk once per path.
     expect(calls.git.filter(a => a.includes('cat-file')).length).toBe(1)
     await ui.unmount()
+  })
+
+  // Windows: no HOME in the engine's environment, only USERPROFILE; the disk answers with backslashes.
+  test('home from USERPROFILE and backslash real paths link the same', async ($, on) => {
+    world(on, STORED, { env: { USERPROFILE: '/home/fake' }, backslash: true })
+    await start($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    await ui.drawn()
+    const href = async (text: string) => (await ui.findAll({ type: 'Link' })).find(l => l.text === `${String(l.props.href)}${text}`)?.props.href
+    expect(await href('hooks/refs.ts')).toBe('webstorm://open?file=/home/fake/proj/hooks/refs.ts')
+    expect(await href('~/claude-code-kit/mods/bin/mod-check')).toBe('webstorm://open?file=/home/fake/claude-code-kit/mods/bin/mod-check')
+    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://open?vault=mind&file=notes%2Fplan')
+    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://open?vault=mind&file=tasks%2FPH-95')
+    expect(await href('/home/fake/proj/docs')).toBe('file:///home/fake/proj/docs/')
+    expect(await href('docs/out.md')).toBeUndefined()
+    await ui.unmount()
+  })
+})
+
+describe('Windows paths', () => {
+  const ROOTS = ['C:/Users/me/proj', 'C:/Users/me/mind']
+
+  test('a drive path, a backslash path and ~\\ are found in the text and placed inside the roots', () => {
+    expect(candidates('правка в C:\\Users\\me\\proj\\hooks\\refs.ts:12 и C:/Users/me/proj/a.ts, ещё hooks\\x.ts').paths)
+      .toEqual(['C:\\Users\\me\\proj\\hooks\\refs.ts', 'C:/Users/me/proj/a.ts', 'hooks\\x.ts'])
+    expect(placeByName('C:\\Users\\me\\proj\\hooks\\refs.ts', [], 'C:/Users/me', ROOTS)).toEqual(['C:/Users/me/proj/hooks/refs.ts'])
+    expect(placeByName('hooks\\x.ts', ['C:/Users/me/proj'], 'C:/Users/me', ROOTS)).toEqual(['C:/Users/me/proj/hooks/x.ts'])
+    expect(placeByName('~\\mind\\a.md', [], 'C:/Users/me', ROOTS)).toEqual(['C:/Users/me/mind/a.md'])
+    expect(placeByName('C:\\Users\\me\\proj\\..\\.ssh\\id_rsa', [], 'C:/Users/me', ROOTS)).toEqual([])
+    expect(placeByName('D:\\other\\x', [], 'C:/Users/me', ROOTS)).toEqual([])
+    expect(placeByName('\\\\server\\share\\x', [], 'C:/Users/me', ROOTS)).toEqual([])
+  })
+
+  test('a drive file opens in the editor, a drive folder as file:///C:/, a vault note in the vault', () => {
+    const files = {
+      'C:\\Users\\me\\proj\\a b.ts': { abs: 'C:/Users/me/proj/a b.ts', dir: false },
+      'C:\\Users\\me\\proj': { abs: 'C:/Users/me/proj', dir: true },
+      'C:\\Users\\me\\mind\\notes\\plan.md': { abs: 'C:/Users/me/mind/notes/plan.md', dir: false, vault: vaultNote('C:/Users/me/mind/notes/plan.md', 'C:/Users/me/mind') },
+    }
+    expect(gate('webstorm://open?file=C%3A%5CUsers%5Cme%5Cproj%5Ca%20b.ts&line=3', files)).toBe('webstorm://open?file=C:/Users/me/proj/a%20b.ts&line=3')
+    const at: Places = { ...AT, files }
+    expect(links(draw('папка C:\\Users\\me\\proj и план C:\\Users\\me\\mind\\notes\\plan.md', at))).toEqual([
+      ['C:\\Users\\me\\proj', 'file:///C:/Users/me/proj/'],
+      ['C:\\Users\\me\\mind\\notes\\plan.md', 'obsidian://open?vault=mind&file=notes%2Fplan'],
+    ])
+    expect(blocked('C:\\Users\\me\\Calc.app\\x', false)).toBe(true)
+  })
+
+  test('a link label takes the last segment on either separator', () => {
+    expect(lastSegment('webstorm://open?file=C%3A%5CUsers%5Cme%5Cx.ts')).toBe('x.ts')
+    expect(lastSegment('file:///C:/Users/me/proj/')).toBe('proj')
+  })
+
+  test('the path helpers', () => {
+    expect(toSlash('C:\\Users\\me')).toBe('C:/Users/me')
+    for (const p of ['/x', 'C:\\x', 'C:/x', 'c:/x', '\\\\server\\share']) expect([p, isAbsolute(p)]).toEqual([p, true])
+    for (const p of ['x/y', 'C:x', '~/x', '']) expect([p, isAbsolute(p)]).toEqual([p, false])
+    for (const p of ['/', 'C:', 'C:/', 'C:\\', '']) expect([p, isRoot(p)]).toEqual([p, true])
+    expect(joinPath('C:\\Users\\me\\', '\\proj')).toBe('C:/Users/me/proj')
+    expect(joinPath('/home/me', 'proj')).toBe('/home/me/proj')
+    expect([basename('C:\\a\\b.md'), basename('/a/b/'), dirname('C:\\a\\b.md'), dirname('C:\\a'), dirname('/a'), dirname('a')]).toEqual([
+      'b.md', 'b', 'C:/a', 'C:/', '/', '.',
+    ])
+    expect('A;B'.split(listSeparator(true))).toEqual(['A', 'B'])
+    expect('/a:/b'.split(listSeparator(false))).toEqual(['/a', '/b'])
   })
 })

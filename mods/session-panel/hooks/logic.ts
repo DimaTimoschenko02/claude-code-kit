@@ -1,5 +1,6 @@
 import type { Item, Mention, Panel, Pr } from '../types'
 import { plain } from './markup'
+import { basename } from './paths'
 import { isDoneStatus, isTerminal, pullOf } from './status'
 
 export const DEFAULT_TASK_PATTERN = '\\b[A-Z]{2,}-\\d+\\b'
@@ -83,7 +84,7 @@ function decode(text: string): string {
 export function lastSegment(href: string): string {
   const file = /[?&]file=([^&#]+)/.exec(href)
   const path = file !== null ? decode(file[1]!) : decode(href.replace(/[?#].*$/, ''))
-  return path.replace(/\/+$/, '').split('/').pop() ?? ''
+  return basename(path)
 }
 
 export function labelFor(href: string): string {

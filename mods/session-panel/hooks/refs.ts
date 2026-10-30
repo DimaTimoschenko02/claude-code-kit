@@ -9,6 +9,7 @@
 import type { Refs, Target } from '../types'
 import { runs, SCHEMES } from './markup'
 import type { Run } from './markup'
+import { isAbsolute, joinPath, toSlash } from './paths'
 
 // Refs (kept in state, filled by git and the disk): `repo` is `https://github.com/<owner>/<name>` or '' when unknown,
 // `commits` the shas as written that git has as commits, `files` a path as written (no `:line`) → where it really is,
@@ -30,8 +31,8 @@ const REPO_NUM = /(?<![\p{L}\p{N}_./-])([A-Za-z0-9-]+\/[A-Za-z0-9_.-]+)#(\d{1,7}
 const NUM = /(?<![\p{L}\p{N}_&/#-])#(\d{1,7})(?![\p{L}\p{N}_])/gu
 // A hex run standing alone; a UUID's parts are glued to dashes and are no sha.
 const SHA = /(?<![\p{L}\p{N}_/.-])[0-9a-f]{7,40}(?![\p{L}\p{N}_-])/gu
-// A path with at least one slash, absolute, from home, or relative; `:line` after it.
-const PATH = /(?<![\p{L}\p{N}_/.:~@+-])(?:~\/|\/)?[\p{L}\p{N}_.@+-]+(?:\/[\p{L}\p{N}_.@+-]+)*\/?(?::(\d+))?/gu
+// A path with at least one separator, absolute (`/x`, `C:\x`, `C:/x`), from home, or relative; `:line` after it.
+const PATH = /(?<![\p{L}\p{N}_/\\.:~@+-])(?:[A-Za-z]:[\\/]|~[\\/]|[\\/])?[\p{L}\p{N}_.@+-]+(?:[\\/][\p{L}\p{N}_.@+-]+)*[\\/]?(?::(\d+))?/gu
 // An editor link as `ws link` writes it: a file and a line, nothing else.
 const IDE = /^(?:webstorm|jetbrains):\/\/open\?file=([^&#\s]+)(?:&line=(\d{1,7}))?$/
 
@@ -55,8 +56,8 @@ function paths(text: string): Hit[] {
   for (const m of text.matchAll(PATH)) {
     // A sentence's full stop or comma after a path is the sentence's.
     const raw = m[1] === undefined ? m[0].replace(/[.,]+$/, '') : m[0]
-    const path = (m[1] === undefined ? raw : raw.slice(0, raw.length - m[1].length - 1)).replace(/\/$/, '')
-    if (!path.includes('/') || path === '~') continue
+    const path = (m[1] === undefined ? raw : raw.slice(0, raw.length - m[1].length - 1)).replace(/[\\/]$/, '')
+    if (!/[\\/]/.test(path) || path === '~') continue
     out.push({ start: m.index, end: m.index + raw.length, path, ...(m[1] === undefined ? {} : { line: m[1] }) })
   }
   return out
@@ -101,23 +102,26 @@ export function within(path: string, roots: readonly string[]): boolean {
  * `bases`, and only inside `roots`. A `.` or `..` part is refused rather than folded — what it lands on is the disk's
  * to say, and the disk is asked only about paths inside the roots (no probing a network mount by its name).
  */
-export function placeByName(path: string, bases: readonly string[], home: string, roots: readonly string[]): string[] {
+export function placeByName(written: string, bases: readonly string[], home: string, roots: readonly string[]): string[] {
+  const path = toSlash(written)
   if (path.split('/').some(s => s === '.' || s === '..')) return []
   const spelled = path.startsWith('~/')
-    ? home === '' ? [] : [`${home}${path.slice(1)}`]
-    : path.startsWith('/') ? [path] : bases.filter(b => b !== '').map(b => `${b}/${path}`)
+    ? home === '' ? [] : [joinPath(home, path.slice(2))]
+    : isAbsolute(path) ? [path] : bases.filter(b => b !== '').map(b => joinPath(b, path))
   return [...new Set(spelled)].filter(p => within(p, roots))
 }
 
 /** A target a click must never reach: a bundle anywhere along the path, or a launcher file. Both stay text. */
 export function blocked(path: string, dir: boolean): boolean {
-  const parts = path.split('/')
+  const parts = toSlash(path).split('/')
   if (parts.some(s => BUNDLE.test(s))) return true
   return !dir && LAUNCHER.test(parts.at(-1) ?? '')
 }
 
+/** Each segment encoded; a drive (`C:`) stays as written. */
 function encodePath(abs: string): string {
-  return abs.split('/').map(s => encodeURIComponent(s)).join('/')
+  const drive = /^[A-Za-z]:(?=\/)/.exec(abs)?.[0] ?? ''
+  return `${drive}${abs.slice(drive.length).split('/').map(s => encodeURIComponent(s)).join('/')}`
 }
 
 /**
@@ -126,7 +130,8 @@ function encodePath(abs: string): string {
  */
 export function fileHref(file: Target, line?: string): string | undefined {
   if (blocked(file.abs, file.dir)) return undefined
-  if (file.dir) return `file://${encodePath(file.abs)}/`
+  // `file:///C:/x/` on Windows: the third slash a drive path lacks.
+  if (file.dir) return `file://${file.abs.startsWith('/') ? '' : '/'}${encodePath(file.abs)}/`
   if (file.vault !== undefined) {
     return `obsidian://open?vault=${encodeURIComponent(file.vault.name)}&file=${encodeURIComponent(file.vault.note)}`
   }

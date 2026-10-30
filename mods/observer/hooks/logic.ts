@@ -8,6 +8,7 @@
 
 import type { SessionMessage } from 'claude-code'
 import type { ObserverCounter, ObserverCursor, ObserverFinding, ObserverSession } from '../types'
+import { basename } from './paths'
 
 export const INITIAL: ObserverSession = {
   checking: null,
@@ -216,7 +217,7 @@ export function errorHit(tool: string, text: string): Hit | null {
   const hook = HOOK_RX.exec(t)
   if (hook !== null) {
     const [, event = '', , path, msg = ''] = hook
-    const name = path !== undefined ? path.slice(path.lastIndexOf('/') + 1) : oneLine(shape(msg), 40)
+    const name = path !== undefined ? basename(path) : oneLine(shape(msg), 40)
     return { key: `hook:${event}:${name}`, label: `хук ${name} (${event}) заблокировал вызов; последний: «${oneLine(msg, 120)}»` }
   }
   const cls = CLASSIFIER_RX.exec(t)

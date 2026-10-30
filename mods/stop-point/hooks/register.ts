@@ -22,7 +22,8 @@ import type {
 } from 'claude-code'
 import { atom, read, update } from 'claude-code'
 import type { StopPointSession } from '../types'
-import type { Addendum } from './logic'
+import type { Addendum, GitRow } from './logic'
+import { joinPath, toSlash } from './paths'
 import {
   COMPACT_WAIT_MS,
   SIZE_SOFT,
@@ -31,7 +32,10 @@ import {
   WRITER_MODEL,
   WRITER_SYSTEM,
   WRITE_TIMEOUT_MS,
-  GIT_DELTA_SCRIPT,
+  GIT_SUBREPOS_MAX,
+  POINT_NAME,
+  countLines,
+  prunable,
   afterCompactText,
   formatGitDelta,
   parseAddendum,
@@ -75,9 +79,6 @@ const SESSION = atom({ plugin: 'stop-point', key: 'session' } as const, INITIAL)
 
 const COMMAND = 'stop-point'
 
-/** A point's file name: the session id, a UUID. Pruning touches nothing else in the folder. */
-const POINT_NAME = '????????-????-????-????-????????????.md'
-
 type Config = {
   /** Why the mod sits this session out (a shell copy is still wired); null when active. */
   standDown: string | null
@@ -92,6 +93,8 @@ type Config = {
   logPath: string
   /** The points folder with every symbolic link followed; null while it does not exist. Pruned by its real path. */
   pointsReal: string | null
+  /** No `find` there (only DOS find): old points are pruned by listing the folder instead. */
+  isWindows: boolean
 }
 
 let cached: Promise<Config> | null = null
@@ -114,8 +117,21 @@ function config($: EngineInterface): Promise<Config> {
 }
 
 async function load($: EngineInterface): Promise<Config> {
-  const [root, sid, homeEnv] = await Promise.all([$.session.root(), $.session.id(), $.env.get('HOME')])
-  const home = homeEnv ?? ''
+  const [rootRaw, sid, homeEnv, profileEnv, osEnv] = await Promise.all([
+    $.session.root(),
+    $.session.id(),
+    $.env.get('HOME'),
+    $.env.get('USERPROFILE'),
+    $.env.get('OS'),
+  ])
+  // Windows: the Claude process has no HOME (Git Bash sets it only for its own children). With neither, no point at
+  // all: a '' home once put state under `\.claude` at the drive root.
+  const homeRaw = homeEnv ?? profileEnv
+  if (homeRaw === undefined || homeRaw === '') throw new Error('neither HOME nor USERPROFILE is set')
+  // Slash paths from here on: the engine hands `C:\...`, and `$.fs` takes `C:/...` as well.
+  const root = toSlash(rootRaw)
+  const home = toSlash(homeRaw)
+  const pluginRoot = toSlash($.plugin.root)
   const resumeDir = `${root}/.claude/state/resume`
   const [rootStat, resumeStat, ownShell] = await Promise.all([
     $.fs.stat(root, { resolve: true }).catch(() => null),
@@ -129,9 +145,9 @@ async function load($: EngineInterface): Promise<Config> {
     resumeStat?.kind === 'dir' &&
     resumeStat.realPath !== undefined &&
     rootStat?.realPath !== undefined &&
-    resumeStat.realPath.startsWith(`${rootStat.realPath}/`)
+    toSlash(resumeStat.realPath).startsWith(`${toSlash(rootStat.realPath)}/`)
   const pointsDir = isInsideRoot ? resumeDir : `${home}/.claude/state/stop-point/points`
-  const templatePath = `${$.plugin.root}/template.md`
+  const templatePath = `${pluginRoot}/template.md`
   const settings = (source: SettingsSource): Promise<Settings> => $.settings.read({ source }).catch((): Settings => ({}))
   const [templateText, project, local, user, dir] = await Promise.all([
     $.fs.read(templatePath).catch(() => ''),
@@ -142,8 +158,8 @@ async function load($: EngineInterface): Promise<Config> {
   ])
   const hooks = (s: Settings): string => JSON.stringify(s['hooks'] ?? {})
   const addendum = pickAddendum(
-    [root, ...(rootStat?.realPath === undefined ? [] : [rootStat.realPath])],
-    await readAddenda($, `${$.plugin.root}/projects`),
+    [root, ...(rootStat?.realPath === undefined ? [] : [toSlash(rootStat.realPath)])],
+    await readAddenda($, `${pluginRoot}/projects`),
   )
   return {
     standDown: standDownReason(`${hooks(project)}\n${hooks(local)}`, hooks(user), ownShell),
@@ -155,7 +171,8 @@ async function load($: EngineInterface): Promise<Config> {
     templateBody: withAddendum(templateBody(templateText), addendum),
     addendumPath: addendum?.file ?? null,
     logPath: `${home}/.claude/state/stop-point/writes.log`,
-    pointsReal: dir?.kind === 'dir' && dir.realPath !== undefined ? dir.realPath : null,
+    pointsReal: dir?.kind === 'dir' && dir.realPath !== undefined ? toSlash(dir.realPath) : null,
+    isWindows: osEnv === 'Windows_NT',
   }
 }
 
@@ -188,14 +205,15 @@ async function pointFile($: EngineInterface, c: Config): Promise<{ text: string;
   return text.trim() === '' ? null : { text, mtimeMs: st.mtimeMs }
 }
 
-/** Temp file + rename, in this instance's order; an older generation that comes late is dropped. */
-function writeFileAtomic($: EngineInterface, path: string, text: string, gen: number): Promise<void> {
+/**
+ * In this instance's order; an older generation that comes late is dropped. A plain `$.fs.write`, no temp file and
+ * rename: `mv` is absent on Windows (the point was never written there, `*.tmp-N` piled up), the engine has no rename,
+ * and the writes of this instance never overlap each other in the chain.
+ */
+function writeFileOrdered($: EngineInterface, path: string, text: string, gen: number): Promise<void> {
   const run = fileChain.then(async () => {
     if (gen < writtenGen) return
-    const tmp = `${path}.tmp-${gen}`
-    await $.fs.write(tmp, text)
-    const mv = await $.process.run(['mv', '-f', tmp, path], { timeoutMs: 5000 })
-    if (mv.exitCode !== 0) throw new Error(`mv exit ${mv.exitCode}`)
+    await $.fs.write(path, text)
     writtenGen = gen
   })
   fileChain = run.catch(() => undefined)
@@ -352,7 +370,7 @@ async function writeOnce(
   if (!out.applied) return { kind: 'discarded', ms, ...base, usage }
   if (reply.kind === 'written') {
     try {
-      await writeFileAtomic($, c.pointPath, reply.body, gen)
+      await writeFileOrdered($, c.pointPath, reply.body, gen)
     } catch (err) {
       return { ...(await fail(`запись файла: ${String(err).slice(0, 60)}`, ms)), usage }
     }
@@ -517,12 +535,7 @@ export const register: Register = on => {
           immediate: true,
         })
         .catch(err => $.ui.log(`stop-point: /${COMMAND} not registered: ${String(err)}`, { to: 'debug' }))
-      if (c.pointsReal !== null)
-        await $.process
-          .run(['find', c.pointsReal, '-maxdepth', '1', '-type', 'f', '-name', POINT_NAME, '-mtime', '+7', '-delete'], {
-            timeoutMs: 5000,
-          })
-          .catch(() => null)
+      if (c.pointsReal !== null) await prunePoints($, c.pointsReal, c.isWindows).catch(() => null)
       // A run claimed by the instance before a reload died with it; the next reply's write covers its delta.
       const s = await change($, v => (v.writing === null ? v : { ...v, writing: null, dirty: false }))
       showStatus($, s, true)
@@ -673,8 +686,8 @@ export const register: Register = on => {
     const r = await next(e)
     if (e.agent_id !== undefined) return r
     if (e.source !== 'compact') cached = null
-    const c = await config($)
-    if (c.standDown !== null) return r
+    const c = await config($).catch(() => null)
+    if (c === null || c.standDown !== null) return r
     if (e.source === 'clear') {
       // a new session id: a new point, from its first reply
       const s = await change($, () => INITIAL)
@@ -709,10 +722,47 @@ export const register: Register = on => {
   })
 }
 
+/** Week-old points at the top of the folder go; nothing else in it is touched. */
+async function prunePoints($: EngineInterface, dir: string, isWindows: boolean): Promise<void> {
+  if (!isWindows) {
+    await $.process.run(['find', dir, '-maxdepth', '1', '-type', 'f', '-name', POINT_NAME, '-mtime', '+7', '-delete'], {
+      timeoutMs: 5000,
+    })
+    return
+  }
+  // No `find`/`rm` on Windows and no delete in the engine: the same pick by listing, the unlink by node.
+  const old = prunable(await $.fs.list(dir), await $.clock.now())
+  if (old.length === 0) return
+  await $.process.run(['node', '-e', UNLINK_SCRIPT, ...old.map(n => joinPath(dir, n))], { timeoutMs: 5000 })
+}
+
+const UNLINK_SCRIPT = 'for (const f of process.argv.slice(1)) try { require("fs").unlinkSync(f) } catch {}'
+
 /** What changed since the point was written: the root's repository, or each repository one level below it. */
 async function gitDelta($: EngineInterface, root: string, since: number): Promise<string> {
-  const run = await $.process
-    .run(['sh', '-c', GIT_DELTA_SCRIPT, 'sh', root, String(Math.floor(since / 1000))], { timeoutMs: 5000 })
-    .catch(() => null)
-  return run === null || run.exitCode !== 0 ? '' : formatGitDelta(run.stdout)
+  // git by argv, no shell: Windows has no sh, and the `bash` on its PATH is WSL's
+  const git = async (dir: string, args: readonly string[]): Promise<string | null> => {
+    const r = await $.process.run(['git', '-C', dir, ...args], { timeoutMs: 5000 }).catch(() => null)
+    return r === null || r.exitCode !== 0 ? null : r.stdout
+  }
+  const isTree = async (dir: string): Promise<boolean> =>
+    (await git(dir, ['rev-parse', '--is-inside-work-tree']))?.trim() === 'true'
+  const row = async (dir: string, name: string): Promise<GitRow> => {
+    const [branch, status, log] = await Promise.all([
+      git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']),
+      git(dir, ['status', '--porcelain']),
+      git(dir, ['log', `--since=@${Math.floor(since / 1000)}`, '--oneline']),
+    ])
+    return { name, branch: branch?.trim() ?? '', dirty: countLines(status ?? ''), commits: countLines(log ?? '') }
+  }
+  if (await isTree(root)) return formatGitDelta([await row(root, '.')])
+  // as the shell's `"$root"/*/` did: folders (or links to them) not starting with a dot, in name order
+  const entries = await $.fs.list(root).catch(() => [])
+  const names = entries
+    .filter(e => (e.kind === 'dir' || e.isLink) && !e.name.startsWith('.'))
+    .map(e => e.name)
+    .sort()
+  const trees = await Promise.all(names.map(async n => ((await isTree(joinPath(root, n))) ? n : null)))
+  const repos = trees.filter((n): n is string => n !== null).slice(0, GIT_SUBREPOS_MAX)
+  return formatGitDelta(await Promise.all(repos.map(n => row(joinPath(root, n), n))))
 }

@@ -8,6 +8,11 @@ import type { On, PromptEditInput, PromptSubmitInput } from 'claude-code'
 // records, the submit clears it, and a prompt a hook dropped lands back in it
 // (after the draft on a new line, as the engine's 2.1.296 REPL does).
 
+/**
+ * The fixture's files are keyed by POSIX paths; the engine resolves `/home/x` to `C:\home\x` on Windows before a
+ * hook sees it. One key for both: slashes, no drive.
+ */
+const key = (p: string): string => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 const ME = { kind: 'composer' } as const
 const PRESENTATION = { isFullscreen: true, columns: 120 }
 const SEC = 1000
@@ -42,7 +47,7 @@ type World = {
 
 const LOG = '/home/fake/.claude/state/dictate/voice.log'
 
-function world(on: On): World {
+function world(on: On, opts: { env?: Record<string, string>; isAudioDenied?: boolean } = {}): World {
   const w: World = {
     clock: mock.clock(on, { now: 1_700_000_000_000 }),
     draft: '',
@@ -54,15 +59,15 @@ function world(on: On): World {
     fills: [],
     log: '',
   }
-  mock.env(on, { HOME: '/home/fake' })
+  mock.env(on, opts.env ?? { HOME: '/home/fake' })
   on('fs.stat', ($, e) => ({ deny: `ENOENT: ${e.path}` }))
-  on('fs.read', ($, e) => (e.path === LOG && w.log !== '' ? { value: w.log } : { deny: `ENOENT: ${e.path}` }))
+  on('fs.read', ($, e) => (key(e.path) === LOG && w.log !== '' ? { value: w.log } : { deny: `ENOENT: ${e.path}` }))
   on('fs.write', ($, e) => {
-    if (e.path !== LOG) return { deny: `unexpected write: ${e.path}` }
+    if (key(e.path) !== LOG) return { deny: `unexpected write: ${e.path}` }
     w.log = e.text
     return { value: undefined }
   })
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '+0300\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', ($, e) => ({ deny: `unexpected process: ${e.argv.join(' ')}` }))
   on('session.id', () => ({ value: 'ada8bcdd-0000-4000-8000-000000000000' }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
@@ -72,6 +77,7 @@ function world(on: On): World {
     return { value: { text: w.draft, cursor: w.draft.length } }
   })
   on('audio.play', ($, e) => {
+    if (opts.isAudioDenied === true) return { deny: 'no player on this platform' }
     if (e.clip.asset !== undefined) w.played.push(e.clip.asset)
     w.playedAt.push(w.clock.now())
     return { value: undefined }
@@ -421,7 +427,11 @@ describe('voice cuts in a pack', () => {
     await send($, w, `${'слово '.repeat(120)}как tag,`)
     const lines = logLines(w)
     expect(lines).toHaveLength(4)
-    expect(lines[0]).toMatch(/^2023-11-15 01:\d\d:\d\d ada8bcdd warn played · 10[3-4] s since the speech began$/)
+    // local time by the host's zone, as the module's Date has it
+    const d = new Date(1_700_000_000_000)
+    const p = (n: number) => String(n).padStart(2, '0')
+    const hour = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}`
+    expect(lines[0]).toMatch(new RegExp(`^${hour}:\\d\\d:\\d\\d ada8bcdd warn played · 10[3-4] s since the speech began$`))
     expect(lines[1]).toMatch(/ ada8bcdd chunk 1: cap, 119 chars · 11[89] s since the speech began, still \d s · warned$/)
     expect(lines[2]).toMatch(/ chunk 2: own, 52 chars · 2\d s since the speech began, still \d s · no warning$/)
     expect(lines[3]).toMatch(/ chunk 3: cap, 728 chars · the box never showed it, judged by its end$/)
@@ -430,5 +440,27 @@ describe('voice cuts in a pack', () => {
       'журнал записей (~/.claude/state/dictate/voice.log), последние 4:',
       ...lines,
     ])
+  })
+})
+
+describe('Windows', () => {
+  test('no HOME (the Claude process on Windows): the voice log lives under USERPROFILE', async ($, on) => {
+    const w = world(on, { env: { USERPROFILE: '/home/fake', OS: 'Windows_NT' } })
+    await run($)
+    await dictate(w, CAPPED, 119 * SEC)
+    await send($, w, CAPPED)
+    expect(logLines(w)).toHaveLength(2)
+  })
+
+  test('a platform that plays nothing: no throw, the cut still held, marked and shown, the miss logged', async ($, on) => {
+    const w = world(on, { isAudioDenied: true })
+    await run($)
+    await dictate(w, CAPPED, 119 * SEC)
+    const out = await send($, w, CAPPED)
+    expect(out.drop).toBe(`${HELD(1)} · ✂ запись оборвалась (лимит 2 мин) — где, видно над полем ввода`)
+    expect((await bandLines($)).at(-1)).toContain('✂ запись оборвалась (лимит 2 мин), конец:')
+    expect(logLines(w)[0]).toMatch(/ warn failed: .* · 10[3-4] s since the speech began$/)
+    expect(await send($, w, 'всё')).not.toHaveProperty('drop')
+    expect(w.submitted.at(-1)?.text).toContain(CUT_MARK)
   })
 })

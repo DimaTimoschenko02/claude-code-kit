@@ -3,10 +3,12 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { aliveUntil, classify, hoursText, nextWarm, parse } from '../hooks/logic'
+import { joinPath, toSlash } from '../hooks/paths'
 
 const MIN = 60_000
-// 10:00 UTC; `date +%z` answers +0300, so the owner's clock reads 13:00.
-const T0 = Date.UTC(2026, 9, 4, 10, 0)
+// The mod takes the zone from JS Date, so the test starts at 13:00 on the machine's own clock: the owner's clock
+// reads 13:00 in any zone (the window has no DST change on this date in the common zones).
+const T0 = new Date(2026, 9, 4, 13, 0).getTime()
 
 const WAITS = [
   '### Ждёт тебя',
@@ -25,8 +27,10 @@ const MID_WORK = 'Тесты прошли, дальше подключаю мо�
 type World = {
   store: Map<string, unknown>
   forks: number
-  /** Files the mod wrote, by path. */
+  /** Files the mod wrote, by `fixtureKey` path. */
   files: Map<string, string>
+  /** How many processes the mod started: none, the POSIX tools it once used are not there on Windows. */
+  runs: number
   /** What the next forks answer, in order; an empty list answers with a cache read. */
   forkAnswers: unknown[]
   /** Every line cache-warm set, in order. */
@@ -40,21 +44,25 @@ type World = {
 /** What the status bar shows: every plugin's row that is set. */
 const onScreen = (w: World) => [...w.rows.values()].filter(t => t !== undefined)
 
-function world(on: On): World {
+// The engine rewrites `/home/x` to `C:\home\x` on Windows: files are kept by the path without drive and backslashes.
+const fixtureKey = (p: string) => toSlash(p).replace(/^[A-Za-z]:/, '')
+
+function world(on: On, env: Record<string, string> = { HOME: '/home/fake' }): World {
   const w: World = {
     store: new Map(),
     forks: 0,
     files: new Map(),
+    runs: 0,
     forkAnswers: [],
     statuses: [],
     rows: new Map(),
     sid: { value: 'sess-1' },
     clock: mock.clock(on, { now: T0 }),
   }
-  mock.env(on, { HOME: '/home/fake' })
-  on('fs.read', (_$, e) => ({ value: w.files.get(e.path) ?? '' }))
+  mock.env(on, env)
+  on('fs.read', (_$, e) => ({ value: w.files.get(fixtureKey(e.path)) ?? '' }))
   on('fs.write', (_$, e) => {
-    w.files.set(e.path, e.text)
+    w.files.set(fixtureKey(e.path), e.text)
     return { value: undefined }
   })
   on('store.get', (_$, e) => ({ value: w.store.get(e.key) }))
@@ -68,7 +76,10 @@ function world(on: On): World {
   })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.id', () => ({ value: w.sid.value }))
-  on('process.run', () => ({ value: { exitCode: 0, stdout: '+0300\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('process.run', () => {
+    w.runs++
+    return { deny: 'no processes in this world' }
+  })
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('model.fork', () => {
     w.forks++
@@ -378,7 +389,7 @@ async function sleepFor($: Engine, w: World, ms: number): Promise<void> {
   await w.clock.settle()
 }
 const LOG = '/home/fake/.claude/state/cache-warm/warms.log'
-const logLines = (w: World) => (w.files.get(LOG) ?? '').trim().split('\n').filter(l => l !== '')
+const logLines = (w: World, path = LOG) => (w.files.get(path) ?? '').trim().split('\n').filter(l => l !== '')
 
 describe('a sleeping Mac and the warm log', () => {
   test('the lid closed over the warm and the expiry: no fork on a dead cache, the miss is logged, the line and /warm say so', { plugins: [LID_PLUGIN] }, async ($, on) => {
@@ -443,5 +454,37 @@ describe('a sleeping Mac and the warm log', () => {
     await start($)
     await reply($, WAITS)
     expect(textOf(await warm($, ''))).toContain('Греет, только пока Mac не спит')
+  })
+})
+
+describe('windows', () => {
+  test('without HOME the log goes under USERPROFILE, with a Windows path joined cleanly', async ($, on) => {
+    const w = world(on, { USERPROFILE: 'C:\\Users\\fake' })
+    await start($)
+    await reply($, WAITS)
+    expect([...w.files.keys()]).toEqual(['/Users/fake/.claude/state/cache-warm/warms.log'])
+    expect(logLines(w, '/Users/fake/.claude/state/cache-warm/warms.log')[0]).toContain('armed: reply waits')
+  })
+
+  test('with neither HOME nor USERPROFILE the log is skipped silently and the warms still go out', async ($, on) => {
+    const w = world(on, {})
+    await start($)
+    await reply($, WAITS)
+    await w.clock.advance(50 * MIN)
+    expect(w.forks).toBe(1)
+    expect(w.files.size).toBe(0)
+  })
+
+  test('no process is started: the zone comes from JS Date, not from `date`', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, WAITS)
+    expect(w.statuses.at(-1)).toBe('🔥 кэш до 15:40')
+    expect(w.runs).toBe(0)
+  })
+
+  test('joinPath builds the log path on either separator', () => {
+    expect(joinPath('C:\\Users\\fake','.claude/state/x.log')).toBe('C:/Users/fake/.claude/state/x.log')
+    expect(joinPath('/home/fake/', '.claude/state/x.log')).toBe('/home/fake/.claude/state/x.log')
   })
 })

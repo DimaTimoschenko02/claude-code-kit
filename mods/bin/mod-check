@@ -13,6 +13,12 @@ shift
 smoke=''
 [[ ${1:-} == --smoke ]] && smoke=${2:-}
 
+# Windows (Git Bash): plugin dirs are ';'-separated C:/... paths, and node-based tools (tsc) cannot read /c/... ones.
+case "$(uname -s)" in MINGW* | MSYS* | CYGWIN*) is_windows=1 ;; *) is_windows=0 ;; esac
+[[ ${OS:-} == Windows_NT ]] && is_windows=1
+native() { if ((is_windows)) && command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+ndir=$(native "$dir")
+
 name=$(basename "$dir")
 # One inbox file per mod: two builders running in parallel must never meet each other's failures.
 inbox=${MOD_BUILDER_MEMORY:-$HOME/.claude/agent-memory/mod-builder}/inbox/$name.md
@@ -63,7 +69,7 @@ if [[ -f "$dir/.claude-plugin/types/tsconfig.json" ]]; then
   step tsc "$tmp/tsc" $?
 else
   version=$(claude --version | awk '{print $1}')
-  types=$(ls -t /private/tmp/claude-*/bundled-skills/"$version"/*/plugin-authoring/types/claude-code.d.ts /tmp/claude-*/bundled-skills/"$version"/*/plugin-authoring/types/claude-code.d.ts 2>/dev/null | head -1)
+  types=$(ls -t /private/tmp/claude-*/bundled-skills/"$version"/*/plugin-authoring/types/claude-code.d.ts /tmp/claude-*/bundled-skills/"$version"/*/plugin-authoring/types/claude-code.d.ts "${TEMP:+$(cygpath -u "$TEMP" 2>/dev/null)}"/claude/bundled-skills/"$version"/*/plugin-authoring/types/claude-code.d.ts 2>/dev/null | head -1)
   if [[ -z $types ]]; then
     echo "SKIP tsc: the mod has not loaded yet and no plugin-authoring types for $version — invoke skill plugin-authoring, rerun"
     failed=1
@@ -76,7 +82,7 @@ else
     "strict": true, "noUncheckedIndexedAccess": true, "noEmit": true, "skipLibCheck": true,
     "allowImportingTsExtensions": true, "jsx": "react", "jsxFactory": "h", "jsxFragmentFactory": "Fragment"
   },
-  "include": ["$types", "$dir/hooks", "$dir/tests", "$dir/types"]
+  "include": ["$(native "$types")", "$ndir/hooks", "$ndir/tests", "$ndir/types"]
 }
 EOF
     npx -y -p typescript@5.9.3 tsc -p "$tmp" >"$tmp/tsc" 2>&1
@@ -87,7 +93,9 @@ fi
 if [[ -n $smoke ]]; then
   # A mod already in CLAUDE_CODE_PLUGIN_DIRS loads by itself; a new one rides --plugin-dir for this one run.
   extra=()
-  case ":${CLAUDE_CODE_PLUGIN_DIRS:-}:" in *":$dir:"*) ;; *) extra=(--plugin-dir "$dir") ;; esac
+  sep=':'
+  ((is_windows)) && sep=';'
+  case "$sep${CLAUDE_CODE_PLUGIN_DIRS:-}$sep" in *"$sep$ndir$sep"*) ;; *) extra=(--plugin-dir "$ndir") ;; esac
   perl -e 'alarm 150; exec @ARGV' claude ${extra[@]+"${extra[@]}"} -p "$smoke" </dev/null >"$tmp/smoke" 2>&1
   status=$?
   grep -q "^$name: \|($name)" "$tmp/smoke" || status=1

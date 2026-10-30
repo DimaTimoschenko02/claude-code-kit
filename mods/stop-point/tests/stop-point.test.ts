@@ -24,13 +24,25 @@ import {
   statusText,
   writerPrompt,
   joined,
+  lostRefs,
+  pickAddendum,
+  prunable,
 } from '../hooks/logic'
+import type { GitRow } from '../hooks/logic'
+import { basename, dirname, isAbsolute, joinPath, normalize, toSlash } from '../hooks/paths'
 
 const ROOT = '/proj'
 const HOME = '/home/fake'
 const SID = 'sess-1234abcd-0000'
 const POINT = `${ROOT}/.claude/state/resume/${SID}.md`
 const START = Date.UTC(2026, 9, 4, 8, 0)
+/**
+ * The fixture's file system is keyed by POSIX paths; the engine resolves `/proj/x` to `C:\proj\x` on Windows before a
+ * hook sees it. One key for both: slashes, no drive.
+ */
+const key = (p: string): string => toSlash(p).replace(/^[A-Za-z]:/, '')
+const DAY = 86_400_000
+
 const USAGE = { input_tokens: 1200, output_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
 
 type File = { text: string; mtimeMs: number }
@@ -63,7 +75,10 @@ type World = {
   /** The host keeps no transcript for plugins (an Agent SDK run). */
   noTranscript: boolean
   addenda: Map<string, string>
-  gitOut: string
+  /** Repositories by folder name under ROOT; `.` is ROOT itself. A folder listed with null is no repository. */
+  repos: Map<string, Omit<GitRow, 'name'> | null>
+  /** Entries of the points folder as `$.fs.list` gives them. */
+  pointEntries: { name: string; kind: 'file' | 'dir'; mtimeMs: number }[]
   clock: MockClock
 }
 
@@ -73,7 +88,10 @@ const promptText = (c: Call | undefined): string => c?.req.prompt ?? ''
 const answered = (text: string): ModelCompleteResult => ({ isAnswered: true, text, usage: USAGE })
 
 /** The world beneath the plugin: session, transcript, writer model, settings, files, clock, display. */
-function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['settings']> } = {}): World {
+function world(
+  on: On,
+  opts: { projectMode?: boolean; settings?: Partial<World['settings']>; env?: Record<string, string> } = {},
+): World {
   const w: World = {
     files: new Map(),
     dirs: new Set(opts.projectMode === false ? [ROOT] : [ROOT, `${ROOT}/.claude/state/resume`]),
@@ -98,10 +116,11 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
     sid: SID,
     noTranscript: false,
     addenda: new Map(),
-    gitOut: '',
+    repos: new Map(),
+    pointEntries: [],
     clock: mock.clock(on, { now: START }),
   }
-  mock.env(on, { HOME })
+  mock.env(on, opts.env ?? { HOME })
   on('session.root', () => ({ value: ROOT }))
   on('session.cwd', () => ({ value: ROOT }))
   on('session.id', () => ({ value: w.sid }))
@@ -109,43 +128,54 @@ function world(on: On, opts: { projectMode?: boolean; settings?: Partial<World['
     (w.noTranscript ? { deny: '$.session.messages is not available' } : { value: [...w.messages] }) as never,
   )
   on('settings.read', (_$, e) => ({ value: w.settings[e.source as 'project'] ?? {} }))
-  on('fs.exists', (_$, e) => ({ value: w.files.has(e.path) || w.dirs.has(e.path) }))
+  on('fs.exists', (_$, e) => ({ value: w.files.has(key(e.path)) || w.dirs.has(key(e.path)) }))
   on('fs.stat', (_$, e) => {
-    const isLink = w.links.has(e.path)
-    const real = e.resolve ? { realPath: w.links.get(e.path) ?? e.path } : {}
-    const f = w.files.get(e.path)
+    const k = key(e.path)
+    const isLink = w.links.has(k)
+    const real = e.resolve ? { realPath: w.links.get(k) ?? k } : {}
+    const f = w.files.get(k)
     if (f !== undefined) return { value: { kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink, ...real } }
-    if (w.dirs.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: START, isLink, ...real } }
+    if (w.dirs.has(k)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: START, isLink, ...real } }
     return { deny: `ENOENT ${e.path}` }
   })
   on('fs.read', (_$, e) => {
-    const f = w.files.get(e.path)
+    const k = key(e.path)
+    const f = w.files.get(k)
     if (f !== undefined) return { value: f.text }
     // the mod's own template, shipped beside plugin.json (nothing real is read beneath a test)
-    if (e.path.endsWith('/stop-point/template.md')) return { value: '# Точка останова — формат\n\nMOD FORMAT BODY' }
-    const addendum = /\/stop-point\/projects\/([^/]+)$/.exec(e.path)?.[1]
+    if (k.endsWith('/stop-point/template.md')) return { value: '# Точка останова — формат\n\nMOD FORMAT BODY' }
+    const addendum = /\/stop-point\/projects\/([^/]+)$/.exec(k)?.[1]
     if (addendum !== undefined && w.addenda.has(addendum)) return { value: w.addenda.get(addendum) as string }
     return { deny: `ENOENT ${e.path}` }
   })
   on('fs.list', (_$, e) => {
-    if (!e.path.endsWith('/stop-point/projects') || w.addenda.size === 0) return { deny: `ENOENT ${e.path}` }
-    return { value: [...w.addenda.keys()].map(name => ({ name, kind: 'file' as const, size: 1, mtimeMs: START, isLink: false })) }
+    const k = key(e.path)
+    const entry = (name: string, kind: 'file' | 'dir', mtimeMs = START) => ({ name, kind, size: 1, mtimeMs, isLink: false })
+    if (k === ROOT) return { value: [...w.repos.keys()].filter(n => n !== '.').map(n => entry(n, 'dir')) }
+    if (k.endsWith('/points') || k.endsWith('/resume')) return { value: w.pointEntries.map(p => entry(p.name, p.kind, p.mtimeMs)) }
+    if (!k.endsWith('/stop-point/projects') || w.addenda.size === 0) return { deny: `ENOENT ${e.path}` }
+    return { value: [...w.addenda.keys()].map(name => entry(name, 'file')) }
   })
   on('fs.write', (_$, e) => {
-    w.files.set(e.path, { text: e.text, mtimeMs: w.clock.now() })
+    w.files.set(key(e.path), { text: e.text, mtimeMs: w.clock.now() })
     return { value: undefined }
   })
   on('process.run', (_$, e) => {
     w.runs.push(e.argv)
-    if (e.argv[0] === 'mv') {
-      const [, , from, to] = e.argv
-      const f = from === undefined ? undefined : w.files.get(from)
-      if (f === undefined || to === undefined) return { value: { exitCode: 1, stdout: '', stderr: 'no file', isStdoutTruncated: false, isStderrTruncated: false } }
-      w.files.delete(from as string)
-      w.files.set(to, f)
-    }
-    const stdout = e.argv[0] === 'sh' ? w.gitOut : ''
-    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    const done = (exitCode: number, stdout = '') =>
+      ({ value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as const
+    if (e.argv[0] !== 'git') return done(0)
+    // git -C <dir> <args>: a repository answers from w.repos, anything else as no work tree
+    const dir = key(e.argv[2] ?? '')
+    const name = dir === ROOT ? '.' : dir.startsWith(`${ROOT}/`) ? dir.slice(ROOT.length + 1) : ''
+    const repo = w.repos.get(name)
+    if (repo === undefined || repo === null) return done(128)
+    const args = e.argv.slice(3).join(' ')
+    if (args === 'rev-parse --is-inside-work-tree') return done(0, 'true\n')
+    if (args === 'rev-parse --abbrev-ref HEAD') return done(0, `${repo.branch}\n`)
+    if (args === 'status --porcelain') return done(0, ' M f\n'.repeat(repo.dirty))
+    if (args.startsWith('log --since=@')) return done(0, 'abc1234 c\n'.repeat(repo.commits))
+    return done(1)
   })
   on('model.complete', (_$, e) => {
     const n = w.calls.length + 1
@@ -626,7 +656,7 @@ describe('after compaction', () => {
     expect(text).toContain('=== ТОЧКА ОСТАНОВА ЭТОЙ СЕССИИ (записана')
     expect(text).toContain('30 мин назад')
     expect(text).toContain('resume me')
-    expect(w.runs.some(a => a[0] === 'sh')).toBe(true)
+    expect(w.runs.some(a => a[0] === 'git')).toBe(true)
   })
 
   test('/clear starts a new point for the new session id', async ($, on) => {
@@ -1162,23 +1192,42 @@ describe('the freshness check on resume', () => {
   test('a workspace that is no repository lists the repositories one level below it', async ($, on) => {
     const w = world(on)
     w.files.set(POINT, { text: '# Stop point\n- resume me', mtimeMs: START - 30 * 60_000 })
-    w.gitOut = 'games-service\tGAM-1\t0\t0\naggregator\tmain\t2\t3\n'
+    w.repos.set('games-service', { branch: 'GAM-1', dirty: 0, commits: 0 })
+    w.repos.set('aggregator', { branch: 'main', dirty: 2, commits: 3 })
+    w.repos.set('notes', null)
     await start($)
     const r = await $.classic.SessionStart({ source: 'resume' })
     const text = (r.additionalContext ?? []).join('\n')
     expect(text).toContain('aggregator: ветка main; незакоммиченных файлов: 2; коммитов после записи: 3\ngames-service: ветка GAM-1;')
-    const run = w.runs.find(a => a[0] === 'sh')
-    expect(run?.slice(3)).toEqual(['sh', ROOT, String(Math.floor((START - 30 * 60_000) / 1000))])
+    expect(text).not.toContain('notes:')
+    // git by argv, never a shell: Windows has no sh
+    expect(w.runs.every(a => a[0] !== 'sh' && a[0] !== 'bash')).toBe(true)
+    const log = w.runs.find(a => a[0] === 'git' && a[3] === 'log')
+    expect(log).toEqual(['git', '-C', `${ROOT}/aggregator`, 'log', `--since=@${Math.floor((START - 30 * 60_000) / 1000)}`, '--oneline'])
+  })
+
+  test('a root that is a repository gives its own line only', async ($, on) => {
+    const w = world(on)
+    w.files.set(POINT, { text: '# Stop point\n- resume me', mtimeMs: START - 30 * 60_000 })
+    w.repos.set('.', { branch: 'main', dirty: 1, commits: 0 })
+    w.repos.set('sub', { branch: 'x', dirty: 5, commits: 5 })
+    await start($)
+    const r = await $.classic.SessionStart({ source: 'resume' })
+    const text = (r.additionalContext ?? []).join('\n')
+    expect(text).toContain('ветка: main; незакоммиченных файлов: 1; коммитов после записи: 0')
+    expect(text).not.toContain('sub:')
   })
 
   test('a repository root keeps its one line; nothing at all gives no line', () => {
-    expect(formatGitDelta('.\tmain\t1\t0\n')).toBe('ветка: main; незакоммиченных файлов: 1; коммитов после записи: 0')
-    expect(formatGitDelta('')).toBe('')
+    expect(formatGitDelta([{ name: '.', branch: 'main', dirty: 1, commits: 0 }])).toBe(
+      'ветка: main; незакоммиченных файлов: 1; коммитов после записи: 0',
+    )
+    expect(formatGitDelta([])).toBe('')
   })
 
   test('at most 12 repositories, those with changes first, the rest counted', () => {
-    const quiet = Array.from({ length: 12 }, (_, i) => `r${String(i).padStart(2, '0')}\tmain\t0\t0`)
-    const out = formatGitDelta([...quiet, 'zz\tfix\t0\t4', 'bad\nname'].join('\n')).split('\n')
+    const quiet = Array.from({ length: 12 }, (_, i) => ({ name: `r${String(i).padStart(2, '0')}`, branch: 'main', dirty: 0, commits: 0 }))
+    const out = formatGitDelta([...quiet, { name: 'zz', branch: 'fix', dirty: 0, commits: 4 }]).split('\n')
     expect(out).toHaveLength(GIT_REPOS_MAX + 1)
     expect(out[0]).toBe('zz: ветка fix; незакоммиченных файлов: 0; коммитов после записи: 4')
     expect(out.at(-1)).toBe('не показано репо: 1 (без изменений)')
@@ -1408,5 +1457,105 @@ describe('the main compaction, with subagents compacting around it', () => {
     const got = ((await $.classic.SessionStart({ source: 'compact' })).additionalContext ?? []).join('\n')
     expect(got).toBe('')
     expect(ctx(await read($))).toBe('')
+  })
+})
+
+describe('Windows', () => {
+  test('paths: backslashes, drive letters, both separators', () => {
+    expect(toSlash('C:\\Users\\me\\x.md')).toBe('C:/Users/me/x.md')
+    for (const p of ['/x', 'C:\\x', 'C:/x', 'c:\\x', '\\\\server\\share']) expect(isAbsolute(p)).toBe(true)
+    for (const p of ['x/y', 'x\\y', 'C:x', '~/x', '']) expect(isAbsolute(p)).toBe(false)
+    expect(joinPath('C:\\Users\\me\\', 'a\\b.md')).toBe('C:/Users/me/a/b.md')
+    expect(joinPath('/home/me', 'a')).toBe('/home/me/a')
+    expect(basename('C:\\Users\\me\\x.md')).toBe('x.md')
+    expect(basename('/a/b/c.ts')).toBe('c.ts')
+    expect(dirname('C:\\Users\\me\\x.md')).toBe('C:/Users/me')
+    expect(dirname('C:\\x')).toBe('C:/')
+    expect(dirname('/x')).toBe('/')
+    expect(normalize('c:\\work\\repo\\..\\other\\.\\a.ts')).toBe('C:/work/other/a.ts')
+    expect(normalize('/a/./b/../c')).toBe('/a/c')
+  })
+
+  test('the point is written in place: no mv, no temp file left', async ($, on) => {
+    const w = world(on)
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    expect(w.files.get(POINT)?.text).toBe('# Точка останова\n\n- запись 1\n')
+    expect(w.runs.filter(a => a[0] === 'mv')).toEqual([])
+    expect([...w.files.keys()].filter(k => k.includes('.tmp-'))).toEqual([])
+  })
+
+  test('no HOME (the Claude process on Windows): the point lives under USERPROFILE', async ($, on) => {
+    const w = world(on, { projectMode: false, env: { USERPROFILE: HOME, OS: 'Windows_NT' } })
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    expect(w.files.has(`${HOME}/.claude/state/stop-point/points/${SID}.md`)).toBe(true)
+  })
+
+  test('neither HOME nor USERPROFILE: nothing is written, least of all at the drive root', async ($, on) => {
+    const w = world(on, { projectMode: false, env: {} })
+    await start($)
+    w.messages = [...EXCHANGE]
+    await reply($)
+    await w.clock.settle()
+    expect(w.calls).toHaveLength(0)
+    expect([...w.files.keys()]).toEqual([])
+    expect((await $.classic.SessionStart({ source: 'resume' })).additionalContext ?? []).toEqual([])
+  })
+
+  test('pruning: no find; week-old points picked by listing, unlinked by node', async ($, on) => {
+    const w = world(on, { env: { USERPROFILE: HOME, OS: 'Windows_NT' } })
+    const old = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.md'
+    w.pointEntries = [
+      { name: old, kind: 'file', mtimeMs: START - 9 * DAY },
+      { name: '11111111-2222-3333-4444-555555555555.md', kind: 'file', mtimeMs: START - 2 * DAY },
+      { name: 'notes.md', kind: 'file', mtimeMs: START - 30 * DAY },
+      { name: 'ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee.md', kind: 'dir', mtimeMs: START - 30 * DAY },
+    ]
+    await start($)
+    expect(w.runs.filter(a => a[0] === 'find')).toEqual([])
+    const node = w.runs.find(a => a[0] === 'node')
+    expect(node?.slice(3)).toEqual([`${ROOT}/.claude/state/resume/${old}`])
+  })
+
+  test('pruning picks what find -mtime +7 picks', () => {
+    const e = (name: string, days: number) => ({ name, kind: 'file', mtimeMs: START - days * DAY })
+    const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.md'
+    expect(prunable([e(id, 7.9)], START)).toEqual([])
+    expect(prunable([e(id, 8)], START)).toEqual([id])
+    expect(prunable([e('x.md', 30), e(`${id}.tmp-1`, 30)], START)).toEqual([])
+  })
+
+  test('lost refs: backslash paths and a lower-case drive come out relative to the root', () => {
+    const before = [
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          { tool: 'Read', input: { file_path: 'C:\\work\\repo\\src\\a.ts' } },
+          { tool: 'Edit', input: { file_path: 'c:\\work\\repo\\docs\\x.md' } },
+          { tool: 'Read', input: { file_path: 'src\\b.ts' } },
+          { tool: 'Read', input: { file_path: 'D:\\elsewhere\\c.ts' } },
+          { tool: 'Read', input: { file_path: 'C:\\work\\repo\\.claude\\state\\resume\\p.md' } },
+        ],
+      },
+    ]
+    const out = lostRefs(before, '', 'C:\\work\\repo', 'C:\\Users\\me') ?? ''
+    expect(out).toContain('- читал: src/a.ts')
+    expect(out).toContain('- правил: docs/x.md')
+    expect(out).toContain('- читал: src/b.ts')
+    expect(out).toContain('- читал: D:/elsewhere/c.ts')
+    expect(out).not.toContain('p.md')
+  })
+
+  test('an addendum rooted at a Windows path matches a session below it', () => {
+    const a = parseAddendum('f', '---\nroot: C:\\work\\agg\\\n---\nAGG\n')
+    expect(a).toEqual({ file: 'f', root: 'C:/work/agg', body: 'AGG' })
+    expect(pickAddendum(['C:/work/agg/sub'], a === null ? [] : [a])?.body).toBe('AGG')
+    expect(pickAddendum(['C:/work/aggregator'], a === null ? [] : [a])).toBeNull()
   })
 })

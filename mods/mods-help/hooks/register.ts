@@ -3,17 +3,20 @@
 
 import type { CommandInfo, EngineInterface, Register } from 'claude-code'
 
+import { joinPath, listSeparator } from './paths'
+
 export const COMMAND = 'mods'
 
 export type Mod = { name: string; description: string }
 
 /** The folders in CLAUDE_CODE_PLUGIN_DIRS, each named by its plugin.json; a folder without a readable one is skipped. */
 async function listedMods($: EngineInterface): Promise<Mod[]> {
-  const dirs = ((await $.env.get('CLAUDE_CODE_PLUGIN_DIRS')) ?? '').split(':').filter(d => d !== '')
+  const isWindows = (await $.env.get('OS')) === 'Windows_NT'
+  const dirs = ((await $.env.get('CLAUDE_CODE_PLUGIN_DIRS')) ?? '').split(listSeparator(isWindows)).filter(d => d !== '')
   const mods: Mod[] = []
   for (const dir of dirs) {
     try {
-      const m: unknown = JSON.parse(await $.fs.read(`${dir.replace(/\/+$/, '')}/.claude-plugin/plugin.json`))
+      const m: unknown = JSON.parse(await $.fs.read(joinPath(dir, '.claude-plugin/plugin.json')))
       if (typeof m !== 'object' || m === null) continue
       const { name, description } = m as { name?: unknown; description?: unknown }
       if (typeof name === 'string') mods.push({ name, description: typeof description === 'string' ? description : '' })

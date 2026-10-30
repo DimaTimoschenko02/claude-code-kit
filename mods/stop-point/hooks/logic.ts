@@ -5,6 +5,7 @@
 
 import type { ModelTextBlock, SessionMessage } from 'claude-code'
 import type { StopPointCursor, StopPointSession } from '../types'
+import { basename, isAbsolute, normalize, toSlash } from './paths'
 
 export const INITIAL: StopPointSession = {
   writing: null,
@@ -601,8 +602,8 @@ export function parseAddendum(file: string, text: string): Addendum | null {
   if (m === null) return null
   const line = /^root:[ \t]*(.*?)[ \t]*$/m.exec(m[1] ?? '')
   const raw = (line?.[1] ?? '').replace(/^(['"])(.*)\1$/, '$2')
-  if (!raw.startsWith('/')) return null
-  const root = raw.replace(/\/+$/, '') || '/'
+  if (!isAbsolute(raw)) return null
+  const root = toSlash(raw).replace(/\/+$/, '') || '/'
   const body = text.slice(m[0].length).trim()
   return body === '' ? null : { file, root, body }
 }
@@ -619,39 +620,25 @@ export const withAddendum = (template: string, a: Addendum | null): string =>
 
 export const GIT_REPOS_MAX = 12
 
-/** Run as `sh -c SCRIPT sh <root> <since s>`: rows `name\tbranch\tdirty\tcommits`, the root itself as `.`, else its sub-repos. */
-export const GIT_DELTA_SCRIPT = [
-  'tree() { [ "$(git -C "$1" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; }',
-  'row() { b=$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null); ' +
-    'd=$(git -C "$1" status --porcelain 2>/dev/null | wc -l | tr -d " "); ' +
-    'n=$(git -C "$1" log --since="@$3" --oneline 2>/dev/null | wc -l | tr -d " "); ' +
-    'printf "%s\\t%s\\t%s\\t%s\\n" "$2" "$b" "$d" "$n"; }',
-  'if tree "$1"; then row "$1" . "$2"; exit 0; fi',
-  'i=0; for r in "$1"/*/; do r=${r%/}; [ -d "$r" ] || continue; tree "$r" || continue; i=$((i+1)); ' +
-    '[ $i -gt 40 ] && break; row "$r" "${r##*/}" "$2" & done; wait; exit 0',
-].join('\n')
+/** Sub-repositories looked at below a root that is no repository itself. */
+export const GIT_SUBREPOS_MAX = 40
+
+/** One repository's facts: `.` for the root itself, else its folder's name. */
+export type GitRow = { name: string; branch: string; dirty: number; commits: number }
+
+/** Lines of a command's output, as `wc -l` counted them (an empty output is none). */
+export const countLines = (stdout: string): number => stdout.split('\n').filter(l => l.trim() !== '').length
 
 const flat = (s: string): string => s.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 60)
 
-type RepoRow = { name: string; branch: string; dirty: number; commits: number }
-
-const repoFacts = (r: RepoRow): string =>
+const repoFacts = (r: GitRow): string =>
   `ветка ${r.branch || '?'}; незакоммиченных файлов: ${r.dirty}; коммитов после записи: ${r.commits}`
 
-export function formatGitDelta(stdout: string): string {
-  const rows: RepoRow[] = stdout
-    .split('\n')
-    .map(l => l.split('\t'))
-    .filter(p => p.length === 4)
-    .map(([name = '', branch = '', dirty = '', commits = '']) => ({
-      name: flat(name),
-      branch: flat(branch),
-      dirty: Number(dirty) || 0,
-      commits: Number(commits) || 0,
-    }))
+export function formatGitDelta(input: readonly GitRow[]): string {
+  const rows = input.map(r => ({ ...r, name: flat(r.name), branch: flat(r.branch) }))
   const own = rows.find(r => r.name === '.')
   if (own !== undefined) return repoFacts(own).replace(/^ветка /, 'ветка: ')
-  const idle = (r: RepoRow): number => (r.dirty + r.commits > 0 ? 0 : 1)
+  const idle = (r: GitRow): number => (r.dirty + r.commits > 0 ? 0 : 1)
   const sorted = [...rows].sort((a, b) => idle(a) - idle(b) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   const shown = sorted.slice(0, GIT_REPOS_MAX).map(r => `${r.name}: ${repoFacts(r)}`)
   const rest = sorted.slice(GIT_REPOS_MAX)
@@ -691,22 +678,11 @@ export function resumeText(point: string, body: string, mtimeMs: number, now: nu
 
 // --- paths ---------------------------------------------------------------------------------------------------------
 
-export function normalize(p: string): string {
-  const parts: string[] = []
-  for (const part of p.split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') parts.pop()
-    else parts.push(part)
-  }
-  return `/${parts.join('/')}`
-}
-
+/** `p` as an absolute, normalized, slash path: `~/` under home, a relative one under cwd. */
 export const absolute = (p: string, cwd: string, home: string): string => {
   if (p.startsWith('~/') && home !== '') return normalize(`${home}/${p.slice(2)}`)
-  return normalize(p.startsWith('/') ? p : `${cwd}/${p}`)
+  return normalize(isAbsolute(p) ? p : `${cwd}/${p}`)
 }
-
-export const basename = (p: string): string => p.slice(p.lastIndexOf('/') + 1)
 
 // --- lost refs (port of compact-lost-refs.mjs) -----------------------------------------------------------------------
 
@@ -730,7 +706,9 @@ const SUMMARY_HEAD = /^This session is being continued from a previous conversat
  * a compaction the first turn tends to re-read what was already found, and the list is mechanical, so the mod builds it.
  * `before` is the transcript the compaction ran over, `known` the text of what it became plus the point.
  */
-export function lostRefs(before: readonly MessageLike[], known: string, cwd: string, home: string): string | null {
+export function lostRefs(before: readonly MessageLike[], known: string, cwdIn: string, homeIn: string): string | null {
+  const cwd = normalize(cwdIn)
+  const home = homeIn === '' ? '' : normalize(homeIn)
   const files = new Map<string, { kind: 'read' | 'edit'; i: number }>()
   const urls = new Map<string, number>()
   const rel = (p: string): string => {
@@ -790,3 +768,16 @@ export function standDownReason(projectHooks: string, userHooks: string, project
   if (GLOBAL_SHELL.test(userHooks) && !projectShipsOwn) return 'the global shell copy is still wired in ~/.claude/settings.json'
   return null
 }
+
+// --- pruning old points ---------------------------------------------------------------------------------------------
+
+/** A point's file name: the session id, a UUID. Pruning touches nothing else in the folder. */
+export const POINT_NAME = '????????-????-????-????-????????????.md'
+const POINT_NAME_RX = /^.{8}-.{4}-.{4}-.{4}-.{12}\.md$/u
+const DAY_MS = 86_400_000
+
+/** Names `find -maxdepth 1 -type f -name POINT_NAME -mtime +7` picks: regular files, 8 whole days old or more. */
+export const prunable = (entries: readonly { name: string; kind: string; mtimeMs: number }[], now: number): string[] =>
+  entries
+    .filter(e => e.kind === 'file' && POINT_NAME_RX.test(e.name) && Math.floor((now - e.mtimeMs) / DAY_MS) > 7)
+    .map(e => e.name)

@@ -36,6 +36,7 @@ import { plain, runs, withLead } from './markup'
 import type { Run } from './markup'
 import { NO_REFS, blocked, candidates, fileHref, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
 import type { Refs } from './refs'
+import { basename, isAbsolute, isRoot, joinPath, toSlash } from './paths'
 
 type Engine = EngineInterface
 
@@ -113,23 +114,26 @@ async function run($: Engine, argv: string[], cwd: string, stdin?: string): Prom
   return r === null || r.exitCode !== 0 ? null : r.stdout
 }
 
+/** Where a folder really is, `/`-separated; undefined when it is no folder. */
 async function realDir($: Engine, path: string): Promise<string | undefined> {
   const st = await $.fs.stat(path, { resolve: true }).catch(() => null)
-  return st?.kind === 'dir' ? st.realPath : undefined
+  return st?.kind === 'dir' && st.realPath !== undefined ? toSlash(st.realPath) : undefined
 }
 
-async function locate($: Engine, cwd: string): Promise<void> {
+async function locate($: Engine, rawCwd: string): Promise<void> {
   const repo = await $.session.repo().catch(() => null)
-  const top = repo?.root ?? ''
-  const home = (await $.env.get('HOME').catch(() => undefined)) ?? ''
-  const expand = (p: string) => (p.startsWith('~/') && home !== '' ? `${home}${p.slice(1)}` : p)
+  const cwd = toSlash(rawCwd)
+  const top = toSlash(repo?.root ?? '')
+  // Windows has no HOME in the engine's environment (Git Bash sets it only for its own children).
+  const home = toSlash((await $.env.get('HOME').catch(() => undefined)) ?? (await $.env.get('USERPROFILE').catch(() => undefined)) ?? '')
+  const expand = (p: string) => (/^~[\\/]/.test(p) && home !== '' ? joinPath(home, p.slice(2)) : p)
   const spelt = [cwd, top, cfg.cardsDir, expand(cfg.vault), ...cfg.linkRoots.map(expand)]
-    .map(p => p.replace(/\/+$/, ''))
-    .filter(p => p.startsWith('/') && p.length > 1 && !p.split('/').some(s => s === '.' || s === '..'))
+    .map(p => toSlash(p).replace(/\/+$/, ''))
+    .filter(p => isAbsolute(p) && !isRoot(p) && !p.split('/').some(s => s === '.' || s === '..'))
   const real: string[] = []
   for (const p of spelt) {
     const r = await realDir($, p)
-    if (r !== undefined && r !== '/') real.push(r)
+    if (r !== undefined && !isRoot(r)) real.push(r)
   }
   const vault = cfg.vault === '' ? undefined : await realDir($, expand(cfg.vault))
   where = { cwd, top, home, repo: githubRepo(repo?.remote ?? ''), spelt: [...new Set([...spelt, ...real])], real, vault: vault ?? '' }
@@ -146,9 +150,10 @@ async function place($: Engine, path: string): Promise<Refs['files'][string] | n
     const st = await $.fs.stat(abs, { resolve: true }).catch(() => null)
     if (st === null || st.kind === 'other' || st.realPath === undefined) continue
     const dir = st.kind === 'dir'
-    if (!within(st.realPath, where.real) || blocked(abs, dir) || blocked(st.realPath, dir)) continue
-    const note = dir ? undefined : vaultNote(st.realPath, where.vault)
-    return { abs: st.realPath, dir, ...(note === undefined ? {} : { vault: note }) }
+    const real = toSlash(st.realPath)
+    if (!within(real, where.real) || blocked(abs, dir) || blocked(real, dir)) continue
+    const note = dir ? undefined : vaultNote(real, where.vault)
+    return { abs: real, dir, ...(note === undefined ? {} : { vault: note }) }
   }
   return null
 }
@@ -245,7 +250,7 @@ async function cardHref($: Engine, path: string): Promise<string | undefined> {
   let href = cardHrefs.get(path)
   if (href === undefined) {
     const st = await $.fs.stat(path, { resolve: true }).catch(() => null)
-    const real = st?.kind === 'file' ? st.realPath : undefined
+    const real = st?.kind === 'file' && st.realPath !== undefined ? toSlash(st.realPath) : undefined
     const note = real === undefined ? undefined : vaultNote(real, where.vault)
     href = real === undefined || note === undefined ? '' : (fileHref({ abs: real, dir: false, vault: note }) ?? '')
     cardHrefs.set(path, href)
@@ -397,7 +402,7 @@ async function watchChrome($: Engine, tool: string, text: string, isError: boole
 export const register: Register = (on, options) => {
   cfg = {
     pattern: taskRegex(typeof options.taskPattern === 'string' ? options.taskPattern : undefined),
-    cardsDir: typeof options.cardsDir === 'string' ? options.cardsDir.replace(/\/+$/, '') : '',
+    cardsDir: typeof options.cardsDir === 'string' ? toSlash(options.cardsDir).replace(/\/+$/, '') : '',
     doneStatuses: Array.isArray(options.doneStatuses)
       ? options.doneStatuses.filter((s): s is string => typeof s === 'string')
       : ['Done'],
@@ -479,7 +484,7 @@ export const register: Register = (on, options) => {
     await sync($)
     laterPrs($, true)
     const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
-    const job = jobDir?.replace(/\/+$/, '').split('/').pop()
+    const job = jobDir === undefined ? undefined : basename(jobDir)
     restart = job !== undefined && job !== '' ? `claude respawn ${job}` : `claude --resume ${sid}`
     if (e.isInteractive && !(await $.ui.panes()).some(p => p.id === PANE)) {
       void $.ui.open({ id: PANE, title: 'Сессия', columns: COLUMNS })

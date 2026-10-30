@@ -30,12 +30,12 @@ import {
   localStamp,
   nextWarm,
   parse,
-  parseTzOffset,
   reachedCache,
   shouldWarm,
   stepMs,
   tokensText,
 } from './logic'
+import { joinPath } from './paths'
 
 type Engine = EngineInterface
 
@@ -178,7 +178,7 @@ async function record($: Engine, text: string): Promise<void> {
   $.ui.log(`cache-warm: ${text}`, { to: 'debug' })
   if (home === null) return
   try {
-    const path = `${home}${LOG_PATH.slice(1)}`
+    const path = joinPath(home, LOG_PATH.slice(2))
     const line = `${localStamp(await $.clock.now(), tzOffsetMin)} ${sid.slice(0, 8)} ${text}`
     const old = await $.fs.read(path).catch(() => '')
     const lines = typeof old === 'string' && old !== '' ? old.replace(/\n$/, '').split('\n') : []
@@ -385,7 +385,8 @@ export const register: Register = (on, options) => {
     isTurnRunning = false
     sid = await $.session.id()
     try {
-      home = (await $.env.get('HOME')) ?? null
+      // HOME is unset in the Claude process on Windows; USERPROFILE is the same folder there.
+      home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? null
     } catch {
       home = null
     }
@@ -395,8 +396,8 @@ export const register: Register = (on, options) => {
       argumentHint: '[часы | off | on | auto | default <часы>]',
       immediate: true,
     }).catch(err => $.ui.log(`cache-warm: /${COMMAND} not registered: ${String(err)}`, { to: 'debug' }))
-    const zone = await $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).catch(() => null)
-    tzOffsetMin = parseTzOffset(zone?.stdout ?? '') ?? -new Date().getTimezoneOffset()
+    // The zone as of now, from the engine's clock (no `date` on Windows).
+    tzOffsetMin = -new Date(await $.clock.now()).getTimezoneOffset()
 
     // Choices of sessions long gone would pile up in the store.
     const now = await $.clock.now()

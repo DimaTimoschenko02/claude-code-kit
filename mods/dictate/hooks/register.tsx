@@ -104,9 +104,8 @@ let watcher: Timer | undefined
 let recording: Recording | undefined
 // A key was typed into the draft since the box was last empty: the next send is the person's own.
 let isTyped = false
-// The voice log: lines written one after another; the zone and session read once.
+// The voice log: lines written one after another; the session read once.
 let logChain: Promise<void> = Promise.resolve()
-let tzOffsetMin: number | undefined
 let sessionId: string | undefined
 
 // ---------------------------------------------------------------- batch state
@@ -391,26 +390,31 @@ export function stamp(ms: number, offsetMin: number): string {
   )
 }
 
-async function zoneOffset($: Dollar): Promise<number> {
-  const out = await $.process.run(['date', '+%z'], { timeoutMs: 5_000 }).catch(() => null)
-  const m = /([+-])(\d{2})(\d{2})/u.exec(out?.stdout ?? '')
-  if (m === null) return -new Date().getTimezoneOffset()
-  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]))
+/** The host's UTC offset at `ms`, in minutes: the module's Date carries its zone (no `date` on Windows). */
+export const zoneOffset = (ms: number): number => -new Date(ms).getTimezoneOffset()
+
+/**
+ * The person's home: HOME, else USERPROFILE (the Claude process on Windows has no HOME; Git Bash sets it only for
+ * its own children). Undefined with neither: nothing is read or written then, never at the drive root.
+ */
+async function homeDir($: Dollar): Promise<string | undefined> {
+  home ??= (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  return home === '' ? undefined : home
 }
 
 async function logFile($: Dollar): Promise<string | undefined> {
-  home ??= await $.env.get('HOME')
-  return home === undefined ? undefined : `${home}${LOG_PATH.slice(1)}`
+  const dir = await homeDir($)
+  return dir === undefined ? undefined : `${dir}${LOG_PATH.slice(1)}`
 }
 
 async function writeLine($: Dollar, text: string): Promise<void> {
   const path = await logFile($)
   if (path === undefined) return
-  tzOffsetMin ??= await zoneOffset($)
   sessionId ??= await $.session.id()
   const old = await $.fs.read(path).catch(() => '')
   const lines = typeof old === 'string' && old !== '' ? old.replace(/\n$/u, '').split('\n') : []
-  lines.push(`${stamp(await $.clock.now(), tzOffsetMin)} ${sessionId.slice(0, 8)} ${text}`)
+  const now = await $.clock.now()
+  lines.push(`${stamp(now, zoneOffset(now))} ${sessionId.slice(0, 8)} ${text}`)
   await $.fs.write(path, `${lines.slice(-LOG_KEEP).join('\n')}\n`)
 }
 
@@ -501,9 +505,9 @@ function compile(path: string, mtimeMs: number, source: unknown): Terms {
 
 /** The dictionary, re-read only when the file's mtime changed. */
 async function loadTerms($: Dollar): Promise<Terms | undefined> {
-  home ??= await $.env.get('HOME')
-  if (home === undefined) return undefined
-  const path = `${home}/.claude/dictate-terms.json`
+  const dir = await homeDir($)
+  if (dir === undefined) return undefined
+  const path = `${dir}/.claude/dictate-terms.json`
   const stat = await $.fs.stat(path).catch(() => undefined)
   if (stat === undefined) {
     terms = undefined

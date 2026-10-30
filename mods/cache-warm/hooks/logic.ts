@@ -143,12 +143,6 @@ export function hhmm(ms: number, tzOffsetMin: number): string {
   return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`
 }
 
-export function parseTzOffset(text: string): number | null {
-  const m = /([+-])(\d{2})(\d{2})/.exec(text)
-  if (m === null) return null
-  return (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]))
-}
-
 export function hoursText(h: number): string {
   const total = Math.round(h * 60)
   const hh = Math.floor(total / 60)

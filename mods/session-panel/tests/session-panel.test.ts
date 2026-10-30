@@ -4,6 +4,7 @@ import type { On } from 'claude-code'
 
 import { capture, emptyPanel, merge, remove, reportText, taskRegex, view } from '../hooks/logic'
 import type { Panel } from '../types'
+import { fixturePath } from './fixture-path'
 
 const SID = 'sess-1'
 const CARDS = '/home/fake/vault/tasks'
@@ -39,7 +40,7 @@ function world(on: On): World {
   mock.clock(on, { now: 1_000 })
   on('session.id', () => ({ value: SID }))
   on('fs.read', (_$, e) => {
-    const text = w.files.get(e.path)
+    const text = w.files.get(fixturePath(e.path))
     return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
   })
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
@@ -133,6 +134,15 @@ describe('session', () => {
   test('the header names the command that restarts this background session', { options: OPTIONS }, async ($, on) => {
     world(on)
     mock.env(on, { CLAUDE_JOB_DIR: '/home/fake/.claude/jobs/ab12cd34' })
+    await start($)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /перезапуск: claude respawn ab12cd34/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a Windows job folder names the same job', { options: OPTIONS }, async ($, on) => {
+    world(on)
+    mock.env(on, { CLAUDE_JOB_DIR: 'C:\\Users\\fake\\.claude\\jobs\\ab12cd34\\' })
     await start($)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: /перезапуск: claude respawn ab12cd34/ })).toBeDefined()

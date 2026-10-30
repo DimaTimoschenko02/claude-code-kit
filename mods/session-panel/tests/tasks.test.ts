@@ -5,6 +5,7 @@ import type { On } from 'claude-code'
 import { cardTitle, idOfFile, mentionedIds } from '../hooks/cards'
 import { FRESH_REPLIES, taskRegex } from '../hooks/logic'
 import type { Panel } from '../types'
+import { fixturePath } from './fixture-path'
 
 const SID = 'sess-tasks'
 // The project reaches the cards through a folder linked into the vault; epics are folders of their tasks.
@@ -45,7 +46,7 @@ function world(on: On): World {
   on('session.id', () => ({ value: SID }))
   on('fs.list', (_$, e) => {
     w.lists++
-    const dir = e.path.replace(/\/+$/, '')
+    const dir = fixturePath(e.path).replace(/\/+$/, '')
     if (w.disk.get(dir)?.kind !== 'dir') return { deny: `ENOENT ${e.path}` }
     const entries = [...w.disk]
       .filter(([p]) => p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes('/'))
@@ -53,10 +54,11 @@ function world(on: On): World {
     return { value: entries }
   })
   on('fs.read', (_$, e) => {
-    const text = w.disk.get(e.path)?.text
+    const text = w.disk.get(fixturePath(e.path))?.text
     return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
   })
-  on('fs.stat', (_$, e) => {
+  on('fs.stat', (_$, raw) => {
+    const e = { ...raw, path: fixturePath(raw.path) }
     const real = (p: string) => (p.startsWith(CARDS) ? `${REAL}${p.slice(CARDS.length)}` : p)
     const node = e.path === VAULT ? { kind: 'dir' as const } : w.disk.get(e.path)
     return node === undefined

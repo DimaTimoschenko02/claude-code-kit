@@ -6,6 +6,7 @@ import { FRESH_REPLIES, SECTION_CAP, emptyPanel, merge, nextTurn, normalize, vie
 import { cardBadge, cardStatus, parsePr, prBadge, pullOf } from '../hooks/status'
 import type { Panel, Pr } from '../types'
 import { taskRegex } from '../hooks/logic'
+import { fixturePath } from './fixture-path'
 
 const SID = 'sess-fresh'
 const CARDS = '/home/fake/vault/tasks'
@@ -147,7 +148,7 @@ function world(on: On): World {
   on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.id', () => ({ value: SID }))
   on('fs.read', (_$, e) => {
-    const text = w.files.get(e.path)
+    const text = w.files.get(fixturePath(e.path))
     return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
   })
   on('process.run', (_$, e) => {
