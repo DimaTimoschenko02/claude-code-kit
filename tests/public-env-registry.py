@@ -1,6 +1,21 @@
 import json
+import os
+import shutil
 import subprocess
 from pathlib import Path
+
+
+def bash_executable():
+    # On Windows a bare `bash` from native Python is the WSL launcher, not Git Bash.
+    if os.name != 'nt':
+        return 'bash'
+    git = shutil.which('git')
+    candidates = [Path(git).parent.parent / 'bin' / 'bash.exe'] if git else []
+    candidates.append(Path(os.environ.get('ProgramFiles', 'C:/Program Files')) / 'Git' / 'bin' / 'bash.exe')
+    return next((str(c) for c in candidates if c.is_file()), 'bash')
+
+
+BASH = bash_executable()
 
 HOOK = str(Path(__file__).resolve().parents[1] / 'hooks' / 'block-secrets.sh')
 cases = []
@@ -18,11 +33,17 @@ for command in ['cat .env.example*', 'cat .env.example?', 'cat .env.example[0-9]
 for path, allowed in [('/project/.env.example', True), ('/project/.env', False), ('/project/.env.example.local', False)]:
     cases.append(({'tool_name': 'apply_patch', 'tool_input': {'command': f'*** Begin Patch\n*** Update File: {path}\n@@\n-a\n+b\n*** End Patch'}}, allowed))
 
+# Windows payload paths come with backslashes; the path patterns must still match.
+for path, allowed in [('C:\\project\\.env.example', True), ('C:\\project\\.env', False),
+                      ('C:\\Users\\x\\.ssh\\id_ed25519', False), ('C:\\Users\\x\\.claude.json', False),
+                      ('C:\\project\\README.md', True)]:
+    cases.append(({'tool_name': 'Read', 'tool_input': {'file_path': path}}, allowed))
+
 for hook in [HOOK]:
     failures = []
     for payload, permitted in cases:
         expected = permitted
-        result = subprocess.run(['bash', hook], input=json.dumps(payload), text=True, capture_output=True)
+        result = subprocess.run([BASH, hook], input=json.dumps(payload), text=True, capture_output=True)
         if (result.returncode == 0) != expected:
             failures.append((payload, result.returncode, result.stderr))
     print('public registry guard', len(cases), 'cases', 'PASS' if not failures else failures)

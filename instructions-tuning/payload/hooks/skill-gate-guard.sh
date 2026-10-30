@@ -45,6 +45,11 @@ tool=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)
 
 ROOT="${CLAUDE_PROJECT_DIR:-$cwd}"
 [ -z "$ROOT" ] && ROOT="$(pwd)"
+# Windows (Git Bash): payload paths arrive as `C:\...`, the root as `C:\...`, `C:/...` or `/c/...`.
+# One spelling for all of them, or the prefix cut below never matches and every edit passes ungated.
+# `-m` (C:/...) keeps the paths usable by native python/node as well as by bash tests.
+win_path() { if command -v cygpath >/dev/null 2>&1 && [ -n "$1" ]; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+ROOT=$(win_path "$ROOT"); cwd=$(win_path "$cwd"); transcript=$(win_path "$transcript")
 
 CONFIG="$ROOT/.claude/skill-gate.config.json"
 [ -f "$CONFIG" ] || exit 0   # no gates configured -> fail-open
@@ -71,6 +76,7 @@ owner() {
 gated=""   # "skill<TAB>path" per governed target
 while IFS= read -r fp; do
   [ -z "$fp" ] && continue
+  fp=$(win_path "$fp")
   r="${fp#"$ROOT"/}"
   # A Claude Code worktree (`.claude/worktrees/<name>/`) is another checkout of the same repo: its `apps/x.ts` is
   # governed like the root's. Without this cut the path keeps the worktree prefix, no gate matches, and the edit

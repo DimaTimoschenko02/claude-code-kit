@@ -69,7 +69,8 @@ is_sensitive_rel() {
 
 # Path patterns considered sensitive — any read/write/edit/grep/glob on these is blocked
 is_sensitive_path() {
-  local p="$1"
+  # Windows paths arrive as `C:\Users\...`: every `*/name` pattern below needs forward slashes.
+  local p="${1//\\//}"
   # The public variable registry is not a file of configured credentials.
   case "$p" in .env.example|*/.env.example) return 1 ;; esac
   case "$p" in
