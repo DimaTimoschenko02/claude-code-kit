@@ -135,6 +135,13 @@ export const EVENTS = ['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'UserP
 
 type Next = (e: never) => Promise<unknown>
 
+/** The table's answer for one event; its systemMessage, which a mod result has no field for, goes up as a toast. */
+async function tableAnswer($: EngineInterface, event: string, input: HookInput, io: HookIo): Promise<ModResult | null> {
+  const out = await runEvent(TABLE, event, input, io)
+  if (out?.systemMessage) $.ui.toast(String(out.systemMessage), { timeoutMs: 15000 })
+  return toModResult(event, out) as ModResult | null
+}
+
 /** One non-PreToolUse event: our rows and the hooks beneath run at once, the answers merge. */
 async function classicEvent(event: string, $: EngineInterface, e: Record<string, unknown>, next: Next): Promise<never> {
     const io = await ioOf($)
@@ -142,8 +149,8 @@ async function classicEvent(event: string, $: EngineInterface, e: Record<string,
       base = { session_id: String(e.session_id), transcript_path: String(e.transcript_path ?? ''), permission_mode: e.permission_mode ? String(e.permission_mode) : undefined }
     }
     const input = { ...e, hook_event_name: event } as HookInput
-    const [beneath, out] = await Promise.all([next(e as never), runEvent(TABLE, event, input, io)])
-    return mergeModResult(beneath as ModResult, toModResult(event, out) as ModResult | null) as never
+    const [beneath, ours] = await Promise.all([next(e as never), tableAnswer($, event, input, io)])
+    return mergeModResult(beneath as ModResult, ours) as never
 }
 
 export const register: Register = (on) => {
@@ -164,7 +171,7 @@ export const register: Register = (on) => {
     on('classic.PreToolUse', async ($, e, next) => {
       const io = await ioOf($)
       const input = await preToolInput($, e as unknown as Record<string, unknown>, io)
-      const ours = toModResult('PreToolUse', await runEvent(TABLE, 'PreToolUse', input, io)) as ModResult | null
+      const ours = await tableAnswer($, 'PreToolUse', input, io)
       if (typeof ours?.deny === 'string') {
         return { deny: ours.deny, ...(ours.additionalContext ? { additionalContext: ours.additionalContext } : {}) }
       }

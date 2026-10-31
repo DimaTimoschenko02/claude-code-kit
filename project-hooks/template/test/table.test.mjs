@@ -5,8 +5,12 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { HOOKS } from '../core/index.mjs';
+import * as table from '../core/index.mjs';
 import { ROOT } from '../node/runner.mjs';
+
+const { HOOKS } = table;
+/** Command hooks the table keeps in settings on purpose, each with its reason: `[{ command: /re/, why }]`. */
+const KEPT = table.KEPT_COMMAND_HOOKS ?? [];
 
 test('every row has a unique name, one event or more, a run or a script, and its script exists', () => {
   const names = HOOKS.map((h) => h.name);
@@ -19,12 +23,14 @@ test('every row has a unique name, one event or more, a run or a script, and its
   }
 });
 
-test('.claude/settings*.json has no command hooks: the mod runs the table, and a hook left there runs twice', () => {
+test('.claude/settings*.json has no command hooks but the kept ones: the mod runs the table, a hook left there runs twice', () => {
+  for (const k of KEPT) assert.ok(k.command instanceof RegExp && String(k.why ?? '').trim(), `kept hook ${k.command}: needs a regexp and a why`);
   for (const name of ['settings.json', 'settings.local.json']) {
     const file = join(ROOT, '.claude', name);
     if (!existsSync(file)) continue;
     const groups = Object.values(JSON.parse(readFileSync(file, 'utf8')).hooks ?? {}).flat();
-    const commands = groups.flatMap((g) => g.hooks ?? []).filter((h) => h.type === 'command').map((h) => h.command);
-    assert.deepEqual(commands, [], `${name}: move these into core/index.mjs`);
+    const commands = groups.flatMap((g) => g.hooks ?? []).filter((h) => h.type === 'command').map((h) => String(h.command));
+    const left = commands.filter((c) => !KEPT.some((k) => k.command.test(c)));
+    assert.deepEqual(left, [], `${name}: move these into core/index.mjs, or keep one in KEPT_COMMAND_HOOKS with its why`);
   }
 });

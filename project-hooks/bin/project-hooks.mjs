@@ -89,17 +89,26 @@ async function tableOf(target) {
   return HOOKS;
 }
 
+/** A JSON file's value; null when it is missing. A file there that does not parse throws: we never write over it. */
 const readJson = (file) => {
+  if (!existsSync(file)) return null;
+  const text = readFileSync(file, 'utf8').replace(/^﻿/, '');
   try {
-    return JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    return null;
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${file} does not parse (${error.message}): fix it by hand, it may hold other hooks`);
   }
 };
 
+/** Our groups into <root>/.codex/hooks.json. Returns the file, or null when nothing had to be written. */
 export async function writeCodexHooks(root, { dir = 'project-hooks' } = {}) {
   const file = join(root, '.codex', 'hooks.json');
-  const next = mergeCodexHooks(readJson(file), codexGroups(await tableOf(join(root, '.claude', 'skills', dir)), dir));
+  const current = readJson(file);
+  const groups = codexGroups(await tableOf(join(root, '.claude', 'skills', dir)), dir);
+  // a table Codex does not run creates no file; a file already right stays as it is, byte for byte
+  if (current === null && !Object.keys(groups).length) return null;
+  const next = mergeCodexHooks(current, groups);
+  if (JSON.stringify(next) === JSON.stringify(current)) return null;
   mkdirSync(dirname(file), { recursive: true });
   writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
   return file;
@@ -119,7 +128,8 @@ export async function install(root, { dir = 'project-hooks', name = `${basename(
     writeFileSync(manifest, readFileSync(join(TEMPLATE, '.claude-plugin', 'plugin.json'), 'utf8').replace('__NAME__', name));
     written.push('.claude-plugin/plugin.json');
   }
-  written.push(await writeCodexHooks(root, { dir }));
+  const codexFile = await writeCodexHooks(root, { dir });
+  if (codexFile) written.push(codexFile);
   return { target, written };
 }
 
@@ -131,7 +141,8 @@ export async function check(root, { dir = 'project-hooks' } = {}) {
   });
   const codexFile = join(root, '.codex', 'hooks.json');
   const current = readJson(codexFile);
-  const wanted = mergeCodexHooks(current, codexGroups(await tableOf(target), dir));
+  const groups = codexGroups(await tableOf(target), dir);
+  const wanted = current === null && !Object.keys(groups).length ? null : mergeCodexHooks(current, groups);
   if (JSON.stringify(current) !== JSON.stringify(wanted)) drift.push('.codex/hooks.json (run: project-hooks codex <root>)');
   return drift;
 }
@@ -147,7 +158,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const { target, written } = await install(root, { dir, name: option(args, '--name', undefined) });
     process.stdout.write(`${target}\n${written.map((f) => `  ${f}`).join('\n')}\n`);
   } else if (command === 'codex') {
-    process.stdout.write(`${await writeCodexHooks(root, { dir })}\n`);
+    process.stdout.write(`${(await writeCodexHooks(root, { dir })) ?? '.codex/hooks.json already matches the table'}\n`);
   } else {
     const drift = await check(root, { dir });
     if (drift.length) {

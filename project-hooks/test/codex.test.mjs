@@ -2,7 +2,7 @@
 // Run: node --test project-hooks/test/
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -66,6 +66,7 @@ test('install lays the shells, keeps the table, writes the Codex groups beside o
   await install(root, { name: 'p-hooks' });
   const dir = join(root, '.claude/skills/project-hooks');
   writeFileSync(join(dir, 'core/index.mjs'), TABLE);
+  mkdirSync(join(root, '.codex'), { recursive: true });
   writeFileSync(join(root, '.codex/hooks.json'), JSON.stringify({ description: 'mine', hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo theirs' }] }] } }));
   await install(root, { name: 'p-hooks' });
   assert.equal(readFileSync(join(dir, 'core/index.mjs'), 'utf8'), TABLE, 'the table is the project\'s own');
@@ -78,6 +79,23 @@ test('install lays the shells, keeps the table, writes the Codex groups beside o
   assert.equal(codex.hooks.PreToolUse[0].hooks[0].commandWindows, 'node .claude/skills/project-hooks/node/runner.mjs PreToolUse --codex');
   await install(root, { name: 'p-hooks' });
   assert.equal(JSON.parse(readFileSync(join(root, '.codex/hooks.json'), 'utf8')).hooks.Stop.length, 2, 'a second install replaces ours');
+});
+
+test('install creates no Codex file for a Claude-only table, keeps a right one byte for byte, never writes over a broken one', async () => {
+  const root = project();
+  await install(root);
+  writeFileSync(join(root, '.claude/skills/project-hooks/core/index.mjs'), "export const HOOKS = [{ name: 'c', event: 'Stop', codex: false, run: () => null }];\n");
+  rmSync(join(root, '.codex'), { recursive: true, force: true });
+  await install(root);
+  assert.equal(existsSync(join(root, '.codex')), false, 'a Claude-only table writes no Codex file');
+  mkdirSync(join(root, '.codex'));
+  const theirs = '\uFEFF{\r\n  "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "echo theirs" } ] } ] }\r\n}\r\n';
+  writeFileSync(join(root, '.codex/hooks.json'), theirs);
+  await install(root);
+  assert.equal(readFileSync(join(root, '.codex/hooks.json'), 'utf8'), theirs, 'nothing of ours to add: their file stays as it was');
+  writeFileSync(join(root, '.codex/hooks.json'), '{ broken');
+  await assert.rejects(install(root), /does not parse/);
+  assert.equal(readFileSync(join(root, '.codex/hooks.json'), 'utf8'), '{ broken');
 });
 
 test('the runner answers as a command hook, and translates under --codex', async () => {

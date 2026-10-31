@@ -28,7 +28,8 @@ export const HOOKS = [
 
 A row answers as a command hook does: a classic output object, a string (additionalContext), or nothing. A script
 answers with its stdout (JSON or text) and exit code (2 blocks with stderr). The rows of an event run at once,
-except PreToolUse, which runs them in order and stops at the first deny. A row that throws is skipped.
+except PreToolUse, which runs them in order and stops at the first deny. A row that throws is skipped, so a gate
+that must fail closed catches its own errors. A mod result has no `systemMessage`: the mod shows it as a toast.
 
 `hooks/match.mjs` holds the pure matchers rows share (`isGitCommit`, `bashCommand`); a project's own script can
 import them too, so the mod's gate and the script agree.
@@ -47,9 +48,12 @@ node ~/claude-code-kit/project-hooks/bin/project-hooks.mjs check <root>   # shel
 ```
 
 `install` copies the shells over the old ones and keeps `core/index.mjs` and `plugin.json`; it rewrites only our
-groups in `.codex/hooks.json`. Then remove the same hooks from `.claude/settings.json` in the same commit, or they
-run twice: `node --test .claude/skills/project-hooks/test/` fails while one is left there, or a row's script is
-missing. A project whose formatter or linter runs on commit must skip `.claude/` (eslint `ignores`,
+groups in `.codex/hooks.json`, writes nothing when they are already right or the table has no Codex rows, and stops
+on a file it cannot parse rather than write over someone's hooks. Then remove the same hooks from
+`.claude/settings.json` in the same commit, or they run twice: `node --test .claude/skills/project-hooks/test/*.test.mjs`
+fails while one is left there, or a row's script is missing. A command hook kept there on purpose (a gate that must
+work where the mod may not load) is listed with its reason in the table's `KEPT_COMMAND_HOOKS`:
+`[{ command: /trust-check\.sh/, why: '…' }]`. A project whose formatter or linter runs on commit must skip `.claude/` (eslint `ignores`,
 `.prettierignore`): the shells are not in its tsconfig, and a reformatted shell drifts from the kit.
 
 ## Limits
