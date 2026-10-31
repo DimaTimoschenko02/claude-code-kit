@@ -1,0 +1,6 @@
+{
+  "name": "__NAME__",
+  "version": "1.0.0",
+  "author": { "name": "Dima Timoschenko" },
+  "description": "This project's hooks as one table for Claude Code (this mod) and Codex (node/runner.mjs), from claude-code-kit/project-hooks"
+}
