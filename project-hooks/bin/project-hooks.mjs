@@ -9,9 +9,11 @@
 //   project-hooks codex <root> [--dir project-hooks]
 //       only the .codex/hooks.json step: run it after the table gains or loses an event or a matcher.
 //   project-hooks check <root> [--dir project-hooks]
-//       exit 1 and what drifted when a shell differs from the kit's or .codex/hooks.json from the table.
+//       exit 1 and what is wrong when a shell differs from the kit's, .codex/hooks.json from the table, or the table
+//       imports a file outside the mod folder, a missing one or one git does not track.
+import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const TEMPLATE = join(dirname(fileURLToPath(import.meta.url)), '..', 'template');
@@ -133,12 +135,56 @@ export async function install(root, { dir = 'project-hooks', name = `${basename(
   return { target, written };
 }
 
+const RELATIVE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(?\s*)['"](\.{1,2}\/[^'"]+)['"]/g;
+
+/**
+ * The files the table reaches through relative imports, and what is wrong with them. Claude Code loads a mod only
+ * from inside its folder and skips a mod that fails to load without a word, so a file outside it or a missing one
+ * turns every hook off.
+ */
+export function tableImports(target) {
+  const seen = new Set();
+  const problems = [];
+  const visit = (file) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    // comments go first: a JSDoc type import('../hooks/contract') is never loaded
+    const code = readFileSync(file, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    for (const [, spec] of code.matchAll(RELATIVE_IMPORT)) {
+      const next = resolve(dirname(file), spec);
+      const inside = relative(target, next);
+      const from = relative(target, file).replaceAll('\\', '/');
+      if (inside.startsWith('..') || isAbsolute(inside)) problems.push(`${from} imports ${spec}: outside the mod folder, Claude Code refuses it`);
+      else if (!existsSync(next)) problems.push(`${from} imports ${spec}: no such file`);
+      else visit(next);
+    }
+  };
+  visit(join(target, 'core', 'index.mjs'));
+  return { files: [...seen], problems };
+}
+
+/** Files git does not track: on disk here, missing on every other clone. Empty outside a git work tree. */
+function untracked(root, files) {
+  const paths = files.map((f) => relative(root, f).replaceAll('\\', '/'));
+  let listed;
+  try {
+    listed = execFileSync('git', ['ls-files', '-z', '--', ...paths], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  } catch {
+    return [];
+  }
+  const tracked = new Set(listed.split('\0'));
+  return paths.filter((p) => !tracked.has(p));
+}
+
 export async function check(root, { dir = 'project-hooks' } = {}) {
   const target = join(root, '.claude', 'skills', dir);
   const drift = SHELLS.filter((file) => {
     const theirs = join(target, file);
     return !existsSync(theirs) || readFileSync(theirs, 'utf8') !== readFileSync(join(TEMPLATE, file), 'utf8');
   });
+  const { files, problems } = tableImports(target);
+  drift.push(...problems, ...untracked(root, files).map((p) => `${p}: not tracked by git, other clones lose the mod (git add it)`));
+  if (problems.length) return drift;
   const codexFile = join(root, '.codex', 'hooks.json');
   const current = readJson(codexFile);
   const groups = codexGroups(await tableOf(target), dir);
@@ -162,9 +208,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   } else {
     const drift = await check(root, { dir });
     if (drift.length) {
-      process.stdout.write(`drifted:\n${drift.map((f) => `  ${f}`).join('\n')}\n`);
+      process.stdout.write(`check failed:\n${drift.map((f) => `  ${f}`).join('\n')}\n`);
       process.exit(1);
     }
-    process.stdout.write('shells match the kit, .codex/hooks.json matches the table\n');
+    process.stdout.write('shells match the kit, the table imports only tracked files inside the mod, .codex/hooks.json matches the table\n');
   }
 }

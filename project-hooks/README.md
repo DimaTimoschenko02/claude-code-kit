@@ -44,7 +44,7 @@ stays a script.
 ```bash
 node ~/claude-code-kit/project-hooks/bin/project-hooks.mjs install <root> --name <project>-hooks
 node ~/claude-code-kit/project-hooks/bin/project-hooks.mjs codex <root>   # after the table's events or matchers change
-node ~/claude-code-kit/project-hooks/bin/project-hooks.mjs check <root>   # shells and .codex/hooks.json up to date?
+node ~/claude-code-kit/project-hooks/bin/project-hooks.mjs check <root>   # shells, table imports, .codex/hooks.json?
 ```
 
 `install` copies the shells over the old ones and keeps `core/index.mjs` and `plugin.json`; it rewrites only our
