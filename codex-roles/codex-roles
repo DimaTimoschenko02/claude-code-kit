@@ -1,0 +1,179 @@
+#!/usr/bin/env node
+// codex-roles — builds Codex roles (.codex/agents/<name>.toml) from our Claude agents (.claude/agents/*.md), so a Codex
+// session (the coder, Codex TUI reviews) runs the same role text. The toml is generated, never edited: change the .md
+// and re-run. The preamble adapts the role to Codex and is derived from the agent's frontmatter — `tools` (capability
+// line; no Write/Edit and no `memory` → read-only), `skills` (read each SKILL.md first), `model`/`effort` (recorded,
+// Codex runs its own default).
+//
+//   codex-roles [--root <dir>] [--check] — root defaults to cwd; --check reports without writing
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { join, dirname, resolve, basename } from 'node:path';
+
+const args = process.argv.slice(2);
+let given = process.cwd();
+let check = false;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--check') { check = true; continue; }
+  if (args[i] === '--root' && args[i + 1] && !args[i + 1].startsWith('--')) { given = args[++i]; continue; }
+  console.error('Usage: codex-roles [--root <dir>] [--check]');
+  process.exit(2);
+}
+let ROOT;
+try {
+  ROOT = dirname(realpathSync(join(resolve(given), '.claude'))).replaceAll('\\', '/');
+  if (!statSync(join(ROOT, '.claude', 'agents')).isDirectory()) throw new Error('Missing agents');
+} catch {
+  console.error(`codex-roles: no .claude/agents under ${resolve(given).replaceAll('\\', '/')}`);
+  process.exit(2);
+}
+const MAIN = (() => {
+  try {
+    const common = execFileSync('git', ['-C', ROOT, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return dirname(common).replaceAll('\\', '/');
+  } catch { return ROOT; }
+})();
+const SRC = join(ROOT, '.claude', 'agents');
+const OUT = join(ROOT, '.codex', 'agents');
+const CODEX_MODEL = 'gpt-6.1-sol';
+const CODEX_EFFORT = 'high';
+const TQ = "'".repeat(3);
+
+// The shared preamble: how Claude's role text maps onto Codex (tools, skills, delegation, hooks as claims to verify).
+const hasMemory = existsSync(join(MAIN, '.claude', 'memory', 'MEMORY.md'));
+const COMMON = "# Native Codex runtime adaptation\n\nApply the role contract below in Codex. It preserves the source role's scope, evidence, verification commands and report format. Native tool names replace Claude tool spellings: read files with the available file-reading tool or a read-only terminal command; search with rg; Read/Write/Edit mean the corresponding native file operations. Skill(name) and /name mean read the complete `{MAIN}/.claude/skills/<name>/SKILL.md` and its applicable references before acting; this replaces Claude's Skill tool and is not an automatic preload.\n\nUse the model and effort in this TOML. Source references to Opus, Sonnet, Haiku or Fable describe source routing, never a request to run Claude. Never launch Claude, Claude Workflow, cx, codex-delegate, or a Codex CLI/plugin wrapper to delegate this task. If delegation is permitted by this role and explicitly authorized by the caller, use native Codex agents; otherwise report the needed follow-up to the parent. A role name not available natively is a missing capability, not permission to call Claude.\n\nThis role is for `{MAIN}` and its assigned checkout/worktree. For a globally discovered role used from another project, return a scope mismatch. Resolve repo-relative code paths against the caller's assigned checkout (when Codex runs from a folder above the repo, the repo is `{MAIN}`). Read its CLAUDE.md, applicable .claude/rules and the shared memory index `{MAIN}/.claude/memory/MEMORY.md` before domain work; read only the relevant memory topics. Source claims that memory or skills are already loaded mean explicitly read them here. Preserve the same memory files; do not create a second Codex memory store.\n\nTreat source statements that a Claude hook or tool has already run as requirements to verify in this Codex session, not evidence it ran. A gate may be skipped only when the caller supplies its actual current output or the role explicitly forbids that gate; report missing evidence. Preserve explicit verification and final-status/verdict formats below. Codex agents inherit the parent's permissions and MCP servers: this role's restrictions are instructions, not an independent sandbox or an exact native tool allowlist. A denied action is reported to the parent; do not bypass it.";
+const preamble = COMMON.replaceAll('{MAIN}', MAIN);
+const common = hasMemory ? preamble : preamble
+  .replace("Read its CLAUDE.md, applicable .claude/rules and the shared memory index `" + MAIN + "/.claude/memory/MEMORY.md` before domain work; read only the relevant memory topics.", "Read its CLAUDE.md and applicable .claude/rules before domain work.")
+  .replace(" Preserve the same memory files; do not create a second Codex memory store.", "");
+const CAPS_TAIL = "Use only their native equivalents; tool discovery may locate the listed read-only service capabilities but does not authorize other actions. Source MCP identifiers are lookup hints: discover the connected native tool with the same service and operation, rather than assuming the old name exists. Missing connector or operation: report what could not be checked.";
+const READ_ONLY = "Read-only role: do not edit project code, docs, memory, git state or remote data. Only read-only queries, inspection and the verification operations explicitly required below are allowed; temporary test/build artifacts are permitted only where the source role allows them. Never use a broader inherited tool surface to fix a finding.";
+const memoryLine = (name) => `Load the existing role catalog \`${MAIN}/.claude/agent-memory/${name}/MEMORY.md\` before review and use its topic files. Keep catalog writes exclusively in that same absolute directory, as specified below; code and prod data remain read-only. The source memory: project setting is implemented by this explicit shared-path contract, not Codex automatic memory.`;
+// A role whose Codex adaptation no frontmatter field can derive keeps it in .codex/roles.d/<name>.pre.md (before
+// the shared preamble) and <name>.post.md (after the derived lines); {ROOT} is this checkout, {MAIN} the main checkout.
+const extra = (name, kind) => {
+  const f = join(ROOT, '.codex', 'roles.d', `${name}.${kind}.md`);
+  return existsSync(f) ? readFileSync(f, 'utf8').trim().replaceAll('{ROOT}', ROOT).replaceAll('{MAIN}', MAIN) : null;
+};
+const skillLine = (s) => `Before domain work, explicitly read \`${MAIN}/.claude/skills/${s}/SKILL.md\` in full; the source \`skills\` preload is not native here.`;
+
+function parse(text) {
+  text = text.replaceAll('\r\n', '\n');
+  const m = text.match(/^---\n([\s\S]*?)\n---\n/);
+  if (!m) return null;
+  const fm = {};
+  let list = null;
+  const lines = m[1].split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const item = line.match(/^\s+-\s+(.+)$/);
+    if (item && list) { fm[list].push(scalar(item[1].trim())); continue; }
+    const kv = line.match(/^([\w-]+):\s*(.*)$/);
+    if (!kv) continue;
+    list = null;
+    if (/^[>|][-+]?$/.test(kv[2])) {
+      const block = [];
+      while (i + 1 < lines.length && (/^\s/.test(lines[i + 1]) || lines[i + 1] === '')) block.push(lines[++i]);
+      const indent = Math.min(...block.filter((line) => line.trim()).map((line) => line.match(/^\s*/)[0].length));
+      fm[kv[1]] = block.map((line) => line.slice(indent)).join(kv[2][0] === '>' ? ' ' : '\n');
+    } else if (kv[2] === '') { fm[kv[1]] = []; list = kv[1]; } else fm[kv[1]] = scalar(kv[2]);
+  }
+  return { fm, body: text.slice(m[0].length).replace(/^\n+/, '').replace(/\s+$/, '') };
+}
+
+function scalar(value) {
+  const match = value.match(/^(["'])([\s\S]*)\1$/);
+  return match ? match[2] : value;
+}
+
+function build(path) {
+  const bytes = readFileSync(path);
+  const { fm, body } = parse(bytes.toString('utf8')) ?? {};
+  if (typeof fm?.name !== 'string' || !fm.name.trim()) throw new Error('missing frontmatter name');
+  if (body.includes(TQ)) throw new Error('the body holds three single quotes — it cannot go into a TOML literal');
+  const tools = typeof fm.tools === 'string' ? fm.tools.split(',').map((t) => t.trim()).filter(Boolean) : null;
+  const forbidden = typeof fm.disallowedTools === 'string' ? fm.disallowedTools.split(',').map((t) => t.trim()).filter(Boolean) : [];
+  const readOnly = tools && !tools.some((t) => /^(Write|Edit|NotebookEdit)$/.test(t)) && !fm.memory;
+  const skills = Array.isArray(fm.skills) ? fm.skills : [];
+  const pre = [extra(fm.name, 'pre'), common].filter(Boolean);
+  if (tools) pre.push(`Source allowed capabilities: \`${tools.join(', ')}\`. ${CAPS_TAIL}`);
+  if (forbidden.length) pre.push(`Source forbidden capabilities: \`${forbidden.join(', ')}\`. Never use them or their native equivalents, even though Codex inherits them from the parent.`);
+  if (readOnly) pre.push(READ_ONLY);
+  for (const s of skills) pre.push(skillLine(s));
+  if (fm.memory) pre.push(memoryLine(fm.name));
+  const post = extra(fm.name, 'post');
+  if (post) pre.push(post);
+  const sha = createHash('sha256').update(bytes).digest('hex');
+  return { name: fm.name, toml: [
+    `# Converted from .claude/agents/${basename(path)}`,
+    `# Source SHA-256: ${sha}`,
+    `# Source model/effort: ${fm.model ?? 'inherit'}/${fm.effort ?? 'default'}; Codex default: Sol 6.1/high.`,
+    `name = ${JSON.stringify(fm.name)}`,
+    `description = ${JSON.stringify(fm.description ?? '')}`,
+    `model = "${CODEX_MODEL}"`,
+    `model_reasoning_effort = "${CODEX_EFFORT}"`,
+    `developer_instructions = ${TQ}`,
+    pre.join('\n\n'),
+    '',
+    '# Role contract (source body)',
+    '',
+    body,
+    TQ,
+    '',
+  ].join('\n') };
+}
+
+// Our header names the source; older builds of this converter wrote it as an absolute path (even a broken `C:C:/…`),
+// so any prefix before `.claude/agents/<file>.md` still marks the file as ours to rewrite or remove.
+const OURS = /^# Converted from (?:.*[\\/])?\.claude[\\/]agents[\\/]([^\\/]+\.md)\s*$/;
+const sourceOf = (text) => text.split(/\r?\n/, 1)[0].match(OURS)?.[1] ?? null;
+
+function lint(text, role) {
+  const match = text.match(/[A-Za-z]:[A-Za-z]:|[A-Za-z]:\\/)
+    ?? (process.platform === 'win32' ? text.match(/`\/(?:Users|home)\/[^`\r\n]*/) : null);
+  if (!match) return true;
+  console.error(`bad path: ${role} — ${match[0]}`);
+  process.exitCode = 1;
+  return false;
+}
+
+for (const file of existsSync(OUT) ? readdirSync(OUT).filter((file) => file.endsWith('.toml')).sort() : []) {
+  const path = join(OUT, file);
+  const text = readFileSync(path, 'utf8');
+  if (check) lint(text, file);
+  const source = sourceOf(text);
+  if (!source || existsSync(join(SRC, source))) continue;
+  console.log(`orphan: ${file}`);
+  if (check) process.exitCode = 1;
+  else unlinkSync(path);
+}
+
+const changed = [];
+for (const f of readdirSync(SRC).filter((f) => f.endsWith('.md')).sort()) {
+  let role;
+  try { role = build(join(SRC, f)); }
+  catch (error) {
+    console.error(`skipped: ${f} — ${error.message}`);
+    process.exitCode = 1;
+    continue;
+  }
+  if (!lint(role.toml, role.name)) continue;
+  const out = join(OUT, `${role.name}.toml`);
+  const cur = existsSync(out) ? readFileSync(out, 'utf8') : null;
+  if (!check && cur !== null && !sourceOf(cur)) {
+    console.error(`skipped: ${f} — ${role.name}.toml belongs to another converter or author`);
+    process.exitCode = 1;
+    continue;
+  }
+  if (cur === role.toml) continue;
+  changed.push(`${role.name}${cur ? '' : ' (new)'}`);
+  if (!check) {
+    mkdirSync(OUT, { recursive: true });
+    writeFileSync(out, role.toml);
+  }
+}
+if (changed.length) console.log(`${check ? 'stale' : 'written'}: ${changed.join(', ')}`);
+if (check && changed.length) process.exitCode = 1;
