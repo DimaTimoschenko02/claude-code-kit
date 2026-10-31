@@ -7,11 +7,15 @@ Run from the kit root: python3 -B -m unittest discover -s instructions-tuning/te
 """
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
 
-GATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "payload", "hooks", "skill-gate-guard.sh")
+HOOKS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "payload", "hooks")
+# SKILL_GATE_IMPL=node runs the same cases against the node port (skill-gate-guard.mjs).
+GATE_CMD = (["node", os.path.join(HOOKS, "skill-gate-guard.mjs")] if os.environ.get("SKILL_GATE_IMPL") == "node"
+            else [shutil.which("bash") or "bash", os.path.join(HOOKS, "skill-gate-guard.sh")])
 SID = "s-1"
 
 
@@ -64,7 +68,7 @@ class Gate(unittest.TestCase):
             env["HOME"] = root
             if codex:
                 env["CODEX_COMPAT"] = "1"
-            return subprocess.run(["bash", GATE], input=json.dumps(payload), capture_output=True, text=True,
+            return subprocess.run(GATE_CMD, input=json.dumps(payload), capture_output=True, text=True,
                                   env=env).returncode
 
     def test_skill_loaded_after_compaction_passes(self):
