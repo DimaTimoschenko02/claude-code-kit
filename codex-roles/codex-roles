@@ -130,6 +130,9 @@ function build(path) {
 // so any prefix before `.claude/agents/<file>.md` still marks the file as ours to rewrite or remove.
 const OURS = /^# Converted from (?:.*[\\/])?\.claude[\\/]agents[\\/]([^\\/]+\.md)\s*$/;
 const sourceOf = (text) => text.split(/\r?\n/, 1)[0].match(OURS)?.[1] ?? null;
+// We never write TOML tables, so a table in a file of ours (`[features]` shell_tool = false…) is a hand-added hard gate:
+// rewriting or deleting the file would silently drop it. Tables inside the ''' instruction strings do not count.
+const handTables = (text) => text.replace(/'''[\s\S]*?'''/g, '').match(/^[ \t]*\[[^\]\r\n]+\][ \t]*$/gm) ?? [];
 
 function lint(text, role) {
   const match = text.match(/[A-Za-z]:[A-Za-z]:|[A-Za-z]:\\/)
@@ -146,8 +149,9 @@ for (const file of existsSync(OUT) ? readdirSync(OUT).filter((file) => file.ends
   if (check) lint(text, file);
   const source = sourceOf(text);
   if (!source || existsSync(join(SRC, source))) continue;
-  console.log(`orphan: ${file}`);
-  if (check) process.exitCode = 1;
+  const tables = handTables(text);
+  console.log(`orphan: ${file}${tables.length ? ` (kept: hand-added ${tables.join(' ')})` : ''}`);
+  if (check || tables.length) process.exitCode = 1;
   else unlinkSync(path);
 }
 
@@ -165,6 +169,12 @@ for (const f of readdirSync(SRC).filter((f) => f.endsWith('.md')).sort()) {
   const cur = existsSync(out) ? readFileSync(out, 'utf8') : null;
   if (!check && cur !== null && !sourceOf(cur)) {
     console.error(`skipped: ${f} — ${role.name}.toml belongs to another converter or author`);
+    process.exitCode = 1;
+    continue;
+  }
+  const tables = cur === null ? [] : handTables(cur);
+  if (tables.length) {
+    console.error(`skipped: ${f} — ${role.name}.toml has hand-added ${tables.join(' ')}; keep it by hand (drop the header) or delete it to regenerate`);
     process.exitCode = 1;
     continue;
   }

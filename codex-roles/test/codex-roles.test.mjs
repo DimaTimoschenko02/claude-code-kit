@@ -311,3 +311,32 @@ await test('a foreign TOML with the same name as a source role is never overwrit
     assert.equal(readFileSync(path, 'utf8'), text);
   }
 });
+
+await test('a role of ours with a hand-added TOML table is never rewritten or deleted', (t) => {
+  const { root } = fixture(t);
+  assert.equal(run(root).status, 0);
+  const path = join(root, '.codex/agents', `${ROLE}.toml`);
+  const text = `${readFileSync(path, 'utf8')}\n[features]\nshell_tool = false\n`;
+  writeFileSync(path, text);
+  for (const args of [['--check'], []]) {
+    const result = run(root, ...args);
+    assert.equal(result.status, 1);
+    assert.ok(result.stderr.includes(`skipped: ${ROLE}.md — ${ROLE}.toml has hand-added [features]`), result.stderr);
+    assert.equal(readFileSync(path, 'utf8'), text);
+  }
+  rmSync(join(root, '.claude/agents', `${ROLE}.md`));
+  const orphan = run(root);
+  assert.equal(orphan.status, 1);
+  assert.match(orphan.stdout, /orphan: fixture-reader\.toml \(kept: hand-added \[features\]\)/);
+  assert.equal(readFileSync(path, 'utf8'), text);
+});
+
+await test('a bracketed line inside the instruction string is not a hand-added table', (t) => {
+  const { root } = fixture(t);
+  writeFileSync(join(root, '.codex/roles.d', `${ROLE}.post.md`), '[features]\n');
+  assert.equal(run(root).status, 0);
+  writeFileSync(join(root, '.codex/roles.d', `${ROLE}.post.md`), 'changed\n');
+  const result = run(root);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(readRole(root).includes('changed\n'));
+});

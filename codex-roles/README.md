@@ -17,7 +17,9 @@ node ~/claude-code-kit/codex-roles/codex-roles [--root <project>] [--check]
 - **Extras per role**: `<root>/.codex/roles.d/<name>.pre.md` and `.post.md`, placeholders `{ROOT}` and `{MAIN}`.
 - **Ours vs foreign**: a toml whose first line is `# Converted from …/.claude/agents/<file>.md` is ours and gets
   rewritten, whatever path prefix an older build wrote. A toml without that header is never written or deleted.
-  An orphan (our header, source `.md` gone) is listed by `--check` and deleted on write.
+  An orphan (our header, source `.md` gone) is listed by `--check` and deleted on write. The converter never writes
+  TOML tables, so a file of ours that has one (`[features]` with `shell_tool = false`, `[skills]`…) carries
+  hand-added hard gates: it is skipped, never rewritten or deleted, and the run exits 1 naming the tables.
 - **Path lint**: `X:X:`, `X:\` and, on Windows, a backticked macOS or Linux home path fail the role; it is not
   written.
 
