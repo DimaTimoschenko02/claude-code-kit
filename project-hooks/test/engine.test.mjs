@@ -112,5 +112,18 @@ test('isGitCommit: through global options and chains, not inside a heredoc', asy
   assert.ok(isGitCommit('npm test && git commit -am x'));
   assert.equal(isGitCommit('git commit-tree x'), false);
   assert.equal(isGitCommit("cat <<'EOF'\ngit commit -m x\nEOF"), false);
+  assert.ok(isGitCommit("git commit -F - <<'EOF'\nmsg\nEOF"));
+  for (const wrapped of [
+    'sudo git commit -m x', '/usr/bin/git commit', 'git.exe commit', 'GIT_AUTHOR_NAME=x env git commit',
+    'git --work-tree w --git-dir g commit', 'if x; then git commit -m y; fi', "bash -c 'git commit -m x'",
+    'echo `git commit -m x`', 'echo "<<EOF"\ngit commit -m x', 'cat <<< "x"\ngit commit -m y',
+  ]) assert.ok(isGitCommit(wrapped), wrapped);
+  for (const plain of ['grep -n "git commit" f', 'echo git commit', 'git log --grep commit']) {
+    assert.equal(isGitCommit(plain), false, plain);
+  }
+  // a gate runs on every Bash call: a long command with many starts stays linear
+  const started = performance.now();
+  for (const unit of [';', '(a', ';a=', '; ']) isGitCommit(unit.repeat(20000));
+  assert.ok(performance.now() - started < 200, 'isGitCommit is quadratic somewhere');
   assert.equal(bashCommand({ tool_name: 'Read', tool_input: { command: 'git commit' } }), '');
 });
