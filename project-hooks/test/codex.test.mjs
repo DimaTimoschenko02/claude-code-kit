@@ -74,7 +74,7 @@ test('install lays the shells, keeps the table, writes the Codex groups beside o
   assert.equal(codex.description, 'mine');
   assert.deepEqual(Object.keys(codex.hooks).sort(), ['PreToolUse', 'SessionStart', 'Stop']);
   assert.equal(codex.hooks.Stop.length, 2, 'their Stop hook stays, ours is added');
-  assert.equal(codex.hooks.PreToolUse[0].matcher, '^(Read|Edit|Write)$');
+  assert.equal(codex.hooks.PreToolUse[0].matcher, undefined, 'tool rows match after translation, in the runner');
   assert.equal(codex.hooks.PreToolUse[0].hooks[0].commandWindows, 'node .claude/skills/project-hooks/node/runner.mjs PreToolUse --codex');
   await install(root, { name: 'p-hooks' });
   assert.equal(JSON.parse(readFileSync(join(root, '.codex/hooks.json'), 'utf8')).hooks.Stop.length, 2, 'a second install replaces ours');
@@ -100,7 +100,11 @@ test('codexGroups: no matcher when a row has none, none for events Codex ignores
     { name: 'b', event: 'PostToolUse' },
     { name: 'c', event: 'UserPromptSubmit', matcher: /x/ },
     { name: 'd', event: 'SessionEnd' },
+    { name: 'e', event: 'SessionStart', matcher: /^(startup|clear)$/ },
+    { name: 'f', event: 'SubagentStart', matcher: /^x$/i },
   ]);
+  assert.equal(groups.SessionStart[0].matcher, '^(startup|clear)$');
+  assert.equal(groups.SubagentStart[0].matcher, undefined, 'a flag Codex cannot carry widens to all');
   assert.equal(groups.PostToolUse[0].matcher, undefined);
   assert.equal(groups.UserPromptSubmit[0].matcher, undefined);
   assert.equal(groups.SessionEnd[0].hooks[0].timeout, 3);

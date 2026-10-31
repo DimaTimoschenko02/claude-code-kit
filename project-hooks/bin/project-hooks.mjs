@@ -26,6 +26,8 @@ const CODEX_TIMEOUT = { SessionEnd: 3 };
 /** Events Codex has: a table row on any other event runs in Claude Code only. */
 const CODEX_EVENTS = new Set(['PreToolUse', 'PermissionRequest', 'PostToolUse', 'PreCompact', 'PostCompact',
   'UserPromptSubmit', 'SubagentStop', 'Stop', 'SessionStart', 'SubagentStart', 'SessionEnd']);
+/** Events whose input names a tool. */
+const TOOL_EVENTS = new Set(['PreToolUse', 'PostToolUse', 'PermissionRequest']);
 /** Events whose matcher Codex ignores. */
 const NO_MATCHER = new Set(['UserPromptSubmit', 'Stop']);
 
@@ -44,8 +46,11 @@ export function codexGroups(hooks, dir = 'project-hooks') {
   for (const event of [...new Set(hooks.filter((h) => h.codex !== false).flatMap((h) => [h.event].flat()))]) {
     if (!CODEX_EVENTS.has(event)) continue;
     const rows = hooks.filter((h) => h.codex !== false && [h.event].flat().includes(event));
-    const matchers = rows.map((h) => h.matcher?.source);
-    const matcher = NO_MATCHER.has(event) || matchers.some((m) => !m) ? undefined : [...new Set(matchers)].join('|');
+    // A tool event's matcher would meet Codex's own tool names (exec_command, apply_patch, mcp__x__write_file) and
+    // lose the RegExp flags: the runner matches after translating, so Codex gets none. Other events keep the union.
+    const matchers = rows.map((h) => (h.matcher?.flags ? undefined : h.matcher?.source));
+    const matcher = NO_MATCHER.has(event) || TOOL_EVENTS.has(event) || matchers.some((m) => !m)
+      ? undefined : [...new Set(matchers)].join('|');
     const runner = `.claude/skills/${dir}/node/runner.mjs`;
     groups[event] = [{
       ...(matcher ? { matcher } : {}),
