@@ -3,7 +3,7 @@
 // hooks (<root>/.codex/hooks.json) that run the same table through node/runner.mjs.
 //
 //   project-hooks install <root> [--dir project-hooks] [--name <root name>-hooks]
-//       copies the shells (hooks/, node/, core/index.d.mts) over the old ones; creates core/index.mjs and
+//       copies the shells (hooks/, node/, core/index.d.mts, test/) over the old ones; creates core/index.mjs and
 //       .claude-plugin/plugin.json only when they are missing, since those are the project's own; then writes the
 //       table's events into .codex/hooks.json (other hooks there stay).
 //   project-hooks codex <root> [--dir project-hooks]
@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const TEMPLATE = join(dirname(fileURLToPath(import.meta.url)), '..', 'template');
 export const SHELLS = ['hooks/engine.mjs', 'hooks/contract.ts', 'hooks/register.ts', 'hooks/hooks.json',
-  'node/runner.mjs', 'node/codex.mjs', 'core/index.d.mts'];
+  'hooks/match.mjs', 'node/runner.mjs', 'node/codex.mjs', 'core/index.d.mts', 'test/table.test.mjs'];
 const OWN = ['core/index.mjs'];
 /** A Codex hook command of ours is recognised by this part of it. */
 const RUNNER_MARK = '/node/runner.mjs';

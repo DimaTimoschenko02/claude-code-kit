@@ -105,3 +105,12 @@ test('normalPath gives one spelling on Windows and leaves other paths alone', ()
   assert.equal(normalPath('/c', 'win32'), 'C:/');
   assert.equal(normalPath('/Users/x', 'darwin'), '/Users/x');
 });
+
+test('isGitCommit: through global options and chains, not inside a heredoc', async () => {
+  const { isGitCommit, bashCommand } = await import('../template/hooks/match.mjs');
+  assert.ok(isGitCommit('git -C repo --no-pager commit -m x'));
+  assert.ok(isGitCommit('npm test && git commit -am x'));
+  assert.equal(isGitCommit('git commit-tree x'), false);
+  assert.equal(isGitCommit("cat <<'EOF'\ngit commit -m x\nEOF"), false);
+  assert.equal(bashCommand({ tool_name: 'Read', tool_input: { command: 'git commit' } }), '');
+});

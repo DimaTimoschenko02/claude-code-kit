@@ -30,6 +30,9 @@ A row answers as a command hook does: a classic output object, a string (additio
 answers with its stdout (JSON or text) and exit code (2 blocks with stderr). The rows of an event run at once,
 except PreToolUse, which runs them in order and stops at the first deny. A row that throws is skipped.
 
+`hooks/match.mjs` holds the pure matchers rows share (`isGitCommit`, `bashCommand`); a project's own script can
+import them too, so the mod's gate and the script agree.
+
 A pure row must not import Node: the mod runs without it. It reaches files, processes and env through `io`
 (`read`, `write`, `append`, `stat`, `list`, `run`, `env` — a fixed list of variable names, since the engine
 takes only literal names). `io.read` gives null for a file over 4 MiB, so a check that reads a whole transcript
@@ -45,7 +48,9 @@ node ~/claude-code-kit/project-hooks/bin/project-hooks.mjs check <root>   # shel
 
 `install` copies the shells over the old ones and keeps `core/index.mjs` and `plugin.json`; it rewrites only our
 groups in `.codex/hooks.json`. Then remove the same hooks from `.claude/settings.json` in the same commit, or they
-run twice.
+run twice: `node --test .claude/skills/project-hooks/test/` fails while one is left there, or a row's script is
+missing. A project whose formatter or linter runs on commit must skip `.claude/` (eslint `ignores`,
+`.prettierignore`): the shells are not in its tsconfig, and a reformatted shell drifts from the kit.
 
 ## Limits
 
