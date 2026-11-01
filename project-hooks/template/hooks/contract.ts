@@ -32,6 +32,9 @@ export type HookInput = Readonly<Record<string, unknown>> & {
 
 export type RunResult = { readonly exitCode: number; readonly stdout: string; readonly stderr: string };
 
+/** `directory`, never `dir`: the mod's $.fs says `dir`, node:fs `directory`; register.ts maps through fsKind. */
+export type EntryKind = 'file' | 'directory' | 'other';
+
 /** Everything a hook may touch. The mod builds it over `$`, the runner over node:fs and child_process. */
 export type HookIo = {
   /** The project root, forward slashes (C:/Users/x/proj on Windows). */
@@ -48,8 +51,10 @@ export type HookIo = {
   write(path: string, text: string): Promise<void>;
   append(path: string, text: string): Promise<void>;
   exists(path: string): Promise<boolean>;
-  stat(path: string): Promise<{ kind: string; size: number; mtimeMs: number } | null>;
-  list(dir: string): Promise<{ name: string; kind: string }[]>;
+  /** What the path leads to (a link followed); one kind spelling in both shells (engine.mjs#fsKind). */
+  stat(path: string): Promise<{ kind: EntryKind; size: number; mtimeMs: number } | null>;
+  /** The entries as they stand: a symlink is `other`, so a walk does not go through linked folders (find -type d). */
+  list(dir: string): Promise<{ name: string; kind: EntryKind }[]>;
   /** A process by argv, no shell; resolves once it exits. */
   run(argv: readonly string[], init?: { cwd?: string; env?: Record<string, string>; stdin?: string; timeoutMs?: number }): Promise<RunResult>;
   /** Git Bash on Windows (never the WSL launcher), `bash` elsewhere. */

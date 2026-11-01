@@ -194,6 +194,17 @@ export async function runEvent(hooks, event, input, io) {
   return fold(event, outs);
 }
 
+/**
+ * One spelling of an entry kind for both shells: `$.fs.list` / `$.fs.stat` say `dir`, node:fs says `directory`. A row
+ * that compared with one spelling saw no folders in the other shell — card-design-guard found no epic in the mod (01.11).
+ * A link the mod lists is `other`, as readdir's is.
+ * @param {string} kind
+ * @returns {import('./contract').EntryKind}
+ */
+export function fsKind(kind) {
+  return kind === 'dir' || kind === 'directory' ? 'directory' : kind === 'file' ? 'file' : 'other';
+}
+
 /** One spelling of a path: `C:\x`, `c:/x` and `/c/x` all become `C:/x` on Windows; other paths stay. */
 export function normalPath(p, platform) {
   const s = String(p ?? '');

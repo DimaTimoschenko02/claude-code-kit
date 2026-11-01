@@ -2,7 +2,7 @@
 // Run: node --test project-hooks/test/
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fold, mergeModResult, normalPath, runEvent, scriptOutput, select, toModResult } from '../template/hooks/engine.mjs';
+import { fold, fsKind, mergeModResult, normalPath, runEvent, scriptOutput, select, toModResult } from '../template/hooks/engine.mjs';
 
 const io = (over = {}) => ({
   root: 'C:/proj', platform: 'win32', home: 'C:/Users/x', codex: false,
@@ -104,6 +104,14 @@ test('normalPath gives one spelling on Windows and leaves other paths alone', ()
   assert.equal(normalPath('/c/a/b', 'win32'), 'C:/a/b');
   assert.equal(normalPath('/c', 'win32'), 'C:/');
   assert.equal(normalPath('/Users/x', 'darwin'), '/Users/x');
+});
+
+test('fsKind: the mod `dir` and node:fs `directory` are one kind, so a walk descends in both shells', () => {
+  assert.equal(fsKind('dir'), 'directory');
+  assert.equal(fsKind('directory'), 'directory');
+  assert.equal(fsKind('file'), 'file');
+  assert.equal(fsKind('other'), 'other'); // a link, as listed: not followed
+  assert.equal(fsKind(undefined), 'other');
 });
 
 test('isGitCommit: through global options and chains, not inside a heredoc', async () => {

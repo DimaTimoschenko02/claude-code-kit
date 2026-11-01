@@ -6,7 +6,7 @@
 import type { EngineInterface, PreToolUseResult, Register } from 'claude-code'
 import { HOOKS } from '../core/index.mjs'
 import type { HookInput, HookIo, HookSpec } from './contract'
-import { eventsOf, mergeModResult, normalPath, runEvent, toModResult } from './engine.mjs'
+import { eventsOf, fsKind, mergeModResult, normalPath, runEvent, toModResult } from './engine.mjs'
 
 const TABLE = HOOKS as readonly HookSpec[]
 const READ_LIMIT = 3.5 * 1024 * 1024 // $.fs.read refuses a file over 4 MiB
@@ -69,7 +69,7 @@ async function envOf($: EngineInterface, name: string): Promise<string | undefin
 async function ioOf($: EngineInterface): Promise<HookIo> {
   const { root, platform, home } = await hostOf($)
   const read = (p: string): Promise<string | null> => ($.fs.read(p) as Promise<string>).then((t) => t, () => null)
-  const stat = (p: string) => $.fs.stat(p).then((s) => ({ kind: String(s.kind), size: s.size, mtimeMs: s.mtimeMs }), () => null)
+  const stat = (p: string) => $.fs.stat(p).then((s) => ({ kind: fsKind(s.kind), size: s.size, mtimeMs: s.mtimeMs }), () => null)
   return {
     root, platform, home, codex: false,
     env: (name) => envOf($, name),
@@ -84,7 +84,7 @@ async function ioOf($: EngineInterface): Promise<HookIo> {
     },
     exists: (p) => $.fs.exists(p).catch(() => false),
     stat,
-    list: (dir) => $.fs.list(dir).then((es) => es.map((e) => ({ name: e.name, kind: String(e.kind) })), () => []),
+    list: (dir) => $.fs.list(dir).then((es) => es.map((e) => ({ name: e.name, kind: fsKind(e.kind) })), () => []),
     run: (argv, init) => $.process.run(argv, init).then((r) => ({ exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr })),
     bash: () => findBash($, platform),
     path: (p) => normalPath(p, platform),
