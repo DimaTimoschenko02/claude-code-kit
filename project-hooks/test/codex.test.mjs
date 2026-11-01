@@ -81,6 +81,26 @@ test('install lays the shells, keeps the table, writes the Codex groups beside o
   assert.equal(JSON.parse(readFileSync(join(root, '.codex/hooks.json'), 'utf8')).hooks.Stop.length, 2, 'a second install replaces ours');
 });
 
+test('the POSIX command finds the runner from a workspace folder that is not a git repo', { skip: !hasSh() }, () => {
+  const root = mkdtempSync(join(tmpdir(), 'ph-ws-'));
+  const runner = join(root, '.claude/skills/project-hooks/node/runner.mjs');
+  mkdirSync(join(runner, '..'), { recursive: true });
+  writeFileSync(runner, 'process.stdout.write(process.argv.slice(2).join(" "));\n');
+  const [group] = codexGroups([{ name: 'a', event: 'Stop', run: () => null }]).Stop;
+  const env = { ...process.env, GIT_CEILING_DIRECTORIES: join(root, '..') };
+  const out = execFileSync('sh', ['-c', group.hooks[0].command], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(out, 'Stop --codex');
+});
+
+function hasSh() {
+  try {
+    execFileSync('sh', ['-c', 'true'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 test('install creates no Codex file for a Claude-only table, keeps a right one byte for byte, never writes over a broken one', async () => {
   const root = project();
   await install(root);

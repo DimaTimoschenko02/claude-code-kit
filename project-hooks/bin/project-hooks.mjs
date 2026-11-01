@@ -41,7 +41,8 @@ function option(args, name, fallback) {
 /**
  * The Codex hook groups of a table: one command per event, the union of the rows' matchers.
  * `commandWindows` is a path relative to the session cwd, the one spelling cmd, PowerShell and Git Bash all run
- * (Codex starts a project session at its root); `command` finds the root through git on macOS and Linux.
+ * (Codex starts a project session at its root); `command` finds the root through git on macOS and Linux, and falls
+ * back to the cwd when that is not a repo: a workspace folder that links `.claude` and `.codex` into its repo.
  */
 export function codexGroups(hooks, dir = 'project-hooks') {
   const groups = {};
@@ -58,7 +59,7 @@ export function codexGroups(hooks, dir = 'project-hooks') {
       ...(matcher ? { matcher } : {}),
       hooks: [{
         type: 'command',
-        command: `node "$(git rev-parse --show-toplevel)/${runner}" ${event} --codex`,
+        command: `node "$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)/${runner}" ${event} --codex`,
         commandWindows: `node ${runner} ${event} --codex`,
         timeout: CODEX_TIMEOUT[event] ?? 120,
         statusMessage: `Project hooks (${event})`,
