@@ -75,10 +75,13 @@ if [ "$LINK" = 1 ]; then
 #!/usr/bin/env bash
 # skill-gate shim (instructions-tuning install.sh --link): the gate runs from the claude-code-kit clone, so
 # \`git pull\` there updates it here. No clone on this machine -> no gate, fail-open like the gate itself.
+# node on PATH -> the node engine, one process: the bash engine starts jq/grep about fifteen times, and on Windows each
+# start costs 0.3–0.9 s under load. SKILL_GATE_IMPL=bash forces the bash engine.
 GATE="$PKG_DIR/payload/hooks/skill-gate-guard.sh"
 [ -f "\$GATE" ] || exit 0
-log="\$(dirname "\${BASH_SOURCE[0]}")/_lib/hook-log.sh"
-[ -f "\$log" ] && export SKILL_GATE_LOG="\$log"
+case \${BASH_SOURCE[0]} in */*) here=\${BASH_SOURCE[0]%/*} ;; *) here=. ;; esac
+[ -f "\$here/_lib/hook-log.sh" ] && export SKILL_GATE_LOG="\$here/_lib/hook-log.sh"
+[ "\${SKILL_GATE_IMPL:-}" != bash ] && command -v node >/dev/null 2>&1 && [ -f "\${GATE%.sh}.mjs" ] && exec node "\${GATE%.sh}.mjs"
 exec bash "\$GATE"
 SHIM
 else

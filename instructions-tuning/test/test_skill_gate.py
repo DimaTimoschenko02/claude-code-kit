@@ -34,7 +34,7 @@ def skills(ts, *named):
 
 class Gate(unittest.TestCase):
     def run_gate(self, transcript_lines, invocations, agent_id=None, agent_type=None, agents=None,
-                 agent_lines=(), agent_invocations=(), agent_file=True, codex=False):
+                 agent_lines=(), agent_invocations=(), agent_file=True, codex=False, bom=False):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, ".claude", "state"))
             os.makedirs(os.path.join(root, ".claude", "agents"))
@@ -68,7 +68,8 @@ class Gate(unittest.TestCase):
             env["HOME"] = root
             if codex:
                 env["CODEX_COMPAT"] = "1"
-            return subprocess.run(GATE_CMD, input=json.dumps(payload), capture_output=True, text=True,
+            stdin = ("﻿" if bom else "") + json.dumps(payload)
+            return subprocess.run(GATE_CMD, input=stdin.encode("utf-8"), capture_output=True,
                                   env=env).returncode
 
     def test_skill_loaded_after_compaction_passes(self):
@@ -76,6 +77,10 @@ class Gate(unittest.TestCase):
 
     def test_compaction_without_reattachment_still_resets(self):
         self.assertEqual(self.run_gate([compact("2026-10-11T12:00:00.000Z")], ["2026-10-11T11:00:00.000Z"]), 2)
+
+    def test_payload_with_a_bom_still_resets(self):
+        # A writer that prefixes a UTF-8 BOM (.NET, PowerShell) must not turn a deny into a fail-open.
+        self.assertEqual(self.run_gate([compact("2026-10-11T12:00:00.000Z")], ["2026-10-11T11:00:00.000Z"], bom=True), 2)
 
     def test_reattached_whole_after_compaction_passes(self):
         lines = [compact("2026-10-11T12:00:00.000Z"), skills("2026-10-11T12:00:00.000Z", ("vault-write", 1083))]

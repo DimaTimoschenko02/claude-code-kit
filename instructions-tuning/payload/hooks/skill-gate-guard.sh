@@ -39,26 +39,41 @@ command -v jq >/dev/null 2>&1 || exit 0
 input=$(cat 2>/dev/null) || exit 0
 [ -z "$input" ] && exit 0
 
-transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
-cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
-tool=$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)
+# Every field in one jq start: on Windows each fork costs 0.3–0.9 s under load, and a jq per field made this gate
+# 14–31 s a call (measured 01.11). @sh quotes each value for eval, newlines in a command included.
+eval "$(printf '%s' "$input" | jq -r '@sh "transcript=\(.transcript_path // "") cwd=\(.cwd // "") tool=\(.tool_name // "")
+  file_path=\(.tool_input.file_path // "") command=\(.tool_input.command // "") aid_early=\(.agent_id // "")
+  own_early=\(.agent_transcript_path // "") sid_early=\(.session_id // "") atype=\(.agent_type // "")"' 2>/dev/null)" \
+  2>/dev/null || exit 0
+aid="$aid_early" sid="$sid_early"
 
 ROOT="${CLAUDE_PROJECT_DIR:-$cwd}"
 [ -z "$ROOT" ] && ROOT="$(pwd)"
 # Windows (Git Bash): payload paths arrive as `C:\...`, the root as `C:\...`, `C:/...` or `/c/...`.
 # One spelling for all of them, or the prefix cut below never matches and every edit passes ungated.
-# `-m` (C:/...) keeps the paths usable by native python/node as well as by bash tests.
-win_path() { if command -v cygpath >/dev/null 2>&1 && [ -n "$1" ]; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
-ROOT=$(win_path "$ROOT"); cwd=$(win_path "$cwd"); transcript=$(win_path "$transcript")
+# `-m` (C:/...) keeps the paths usable by native python/node as well as by bash tests. A drive path is respelled in bash
+# (the same `C:/...` cygpath -m gives, no fork); anything else still goes through cygpath.
+HAS_CYGPATH=""; command -v cygpath >/dev/null 2>&1 && HAS_CYGPATH=1
+win_var() {   # respell the variable named $1 in place
+  local p="${!1}"
+  [ -z "$HAS_CYGPATH" ] || [ -z "$p" ] && return 0
+  p="${p//\\//}"
+  if [[ "$p" =~ ^([A-Za-z]):(/|$) ]]; then p="${BASH_REMATCH[1]^^}${p:1}"
+  elif [[ "$p" =~ ^/([A-Za-z])(/|$) ]]; then p="${BASH_REMATCH[1]^^}:/${p:3}"
+  else p=$(cygpath -m "${!1}"); fi
+  printf -v "$1" '%s' "$p"
+}
+win_var ROOT; win_var cwd; win_var transcript
 
 CONFIG="$ROOT/.claude/skill-gate.config.json"
 [ -f "$CONFIG" ] || exit 0   # no gates configured -> fail-open
 
 if [ "$tool" = "Bash" ]; then
-  targets=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null \
+  targets=""
+  [ -n "$command" ] && targets=$(printf '%s\n' "$command" \
     | python3 -B "$LIB/bash-write-targets.py" "${cwd:-$ROOT}" 2>/dev/null)
 else
-  targets=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
+  targets="$file_path"
 fi
 [ -z "$targets" ] && exit 0
 
@@ -76,7 +91,7 @@ owner() {
 gated=""   # "skill<TAB>path" per governed target
 while IFS= read -r fp; do
   [ -z "$fp" ] && continue
-  fp=$(win_path "$fp")
+  win_var fp
   r="${fp#"$ROOT"/}"
   # A Claude Code worktree (`.claude/worktrees/<name>/`) is another checkout of the same repo: its `apps/x.ts` is
   # governed like the root's. Without this cut the path keeps the worktree prefix, no gate matches, and the edit
@@ -96,17 +111,15 @@ LOG="$ROOT/.claude/state/skill-invocations.jsonl"
 # minutes earlier (41 of 51 coder blocks, 09–23.10). A subagent's own transcript is
 # <project-dir>/<session_id>/subagents/**/agent-<agent_id>.jsonl; its own compactions and skill re-attachments are there.
 # Not found -> fail-open, logged, never the parent's file.
-aid_early=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
 if [ -n "$aid_early" ]; then
-  own=$(printf '%s' "$input" | jq -r '.agent_transcript_path // empty' 2>/dev/null)
+  own="$own_early"
   if [ -z "$own" ] || [ ! -f "$own" ]; then
     own=""
     case "$transcript" in
       */subagents/*agent-"$aid_early".jsonl) own="$transcript" ;;
       ?*)
-        sid_early=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
-        proj_dir=$(dirname "$transcript")
-        case "$transcript" in */subagents/*) proj_dir=$(dirname "${transcript%%/subagents/*}") ;; esac
+        proj_dir="${transcript%/*}"
+        case "$transcript" in */subagents/*) proj_dir="${transcript%%/subagents/*}"; proj_dir="${proj_dir%/*}" ;; esac
         [ -n "$sid_early" ] && [ -d "$proj_dir/$sid_early/subagents" ] && \
           own=$(find "$proj_dir/$sid_early/subagents" -name "agent-$aid_early.jsonl" 2>/dev/null | head -1) ;;
     esac
@@ -121,10 +134,29 @@ fi
 # Context-reset boundary = later of (session start, last /compact). Compaction is
 # recorded as a type:user entry with isCompactSummary:true; otherwise the earliest
 # transcript timestamp is the session start.
-boundary=""
+#
+# After a compaction Claude Code re-attaches the text of every skill invoked in the session (attachment
+# `invoked_skills`, each cut at 20 000 chars). A skill re-attached whole is still in context, so that compaction did not
+# reset it — denying it only made the session re-load the skill and resend the write (31 bounces in 4 sessions,
+# 06–11.10). Only the attachment that follows the last compact summary in file order counts (both carry the same
+# second). A subagent's own compaction re-attaches its skills in its own file, which `transcript` points at by now.
+#
+# Both come from one grep over the transcript and one jq over its hits (it was three grep pipelines and two jq: ten
+# process starts, 0.3–0.9 s each on Windows).
+boundary="" restored=""   # restored: one skill name per line, as invoked ("pricehub:code-style" or "code-style")
 if [ -n "$transcript" ] && [ -f "$transcript" ]; then
-  boundary=$(grep 'isCompactSummary' "$transcript" 2>/dev/null \
-    | jq -rc 'select(.isCompactSummary==true)|.timestamp' 2>/dev/null | tail -1)
+  eval "$(grep -n -e 'isCompactSummary' -e '"type":"invoked_skills"' "$transcript" 2>/dev/null | jq -rRn '
+    reduce (inputs | capture("^(?<n>[0-9]+):(?<l>.*)$")) as $h ({b: null, c: 0, s: 0, sl: null};
+      ($h.n | tonumber) as $n
+      | if ($h.l | contains("\"isCompactSummary\":true")) then .c = $n else . end
+      | if ($h.l | contains("isCompactSummary")) then
+          (($h.l | fromjson?) // {}) as $e | if $e.isCompactSummary == true and $e.timestamp != null then .b = $e.timestamp else . end
+        else . end
+      | if ($h.l | contains("\"type\":\"invoked_skills\"")) then .s = $n | .sl = $h.l else . end)
+    | (if .c > 0 and .s > .c then
+         [(.sl | fromjson? // {}) | .attachment.skills[]? | select((.content // "" | length) < 20000) | .name | tostring] | join("\n")
+       else "" end) as $r
+    | @sh "boundary=\(.b // "" | tostring) restored=\($r)"' 2>/dev/null)" 2>/dev/null
   # Session start = first entry with a TOP-LEVEL .timestamp. Don't grep for the
   # bare string: the transcript opens with a `file-history-snapshot` entry whose
   # timestamp is nested under .snapshot, so `grep -m1 '"timestamp"' | jq .timestamp`
@@ -136,21 +168,6 @@ if [ -n "$transcript" ] && [ -f "$transcript" ]; then
 fi
 [ -z "$boundary" ] && exit 0   # can't locate boundary -> fail-open
 
-# After a compaction Claude Code re-attaches the text of every skill invoked in the session (attachment
-# `invoked_skills`, each cut at 20 000 chars). A skill re-attached whole is still in context, so that compaction did not
-# reset it — denying it only made the session re-load the skill and resend the write (31 bounces in 4 sessions,
-# 06–11.10). Only the attachment that follows the last compact summary in file order counts (both carry the same
-# second). A subagent's own compaction re-attaches its skills in its own file, which `transcript` points at by now.
-restored=""   # one skill name per line, as invoked ("pricehub:code-style" or "code-style")
-if [ -n "$transcript" ] && [ -f "$transcript" ]; then
-  compact_line=$(grep -n '"isCompactSummary":true' "$transcript" 2>/dev/null | tail -1 | cut -d: -f1)
-  skills_hit=$(grep -n '"type":"invoked_skills"' "$transcript" 2>/dev/null | tail -1)
-  skills_line=${skills_hit%%:*}
-  if [ -n "$compact_line" ] && [ -n "$skills_line" ] && [ "$skills_line" -gt "$compact_line" ]; then
-    restored=$(printf '%s' "${skills_hit#*:}" \
-      | jq -r '.attachment.skills[]? | select((.content // "" | length) < 20000) | .name' 2>/dev/null)
-  fi
-fi
 
 # A subagent whose definition lists the skill under `skills:` got the skill's full text injected at its start, and that
 # load is no Skill tool call, so the log never shows it. The coder was told in prose to load code-style itself and was
@@ -159,7 +176,6 @@ fi
 # The native Codex bridge sets CODEX_COMPAT=1: it logs verified full skill reads but does not inject `skills:`.
 # In that mode only the invocation log below proves a load; the Claude definition is not evidence.
 preloaded=""
-atype=$(printf '%s' "$input" | jq -r '.agent_type // empty' 2>/dev/null)
 if [ "${CODEX_COMPAT:-}" != "1" ] && [ -n "$aid_early" ] && [ -n "$atype" ]; then
   preloaded=$(python3 -B - "$atype" "$ROOT/.claude/agents" "$HOME/.claude/agents" <<'PY' 2>/dev/null
 import glob, os, re, sys
@@ -196,8 +212,6 @@ fi
 # this one's gate. A record without session_id (logged before the field existed) still counts — fail-open, as above.
 # Same for agents: a subagent shares the parent's session_id but not the parent's context, so the parent's
 # invocation must not open a subagent's gate, nor the reverse. No agent_id = the main thread.
-sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
-aid=$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)
 req="" rel=""
 while IFS=$'\t' read -r s r; do
   [ -z "$s" ] && continue

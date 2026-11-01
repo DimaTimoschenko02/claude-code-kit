@@ -5,15 +5,19 @@
 // dozen times per call, so every Write/Edit/Bash waited 1.5–10 s. This file is a line-for-line port: same config, same
 // boundary (later of session start and the last /compact), same compaction re-attachment and subagent rules, same deny
 // text and exit 2. Bash targets still come from _lib/bash-write-targets.py (one python start, Bash calls only).
+// The transcript is read line by line in 1 MB chunks and only marker lines are parsed: a late session's transcript is
+// 10–50 MB, and reading it whole cost about three times its size in memory on every governed write.
 // skill-gate-guard.sh stays the reference: a rule change lands in both. Tests run both:
 //   python3 -B -m unittest discover -s instructions-tuning/test   (SKILL_GATE_IMPL=node runs this file)
 //
-// Use: `node skill-gate-guard.mjs` as the hook command, or import { skillGate } from a project's own dispatcher.
+// Use: the install.sh --link shim runs this file whenever node is on PATH (measured 01.11 on Windows under load: 0.4–0.7 s
+// a call against 14–31 s for the bash gate), else the bash gate; or import { skillGate } from a project's own dispatcher.
+// SKILL_GATE_LOG (the project's hook-log.sh) -> its twin hook-log.mjs beside it writes the decision line.
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const LIB = join(dirname(fileURLToPath(import.meta.url)), '_lib');
 
@@ -112,37 +116,78 @@ function subagentTranscript(payload, transcript, aid) {
   return walk(sub);
 }
 
-/** Context-reset boundary: last /compact, else the first top-level timestamp. '' when unknown. */
-function boundaryOf(text) {
-  let boundary = '';
-  for (const line of lines(text)) {
-    if (!line.includes('isCompactSummary')) continue;
-    const e = parse(line);
-    if (e?.isCompactSummary === true && e.timestamp != null) boundary = String(e.timestamp);
+const COMPACT_ANY = Buffer.from('isCompactSummary');
+const COMPACT_TRUE = Buffer.from('"isCompactSummary":true');
+const INVOKED_SKILLS = Buffer.from('"type":"invoked_skills"');
+const TIMESTAMP = Buffer.from('"timestamp"');
+const CHUNK = 1 << 20;
+
+/** Calls `onLine(buffer, index)` for every line of the file, 1 MB at a time: memory is the chunk plus the longest line,
+ * not the file — a late-session transcript is 10–50 MB and the gate reads it on every governed write. false = unreadable. */
+function eachLine(path, onLine) {
+  let fd;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return false;
   }
-  if (boundary) return boundary;
-  for (const line of lines(text).slice(0, 100)) {
-    const e = parse(line);
-    if (e && e.timestamp != null) return String(e.timestamp);
+  try {
+    const chunk = Buffer.allocUnsafe(CHUNK);
+    let carry = null;
+    let index = 0;
+    for (;;) {
+      const n = readSync(fd, chunk, 0, CHUNK, null);
+      if (n <= 0) break;
+      const data = carry ? Buffer.concat([carry, chunk.subarray(0, n)]) : chunk.subarray(0, n);
+      let start = 0;
+      for (let nl = data.indexOf(10, start); nl !== -1; nl = data.indexOf(10, start)) {
+        onLine(data.subarray(start, nl), index++);
+        start = nl + 1;
+      }
+      carry = start < data.length ? Buffer.from(data.subarray(start)) : null;
+    }
+    if (carry) onLine(carry, index);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
   }
-  return '';
 }
 
-/** Skills Claude Code re-attached whole after the last compaction. */
-function restoredSkills(text) {
+/**
+ * One pass over the transcript: the context-reset boundary (last /compact, else the first top-level timestamp in the
+ * first 100 lines; '' when unknown) and the skills Claude Code re-attached whole after the last compaction. Only lines
+ * holding a marker are decoded and parsed. null = transcript unreadable.
+ */
+function scanTranscript(path) {
+  let compactTs = '';
+  let firstTs = '';
   let compactLine = 0;
   let skillsLine = 0;
   let skillsText = '';
-  lines(text).forEach((line, i) => {
-    if (line.includes('"isCompactSummary":true')) compactLine = i + 1;
-    if (line.includes('"type":"invoked_skills"')) {
+  const ok = eachLine(path, (line, i) => {
+    if (!firstTs && i < 100 && line.includes(TIMESTAMP)) {
+      const e = parse(line.toString('utf8'));
+      if (e && e.timestamp != null) firstTs = String(e.timestamp);
+    }
+    if (line.includes(COMPACT_ANY)) {
+      if (line.includes(COMPACT_TRUE)) compactLine = i + 1;
+      const e = parse(line.toString('utf8'));
+      if (e?.isCompactSummary === true && e.timestamp != null) compactTs = String(e.timestamp);
+    }
+    if (line.includes(INVOKED_SKILLS)) {
       skillsLine = i + 1;
-      skillsText = line;
+      skillsText = line.toString('utf8');
     }
   });
-  if (!compactLine || !skillsLine || skillsLine <= compactLine) return [];
-  const skills = parse(skillsText)?.attachment?.skills;
-  return Array.isArray(skills) ? skills.filter((s) => String(s?.content ?? '').length < 20000).map((s) => String(s.name)) : [];
+  if (!ok) return null;
+  let restored = [];
+  if (compactLine && skillsLine && skillsLine > compactLine) {
+    const skills = parse(skillsText)?.attachment?.skills;
+    if (Array.isArray(skills)) restored = skills.filter((s) => String(s?.content ?? '').length < 20000).map((s) => String(s.name));
+  }
+  return { boundary: compactTs || firstTs, restored };
 }
 
 /** `skills:` of the subagent definition named `name` — project agents first, then the user's. */
@@ -200,6 +245,7 @@ export function skillGate(payload, { env = process.env, home = env.HOME || homed
   if (!config) return null; // no gates configured (or unreadable) -> fail-open
   const gates = Array.isArray(config.gates) ? config.gates : [];
 
+  if (tool === 'Bash' && !pythonExe(env)) log('skip', 'no python'); // Bash targets unknown: ungated, but on the record
   const targets = tool === 'Bash'
     ? bashTargets(payload.tool_input?.command ?? '', cwd || root, env)
     : String(payload.tool_input?.file_path ?? '');
@@ -231,10 +277,10 @@ export function skillGate(payload, { env = process.env, home = env.HOME || homed
     transcript = own;
   }
 
-  const text = transcript ? readText(transcript) : null;
-  const boundary = text === null ? '' : boundaryOf(text);
+  const scan = transcript ? scanTranscript(transcript) : null;
+  const boundary = scan?.boundary ?? '';
   if (!boundary) return null; // can't locate boundary -> fail-open
-  const restored = restoredSkills(text);
+  const { restored } = scan;
 
   const atype = String(payload.agent_type ?? '');
   const preloaded = env.CODEX_COMPAT !== '1' && aid && atype
@@ -263,16 +309,39 @@ export function skillGate(payload, { env = process.env, home = env.HOME || homed
   return null;
 }
 
+/**
+ * The project's decision log, as the bash gate sources it: SKILL_GATE_LOG names the project's hook-log.sh, its JS twin
+ * hook-log.mjs sits beside it. No log -> a no-op state.
+ */
+async function projectLog(env) {
+  const state = { input: {}, decision: '', reason: '' };
+  const sh = env.SKILL_GATE_LOG ?? '';
+  const mjs = sh.replace(/\.sh$/, '.mjs');
+  if (!sh || mjs === sh || !existsSync(mjs)) return state;
+  try {
+    return (await import(pathToFileURL(mjs).href)).hookLog(import.meta.url, state);
+  } catch {
+    return state;
+  }
+}
+
 if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
+  const state = await projectLog(process.env);
   let payload = null;
   try {
-    payload = JSON.parse(readFileSync(0, 'utf8'));
+    // jq in the bash gate skips a UTF-8 BOM; JSON.parse does not, so a BOM would fail open here.
+    payload = JSON.parse(readFileSync(0, 'utf8').replace(/^﻿/, ''));
   } catch {
     process.exit(0);
   }
+  state.input = payload ?? {};
+  const log = (decision, reason = '') => {
+    state.decision = decision;
+    state.reason = reason;
+  };
   let verdict = null;
   try {
-    verdict = skillGate(payload ?? {});
+    verdict = skillGate(payload ?? {}, { log });
   } catch {
     verdict = null; // fail-open, as the bash gate
   }
