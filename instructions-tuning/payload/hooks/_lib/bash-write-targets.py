@@ -367,6 +367,10 @@ def heredoc_targets(body, js, argv):
 
 
 def main():
+    # The command and the paths are UTF-8 whatever the locale says. Under Windows' cp1252 the A0 byte of «Р» read as a
+    # no-break space, `\s` cut `> /tmp/Рецепт.md` to `/tmp/\xd0`, and the gate checked a path nobody wrote.
+    sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
+    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
     cwd = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
     cmd = sys.stdin.read()
     shell, mask, bodies = scan(cmd)

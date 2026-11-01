@@ -5,7 +5,7 @@
 # Usage:
 #   ./install.sh [target]          # copy into <target> (default: current dir)
 #   ./install.sh --link [target]   # symlink the skill and the agent to this clone (gitignored); git pull here updates them
-#   ./install.sh --check [target]  # installed vs package version
+#   ./install.sh --check [target]  # --link: the links resolve; a copy: installed vs package version. Exit 1 when not
 #   --no-register                  # leave settings.json alone: the project runs the hook through its own gate runner
 #
 # The project keeps its own facts in .claude/spec-writer.project.md (seeded from the template, never overwritten):
@@ -32,14 +32,26 @@ CLAUDE_DIR="$TARGET/.claude"
 SETTINGS="$CLAUDE_DIR/settings.json"
 VERSION_FILE="$CLAUDE_DIR/.spec-writer.version"
 PROJECT_FILE="$CLAUDE_DIR/spec-writer.project.md"
+GI="$TARGET/.gitignore"; LSTART="# >>> spec-writer --link >>>"
 
 if [ "$MODE" = "check" ]; then
+  # The marker is committed and travels to every machine; the links do not. A --link install is checked by its links
+  # (bin/kit-links.mjs): the marker said «up-to-date» on a machine that had none, and specs went unlinted for days.
+  rc=0
+  if [ -f "$CLAUDE_DIR/hooks/spec-lint.sh" ] && ! cmp -s "$CLAUDE_DIR/hooks/spec-lint.sh" "$PKG_DIR/payload/hooks/spec-lint.sh"; then
+    echo "hooks/spec-lint.sh differs from the package — re-run ./install.sh"; rc=1
+  fi
+  if [ -f "$GI" ] && grep -qF "$LSTART" "$GI"; then
+    if ! command -v node >/dev/null 2>&1; then echo "cannot check the links: node not found"; exit 1; fi
+    node "$PKG_DIR/../bin/kit-links.mjs" --pkg spec-writer "$TARGET" || rc=1
+    exit "$rc"
+  fi
   inst=""
   if [ -f "$VERSION_FILE" ]; then inst="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$VERSION_FILE" || true)"; fi
-  if [ -z "$inst" ]; then echo "not installed (package v$PKG_VERSION)"
+  if [ -z "$inst" ]; then echo "not installed (package v$PKG_VERSION)"; rc=1
   elif [ "$inst" = "$PKG_VERSION" ]; then echo "up-to-date (v$PKG_VERSION)"
-  else echo "outdated: installed=$inst package=$PKG_VERSION — re-run ./install.sh"; fi
-  exit 0
+  else echo "outdated: installed=$inst package=$PKG_VERSION — re-run ./install.sh"; rc=1; fi
+  exit "$rc"
 fi
 
 command -v jq >/dev/null 2>&1 || { echo "ERROR: jq is required to register the hook" >&2; exit 1; }
@@ -70,7 +82,7 @@ place() {
 place "$PKG_DIR/payload/skills/spec-writer" "$CLAUDE_DIR/skills/spec-writer"
 place "$PKG_DIR/payload/agents/spec-builder-check.md" "$CLAUDE_DIR/agents/spec-builder-check.md"
 # The hook is a tracked wrapper that finds the linter through the skill folder: with a link and no kit on the
-# machine it finds nothing and stays silent instead of breaking every write.
+# machine it finds nothing, lets the write through and tells the session once that specs go unlinted.
 cp "$PKG_DIR/payload/hooks/spec-lint.sh" "$CLAUDE_DIR/hooks/spec-lint.sh"
 chmod +x "$CLAUDE_DIR/hooks/spec-lint.sh"
 
@@ -93,13 +105,16 @@ if jq --arg h "$HOOK" '
 else rm -f "$tmp"; echo "ERROR: settings merge failed; settings.json untouched." >&2; exit 1; fi
 fi
 
-GI="$TARGET/.gitignore"; LSTART="# >>> spec-writer --link >>>"
 if [ "$LINK" = 1 ] && { [ ! -f "$GI" ] || ! grep -qF "$LSTART" "$GI"; }; then
   printf '\n%s\n.claude/skills/spec-writer\n.claude/agents/spec-builder-check.md\n%s\n' "$LSTART" "# <<< spec-writer --link <<<" >> "$GI"
 fi
 
-printf '{"version":"%s","installed_at":"%s","link":%s}\n' "$PKG_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  "$( [ "$LINK" = 1 ] && echo true || echo false )" > "$VERSION_FILE"
+# Rewritten only when the version or the mode changes: a re-run that only puts links back (a new machine, a worktree)
+# must not leave a timestamp-only diff in a committed file.
+LINKED="$( [ "$LINK" = 1 ] && echo true || echo false )"
+if ! grep -qs "\"version\":\"$PKG_VERSION\".*\"link\":$LINKED" "$VERSION_FILE"; then
+  printf '{"version":"%s","installed_at":"%s","link":%s}\n' "$PKG_VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$LINKED" > "$VERSION_FILE"
+fi
 
 cat >&2 <<SUMMARY
 

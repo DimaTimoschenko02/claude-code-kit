@@ -109,6 +109,9 @@ These are building blocks, not a framework — copy what you want.
 - **instructions-tuning** (skill + skill-gate hook) → run its own `instructions-tuning/install.sh`.
 - **chat-audit** (skill + extractors + nudge hook) → run its own `chat-audit/install.sh`.
 - **learning-log** → run its own `learning-log/install.sh`.
+- **A `--link` install on another machine or in a fresh worktree** gets the project's committed files but none of its
+  gitignored links: `node bin/kit-links.mjs [--fix] <project>` checks (and makes) every link listed in the project's
+  `.gitignore` `--link` blocks; each package's `install.sh --check` runs it for its own links.
 
 ## Working on this repo
 

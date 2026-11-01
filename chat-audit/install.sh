@@ -7,7 +7,7 @@
 #
 # Usage:
 #   ./install.sh [target]          # install into <target> (default: current dir)
-#   ./install.sh --check [target]  # report installed vs package version
+#   ./install.sh --check [target]  # --link: the link resolves; a copy: installed vs package version. Exit 1 when not
 #   ./install.sh --link [target]   # symlink the skill to this clone instead of copying
 #
 # --link is for machines that keep this repo checked out: the skill becomes a gitignored symlink into payload/,
@@ -35,6 +35,12 @@ VERSION_FILE="$CLAUDE_DIR/.chat-audit.version"
 CONFIG="$CLAUDE_DIR/chat-audit.config.json"
 
 if [ "$MODE" = "check" ]; then
+  # The marker is committed and travels to every machine; the link does not. A --link install is checked by its link
+  # (bin/kit-links.mjs): a marker-only check said «up-to-date» on a machine where the link was never made.
+  if [ -f "$TARGET/.gitignore" ] && grep -qF "# >>> chat-audit --link >>>" "$TARGET/.gitignore"; then
+    if ! command -v node >/dev/null 2>&1; then echo "cannot check the link: node not found"; exit 1; fi
+    exec node "$PKG_DIR/../bin/kit-links.mjs" --pkg chat-audit "$TARGET"
+  fi
   # Every read below is guarded. Under `set -e` a bare `[ -f x ] && cmd` whose
   # test is false returns 1 and kills the script, so --check against a project
   # that never installed the package printed nothing instead of "not installed".
@@ -47,10 +53,10 @@ if [ "$MODE" = "check" ]; then
     fi
   fi
   [ -n "$inst" ] || inst="not installed"
-  if [ "$inst" = "$PKG_VERSION" ]; then echo "up-to-date (v$PKG_VERSION)";
+  if [ "$inst" = "$PKG_VERSION" ]; then echo "up-to-date (v$PKG_VERSION)"; exit 0;
   elif [ "$inst" = "not installed" ]; then echo "not installed (package v$PKG_VERSION)";
   else echo "outdated: installed=$inst package=$PKG_VERSION — re-run ./install.sh to upgrade"; fi
-  exit 0
+  exit 1
 fi
 
 # --- Step 0: validate before writing anything ---
@@ -138,7 +144,10 @@ if [ "$LINK" = 1 ] && ! grep -qF "$LSTART" "$GI"; then
 fi
 
 # --- Step 4: version stamp ---
-if [ "$MERGE" = 1 ]; then
+# Rewritten only when the version changes: a re-run that only puts the link back (a new machine, a worktree) must not
+# leave a timestamp-only diff in a committed file.
+if grep -qs "\"version\"[[:space:]]*:[[:space:]]*\"$PKG_VERSION\"" "$VERSION_FILE"; then :
+elif [ "$MERGE" = 1 ]; then
   jq -n --arg v "$PKG_VERSION" --arg t "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '{version:$v, installed_at:$t}' > "$VERSION_FILE"
 else
   printf '{"version":"%s"}\n' "$PKG_VERSION" > "$VERSION_FILE"

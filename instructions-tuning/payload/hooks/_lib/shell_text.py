@@ -161,6 +161,10 @@ def strip(cmd, keep=()):
 
 
 if __name__ == "__main__":
+    # A command is UTF-8 whatever the locale says. Windows' default (cp1252) turned one «—» into three characters and the
+    # A0 byte of «Р» into a no-break space, so offsets drifted and `\s` split words inside a Cyrillic path.
+    sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
+    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
     if sys.argv[1:2] == ["strip"]:
         flags = sys.argv[2:]
         keep = ("local", "remote") if "--keep-shell" in flags else ("local",) if "--keep-local-shell" in flags else ()

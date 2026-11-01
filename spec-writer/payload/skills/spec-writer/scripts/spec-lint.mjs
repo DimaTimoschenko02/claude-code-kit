@@ -184,7 +184,8 @@ function runHook() {
   if (!path || !/\.md$/.test(path) || !existsSync(path)) return;
   const project = findProject(path);
   if (!project) return;
-  const rel = relative(project.root, resolve(path));
+  // `/` whatever the OS: on Windows relative() answers with `\`, no glob matched and no spec was ever linted there.
+  const rel = relative(project.root, resolve(path)).replaceAll('\\', '/');
   // A worktree under the project root keeps its own relative layout: match the path's tail too.
   const re = globToRegExp(project.specGlob);
   const parts = rel.split('/');
