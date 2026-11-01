@@ -8,6 +8,12 @@ const HOME = '/home/fake'
 const PROJ = '/work/proj'
 const ACCESS = '/notes/access.md'
 const T0 = Date.UTC(2026, 9, 4, 8, 0)
+/** The env of a Windows Claude process, and the two dumps the mod builds from it. */
+const WIN_ENV = { ProgramFiles: 'C:\\Program Files', SystemRoot: 'C:\\Windows' }
+const WIN_ENV_EXE = 'C:/Program Files/Git/usr/bin/env.exe -0'
+const WIN_CMD_SET = 'C:/Windows/System32/cmd.exe /d /c set'
+/** A variable whose value holds a line break, as cmd's `set` prints it. */
+const MULTI_LINE_VAR = 'MY_MULTI_TOKEN=Qw8-first-Line-k2\r\nRt5-second-Line-9z'
 /** The path as the world keys it: the engine hands fs hooks native paths, `C:\work\proj` on Windows for `/work/proj`. */
 const posix = (p: string): string => p.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
 
@@ -32,8 +38,10 @@ type World = {
   submitted: { text: string; context?: readonly string[] }[]
   /** Whether `env -0` succeeds. */
   procOk: boolean
-  /** The one env dump that works, as Windows has it: `env -0` from PATH or cmd's `set`; unset, `/usr/bin/env -0`. */
-  envDump?: 'env -0' | 'cmd /d /c set'
+  /** The one env dump that works, as Windows has it: Git's env.exe or cmd's `set`; unset, `/usr/bin/env -0`. */
+  envDump?: typeof WIN_ENV_EXE | typeof WIN_CMD_SET
+  /** argv[0] of every process the mod started. */
+  programs: string[]
   /** Reads of a path that fail before it reads again. */
   readFails: Map<string, number>
   /** What `$.session.id()` answers; a /clear changes it without a new session.start. */
@@ -71,6 +79,7 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
     procOk: true,
     readFails: new Map(),
     sessionId: 'sess-1',
+    programs: [],
   }
   mock.env(on, { HOME, ...opts.env })
   on('session.root', () => ({ value: w.cwd ?? PROJ }))
@@ -125,11 +134,12 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
   })
   on('process.run', (_$, e) => {
     w.runs += 1
+    w.programs.push(String(e.argv[0]))
     const argv = e.argv.join(' ')
     if (w.envDump !== undefined) {
       if (argv === '/usr/bin/env -0') return { value: { exitCode: 1, stdout: '', stderr: '/usr/bin/env: not found', isStdoutTruncated: false, isStderrTruncated: false } }
       if (argv !== w.envDump) return { deny: `ENOENT ${e.argv[0]}` }
-      const stdout = argv === 'env -0' ? PROC_ENV : PROC_ENV.split('\0').join('\r\n')
+      const stdout = argv === WIN_ENV_EXE ? PROC_ENV : `${PROC_ENV.split('\0').join('\r\n')}${MULTI_LINE_VAR}\r\n`
       return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (argv !== '/usr/bin/env -0') return { deny: `unexpected process ${argv}` }
@@ -657,14 +667,25 @@ describe('review 2026-10-04: sources, encodings, failure modes, speed', () => {
     expect(r2).toContain('DB_PASSWORD=‹secret:DB_PASSWORD›')
   })
 
-  for (const dump of ['env -0', 'cmd /d /c set'] as const) {
+  for (const dump of [WIN_ENV_EXE, WIN_CMD_SET] as const) {
     test(`Windows: /usr/bin/env fails, the process env comes from ${dump} and its values are hidden`, async ($, on) => {
-      const w = world(on)
+      const w = world(on, { env: WIN_ENV })
       w.envDump = dump
       const out = norm(stdoutOf(await bash($, w, `${FAKE.envOnly}\n`, 'echo $MY_SERVICE_PASSWORD')))
       expect(out).toBe('‹secret:MY_SERVICE_PASSWORD›\n')
+      // a bare name would be looked up in the project folder first, where a planted program could wait
+      expect(w.programs.every(p => /^(\/|[A-Za-z]:\/)/.test(p))).toBe(true)
     })
   }
+
+  test('Windows: a value cmd\'s set prints over two lines is known whole', async ($, on) => {
+    const w = world(on, { env: WIN_ENV })
+    w.envDump = WIN_CMD_SET
+    const out = norm(stdoutOf(await bash($, w, 'Qw8-first-Line-k2\nRt5-second-Line-9z\n', 'echo "$MY_MULTI_TOKEN"')))
+    expect(out).toContain('‹secret:MY_MULTI_TOKEN›')
+    expect(out).not.toContain('Qw8-first-Line-k2')
+    expect(out).not.toContain('Rt5-second-Line-9z')
+  })
 
   test('review F7: a source that failed to read is read again, not remembered as empty', async ($, on) => {
     const w = world(on)

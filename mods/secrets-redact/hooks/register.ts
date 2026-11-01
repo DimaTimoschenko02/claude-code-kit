@@ -233,26 +233,48 @@ async function gitRoot($: Engine, dir: string): Promise<string | null> {
   return root
 }
 
+type EnvDump = { readonly argv: readonly string[]; readonly lines: boolean }
+
+const parentDir = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')))
+
 /**
- * Ways to dump this process's env, tried in order. A native spawn on Windows cannot reach `/usr/bin/env` (it exits 1
- * there, and the index never builds), so `env` from PATH comes next, then cmd's `set`, one variable per line.
+ * Ways to dump this process's env, tried in order, each by an absolute path: Windows looks for a bare name in the cwd
+ * (the project) first, so a planted env.exe would run. A native spawn there cannot reach `/usr/bin/env`, so Git for
+ * Windows' own env.exe comes next, then cmd's `set` from the system folder, one variable per line.
  */
-const ENV_DUMPS: readonly { readonly argv: readonly string[]; readonly lines: boolean }[] = [
-  { argv: ['/usr/bin/env', '-0'], lines: false },
-  { argv: ['env', '-0'], lines: false },
-  { argv: ['cmd', '/d', '/c', 'set'], lines: true },
-]
+async function envDumps($: Engine): Promise<EnvDump[]> {
+  const [gitBash, programFiles, systemRoot] = await Promise.all([
+    $.env.get('CLAUDE_CODE_GIT_BASH_PATH'), $.env.get('ProgramFiles'), $.env.get('SystemRoot'),
+  ])
+  const gitDirs = unique([gitBash && parentDir(parentDir(slash(gitBash))), programFiles && `${slash(programFiles)}/Git`]
+    .filter((d): d is string => !!d))
+  return [
+    { argv: ['/usr/bin/env', '-0'], lines: false },
+    ...gitDirs.map(d => ({ argv: [`${d}/usr/bin/env.exe`, '-0'], lines: false })),
+    ...(systemRoot ? [{ argv: [`${slash(systemRoot)}/System32/cmd.exe`, '/d', '/c', 'set'], lines: true }] : []),
+  ]
+}
+
+/** cmd's `set` output in `env -0` form: a line that does not start `NAME=` continues the value above it. */
+function joinSetLines(text: string): string {
+  const out: string[] = []
+  for (const line of text.replace(/(\r?\n)+$/, '').split(/\r?\n/)) {
+    if (out.length === 0 || /^[^=\s][^=]*=/.test(line)) out.push(line)
+    else out[out.length - 1] += `\n${line}`
+  }
+  return out.join('\0')
+}
 
 /** Secret-named variables of this process, which every Bash child inherits; once per load. Throws when no dump works. */
 async function loadProcessEnv($: Engine): Promise<readonly Secret[]> {
   const failures: string[] = []
-  for (const { argv, lines } of ENV_DUMPS) {
-    const run = await $.process.run(argv, { timeoutMs: 5000 }).catch(() => null)
+  for (const { argv, lines } of await envDumps($)) {
+    const run = await $.process.run(argv, { timeoutMs: 5000, ...(state.home && { cwd: state.home }) }).catch(() => null)
     if (run?.exitCode !== 0) {
       failures.push(`${argv[0]} ${run ? `exited ${run.exitCode}` : 'did not start'}`)
       continue
     }
-    const dump = lines ? run.stdout.replace(/\r?\n/g, '\0') : run.stdout
+    const dump = lines ? joinSetLines(run.stdout) : run.stdout
     return secretsFromPairs(parseEnvDump(dump).filter(([name]) => isSecretName(name)))
   }
   throw new Error(`no env dump: ${failures.join(', ')}`)
