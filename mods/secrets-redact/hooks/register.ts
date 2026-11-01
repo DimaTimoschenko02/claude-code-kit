@@ -107,6 +107,8 @@ const state = {
 }
 
 const unique = <T>(xs: readonly T[]): T[] => [...new Set(xs)]
+/** A path from the engine with forward slashes: on Windows it answers `C:\…`, and every walk here splits on `/`. */
+const slash = (p: string): string => p.replace(/\\/g, '/')
 const basename = (p: string) => p.slice(p.lastIndexOf('/') + 1)
 const join = (dir: string, name: string) => (dir.endsWith('/') ? dir + name : `${dir}/${name}`)
 
@@ -231,18 +233,36 @@ async function gitRoot($: Engine, dir: string): Promise<string | null> {
   return root
 }
 
-/** Secret-named variables of this process, which every Bash child inherits; once per load. Throws when env cannot be read. */
+/**
+ * Ways to dump this process's env, tried in order. A native spawn on Windows cannot reach `/usr/bin/env` (it exits 1
+ * there, and the index never builds), so `env` from PATH comes next, then cmd's `set`, one variable per line.
+ */
+const ENV_DUMPS: readonly { readonly argv: readonly string[]; readonly lines: boolean }[] = [
+  { argv: ['/usr/bin/env', '-0'], lines: false },
+  { argv: ['env', '-0'], lines: false },
+  { argv: ['cmd', '/d', '/c', 'set'], lines: true },
+]
+
+/** Secret-named variables of this process, which every Bash child inherits; once per load. Throws when no dump works. */
 async function loadProcessEnv($: Engine): Promise<readonly Secret[]> {
-  const run = await $.process.run(['/usr/bin/env', '-0'], { timeoutMs: 5000 })
-  if (run.exitCode !== 0) throw new Error(`env -0 exited ${run.exitCode}`)
-  return secretsFromPairs(parseEnvDump(run.stdout).filter(([name]) => isSecretName(name)))
+  const failures: string[] = []
+  for (const { argv, lines } of ENV_DUMPS) {
+    const run = await $.process.run(argv, { timeoutMs: 5000 }).catch(() => null)
+    if (run?.exitCode !== 0) {
+      failures.push(`${argv[0]} ${run ? `exited ${run.exitCode}` : 'did not start'}`)
+      continue
+    }
+    const dump = lines ? run.stdout.replace(/\r?\n/g, '\0') : run.stdout
+    return secretsFromPairs(parseEnvDump(dump).filter(([name]) => isSecretName(name)))
+  }
+  throw new Error(`no env dump: ${failures.join(', ')}`)
 }
 
 /** HOME, the fault switch and the placeholder nonce: read once, before any deny check or redaction. */
 async function ensureHome($: Engine): Promise<void> {
   if (state.homeRead) return
   const [home, fault] = await Promise.all([$.env.get('HOME'), $.env.get('SECRETS_REDACT_FAULT_INJECT')])
-  state.home = home ?? ''
+  state.home = slash(home ?? '')
   state.fault = fault === '1'
   setNonce(nonceFor(`secrets-redact:${state.home}`))
   state.homeRead = true
@@ -264,7 +284,7 @@ async function refresh($: Engine, extraFiles: readonly string[], now: number): P
   await ensureHome($)
   if (state.env === null) state.env = await loadProcessEnv($)
   const [root, cwd] = await Promise.all([$.session.root(), $.session.cwd()])
-  const bases = unique([root, cwd])
+  const bases = unique([slash(root), slash(cwd)])
   const gits = await Promise.all(bases.map(b => gitRoot($, b)))
   const walkRoots = unique(bases.map((b, i) => gits[i] ?? b))
   const scans = await Promise.all(walkRoots.map(r => sourcesBelow($, r, now)))
@@ -426,7 +446,7 @@ function syncStatus($: Engine, extraFiles: readonly string[]): void {
 }
 
 export const register: Register = (on, options) => {
-  const extraFiles = Array.isArray(options.extraFiles) ? options.extraFiles.filter(f => typeof f === 'string' && f.trim() !== '') : []
+  const extraFiles = Array.isArray(options.extraFiles) ? options.extraFiles.filter((f): f is string => typeof f === 'string' && f.trim() !== '').map(slash) : []
 
   on('session.start', async ($, e, next) => {
     await beat($).catch(() => undefined)

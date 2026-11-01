@@ -8,6 +8,8 @@ const HOME = '/home/fake'
 const PROJ = '/work/proj'
 const ACCESS = '/notes/access.md'
 const T0 = Date.UTC(2026, 9, 4, 8, 0)
+/** The path as the world keys it: the engine hands fs hooks native paths, `C:\work\proj` on Windows for `/work/proj`. */
+const posix = (p: string): string => p.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
 
 type File = { text: string; mtimeMs: number }
 type Core = (e: Record<string, unknown>) => ToolCallResult
@@ -30,10 +32,14 @@ type World = {
   submitted: { text: string; context?: readonly string[] }[]
   /** Whether `env -0` succeeds. */
   procOk: boolean
+  /** The one env dump that works, as Windows has it: `env -0` from PATH or cmd's `set`; unset, `/usr/bin/env -0`. */
+  envDump?: 'env -0' | 'cmd /d /c set'
   /** Reads of a path that fail before it reads again. */
   readFails: Map<string, number>
   /** What `$.session.id()` answers; a /clear changes it without a new session.start. */
   sessionId: string
+  /** What `$.session.root()` and `$.session.cwd()` answer; unset, the project root. */
+  cwd?: string
 }
 
 /** A placeholder with its session nonce taken out, so assertions read as the bare form. */
@@ -67,11 +73,11 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
     sessionId: 'sess-1',
   }
   mock.env(on, { HOME, ...opts.env })
-  on('session.root', () => ({ value: PROJ }))
-  on('session.cwd', () => ({ value: PROJ }))
+  on('session.root', () => ({ value: w.cwd ?? PROJ }))
+  on('session.cwd', () => ({ value: w.cwd ?? PROJ }))
   on('session.id', () => ({ value: w.sessionId }))
   on('fs.write', (_$, e) => {
-    w.files.set(e.path, { text: e.text, mtimeMs: T0 })
+    w.files.set(posix(e.path), { text: e.text, mtimeMs: T0 })
     return { value: undefined } as never
   })
   on('ui.log', (_$, e) => {
@@ -91,16 +97,16 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
     w.received.push(e.text)
     return { text: e.text }
   })
-  on('fs.exists', (_$, e) => ({ value: w.files.has(e.path) || w.dirs.has(e.path) }))
+  on('fs.exists', (_$, e) => ({ value: w.files.has(posix(e.path)) || w.dirs.has(posix(e.path)) }))
   on('fs.stat', (_$, e) => {
-    const f = w.files.get(e.path)
+    const f = w.files.get(posix(e.path))
     if (f !== undefined) return { value: { kind: 'file' as const, size: f.text.length, mtimeMs: f.mtimeMs, isLink: false } }
-    if (w.dirs.has(e.path)) return { value: { kind: 'dir' as const, size: 0, mtimeMs: dirMtime(w, e.path), isLink: false } }
-    return { deny: `ENOENT ${e.path}` }
+    if (w.dirs.has(posix(e.path))) return { value: { kind: 'dir' as const, size: 0, mtimeMs: dirMtime(w, posix(e.path)), isLink: false } }
+    return { deny: `ENOENT ${posix(e.path)}` }
   })
   on('fs.list', (_$, e) => {
-    if (!w.dirs.has(e.path)) return { deny: `ENOENT ${e.path}` }
-    const prefix = e.path.endsWith('/') ? e.path : `${e.path}/`
+    if (!w.dirs.has(posix(e.path))) return { deny: `ENOENT ${posix(e.path)}` }
+    const prefix = posix(e.path).endsWith('/') ? posix(e.path) : `${posix(e.path)}/`
     const names = new Map<string, 'file' | 'dir'>()
     for (const p of w.files.keys()) if (p.startsWith(prefix) && !p.slice(prefix.length).includes('/')) names.set(p.slice(prefix.length), 'file')
     for (const d of w.dirs) if (d.startsWith(prefix) && !d.slice(prefix.length).includes('/')) names.set(d.slice(prefix.length), 'dir')
@@ -109,17 +115,24 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
     }
   })
   on('fs.read', (_$, e) => {
-    const left = w.readFails.get(e.path) ?? 0
+    const left = w.readFails.get(posix(e.path)) ?? 0
     if (left > 0) {
-      w.readFails.set(e.path, left - 1)
-      return { deny: `EIO ${e.path}` }
+      w.readFails.set(posix(e.path), left - 1)
+      return { deny: `EIO ${posix(e.path)}` }
     }
-    const f = w.files.get(e.path)
-    return f === undefined ? { deny: `ENOENT ${e.path}` } : { value: f.text }
+    const f = w.files.get(posix(e.path))
+    return f === undefined ? { deny: `ENOENT ${posix(e.path)}` } : { value: f.text }
   })
   on('process.run', (_$, e) => {
     w.runs += 1
-    if (e.argv.join(' ') !== '/usr/bin/env -0') return { deny: `unexpected process ${e.argv.join(' ')}` }
+    const argv = e.argv.join(' ')
+    if (w.envDump !== undefined) {
+      if (argv === '/usr/bin/env -0') return { value: { exitCode: 1, stdout: '', stderr: '/usr/bin/env: not found', isStdoutTruncated: false, isStderrTruncated: false } }
+      if (argv !== w.envDump) return { deny: `ENOENT ${e.argv[0]}` }
+      const stdout = argv === 'env -0' ? PROC_ENV : PROC_ENV.split('\0').join('\r\n')
+      return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    }
+    if (argv !== '/usr/bin/env -0') return { deny: `unexpected process ${argv}` }
     if (!w.procOk) return { value: { exitCode: 1, stdout: '', stderr: 'env: illegal option -- 0', isStdoutTruncated: false, isStderrTruncated: false } }
     return { value: { exitCode: 0, stdout: PROC_ENV, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -644,6 +657,15 @@ describe('review 2026-10-04: sources, encodings, failure modes, speed', () => {
     expect(r2).toContain('DB_PASSWORD=‹secret:DB_PASSWORD›')
   })
 
+  for (const dump of ['env -0', 'cmd /d /c set'] as const) {
+    test(`Windows: /usr/bin/env fails, the process env comes from ${dump} and its values are hidden`, async ($, on) => {
+      const w = world(on)
+      w.envDump = dump
+      const out = norm(stdoutOf(await bash($, w, `${FAKE.envOnly}\n`, 'echo $MY_SERVICE_PASSWORD')))
+      expect(out).toBe('‹secret:MY_SERVICE_PASSWORD›\n')
+    })
+  }
+
   test('review F7: a source that failed to read is read again, not remembered as empty', async ($, on) => {
     const w = world(on)
     w.readFails.set(`${PROJ}/.env`, 1)
@@ -667,6 +689,12 @@ describe('review 2026-10-04: sources, encodings, failure modes, speed', () => {
     w.dirs.add(`${PROJ}/api/config`)
     w.files.set(`${PROJ}/api/config/.env.local`, { text: 'API_SERVICE_TOKEN=Nest3d-Api-Secret-41\n', mtimeMs: T0 })
     expect(norm(stdoutOf(await bash($, w, 'Nest3d-Api-Secret-41\n', 'echo')))).toBe('‹secret:API_SERVICE_TOKEN›\n')
+  })
+
+  test('Windows: a session in a subfolder, its path in backslashes, still finds the git root and its .env', async ($, on) => {
+    const w = world(on)
+    w.cwd = 'C:\\work\\proj\\src'
+    expect(norm(stdoutOf(await bash($, w, `${FAKE.dbPassword}\n`, 'echo $DB_PASSWORD')))).toBe('‹secret:DB_PASSWORD›\n')
   })
 
   test('review F8: adversarial 100k-character inputs are linear (each well under a second)', { timeoutMs: 60_000 }, async () => {
