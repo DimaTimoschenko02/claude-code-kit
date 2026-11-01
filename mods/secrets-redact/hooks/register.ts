@@ -233,49 +233,40 @@ async function gitRoot($: Engine, dir: string): Promise<string | null> {
   return root
 }
 
-type EnvDump = { readonly argv: readonly string[]; readonly lines: boolean }
-
 const parentDir = (p: string): string => p.slice(0, Math.max(0, p.lastIndexOf('/')))
 
+/** PowerShell printing the env as `env -0` does: NUL between pairs, so a value with line breaks stays whole. */
+const PS_ENV_DUMP = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::Out.Write((Get-ChildItem env: | ForEach-Object { $_.Name + '=' + $_.Value }) -join [char]0)"
+
 /**
- * Ways to dump this process's env, tried in order, each by an absolute path: Windows looks for a bare name in the cwd
- * (the project) first, so a planted env.exe would run. A native spawn there cannot reach `/usr/bin/env`, so Git for
- * Windows' own env.exe comes next, then cmd's `set` from the system folder, one variable per line.
+ * Ways to dump this process's env, tried in order, each NUL-delimited and by an absolute path. On Windows (SystemRoot
+ * set) a bare name is looked up in the cwd (the project) first, and `/usr/bin/env` means `C:\usr\bin\env`, a folder
+ * any user may create, so either would run a planted program: there only Git for Windows' env.exe and the system's
+ * PowerShell are tried. cmd's `set` is not used: a value line like `AbC+/9==` reads as a new variable, its tail leaks.
  */
-async function envDumps($: Engine): Promise<EnvDump[]> {
+async function envDumps($: Engine): Promise<string[][]> {
   const [gitBash, programFiles, systemRoot] = await Promise.all([
     $.env.get('CLAUDE_CODE_GIT_BASH_PATH'), $.env.get('ProgramFiles'), $.env.get('SystemRoot'),
   ])
+  if (!systemRoot) return [['/usr/bin/env', '-0']]
   const gitDirs = unique([gitBash && parentDir(parentDir(slash(gitBash))), programFiles && `${slash(programFiles)}/Git`]
-    .filter((d): d is string => !!d))
+    .filter((d): d is string => !!d && /^[A-Za-z]:\//.test(d)))
   return [
-    { argv: ['/usr/bin/env', '-0'], lines: false },
-    ...gitDirs.map(d => ({ argv: [`${d}/usr/bin/env.exe`, '-0'], lines: false })),
-    ...(systemRoot ? [{ argv: [`${slash(systemRoot)}/System32/cmd.exe`, '/d', '/c', 'set'], lines: true }] : []),
+    ...gitDirs.map(d => [`${d}/usr/bin/env.exe`, '-0']),
+    [`${slash(systemRoot)}/System32/WindowsPowerShell/v1.0/powershell.exe`, '-NoProfile', '-NonInteractive', '-Command', PS_ENV_DUMP],
   ]
-}
-
-/** cmd's `set` output in `env -0` form: a line that does not start `NAME=` continues the value above it. */
-function joinSetLines(text: string): string {
-  const out: string[] = []
-  for (const line of text.replace(/(\r?\n)+$/, '').split(/\r?\n/)) {
-    if (out.length === 0 || /^[^=\s][^=]*=/.test(line)) out.push(line)
-    else out[out.length - 1] += `\n${line}`
-  }
-  return out.join('\0')
 }
 
 /** Secret-named variables of this process, which every Bash child inherits; once per load. Throws when no dump works. */
 async function loadProcessEnv($: Engine): Promise<readonly Secret[]> {
   const failures: string[] = []
-  for (const { argv, lines } of await envDumps($)) {
+  for (const argv of await envDumps($)) {
     const run = await $.process.run(argv, { timeoutMs: 5000, ...(state.home && { cwd: state.home }) }).catch(() => null)
     if (run?.exitCode !== 0) {
       failures.push(`${argv[0]} ${run ? `exited ${run.exitCode}` : 'did not start'}`)
       continue
     }
-    const dump = lines ? joinSetLines(run.stdout) : run.stdout
-    return secretsFromPairs(parseEnvDump(dump).filter(([name]) => isSecretName(name)))
+    return secretsFromPairs(parseEnvDump(run.stdout).filter(([name]) => isSecretName(name)))
   }
   throw new Error(`no env dump: ${failures.join(', ')}`)
 }

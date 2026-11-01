@@ -10,10 +10,10 @@ const ACCESS = '/notes/access.md'
 const T0 = Date.UTC(2026, 9, 4, 8, 0)
 /** The env of a Windows Claude process, and the two dumps the mod builds from it. */
 const WIN_ENV = { ProgramFiles: 'C:\\Program Files', SystemRoot: 'C:\\Windows' }
-const WIN_ENV_EXE = 'C:/Program Files/Git/usr/bin/env.exe -0'
-const WIN_CMD_SET = 'C:/Windows/System32/cmd.exe /d /c set'
-/** A variable whose value holds a line break, as cmd's `set` prints it. */
-const MULTI_LINE_VAR = 'MY_MULTI_TOKEN=Qw8-first-Line-k2\r\nRt5-second-Line-9z'
+const WIN_ENV_EXE = 'C:/Program Files/Git/usr/bin/env.exe'
+const WIN_PS = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+/** A variable whose value holds line breaks; its later lines look like `NAME=` pairs, as base64 and PEM lines do. */
+const MULTI_LINE_VAR = 'MY_MULTI_TOKEN=Qw8-first-Line-k2\nAbC9+/Rt5secondLine==\nPATHX=Zt7-third-Line-4q'
 /** The path as the world keys it: the engine hands fs hooks native paths, `C:\work\proj` on Windows for `/work/proj`. */
 const posix = (p: string): string => p.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
 
@@ -38,8 +38,8 @@ type World = {
   submitted: { text: string; context?: readonly string[] }[]
   /** Whether `env -0` succeeds. */
   procOk: boolean
-  /** The one env dump that works, as Windows has it: Git's env.exe or cmd's `set`; unset, `/usr/bin/env -0`. */
-  envDump?: typeof WIN_ENV_EXE | typeof WIN_CMD_SET
+  /** The one env dump program that works, as Windows has it: Git's env.exe or PowerShell; unset, `/usr/bin/env -0`. */
+  envDump?: typeof WIN_ENV_EXE | typeof WIN_PS
   /** argv[0] of every process the mod started. */
   programs: string[]
   /** Reads of a path that fail before it reads again. */
@@ -137,9 +137,8 @@ function world(on: On, opts: { env?: Record<string, string> } = {}): World {
     w.programs.push(String(e.argv[0]))
     const argv = e.argv.join(' ')
     if (w.envDump !== undefined) {
-      if (argv === '/usr/bin/env -0') return { value: { exitCode: 1, stdout: '', stderr: '/usr/bin/env: not found', isStdoutTruncated: false, isStderrTruncated: false } }
-      if (argv !== w.envDump) return { deny: `ENOENT ${e.argv[0]}` }
-      const stdout = argv === WIN_ENV_EXE ? PROC_ENV : `${PROC_ENV.split('\0').join('\r\n')}${MULTI_LINE_VAR}\r\n`
+      if (e.argv[0] !== w.envDump) return { deny: `ENOENT ${e.argv[0]}` }
+      const stdout = e.argv[0] === WIN_ENV_EXE ? PROC_ENV : `${PROC_ENV}${MULTI_LINE_VAR}`
       return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }
     if (argv !== '/usr/bin/env -0') return { deny: `unexpected process ${argv}` }
@@ -667,24 +666,25 @@ describe('review 2026-10-04: sources, encodings, failure modes, speed', () => {
     expect(r2).toContain('DB_PASSWORD=‹secret:DB_PASSWORD›')
   })
 
-  for (const dump of [WIN_ENV_EXE, WIN_CMD_SET] as const) {
-    test(`Windows: /usr/bin/env fails, the process env comes from ${dump} and its values are hidden`, async ($, on) => {
+  for (const dump of [WIN_ENV_EXE, WIN_PS] as const) {
+    test(`Windows: the process env comes from ${dump} and its values are hidden`, async ($, on) => {
       const w = world(on, { env: WIN_ENV })
       w.envDump = dump
       const out = norm(stdoutOf(await bash($, w, `${FAKE.envOnly}\n`, 'echo $MY_SERVICE_PASSWORD')))
       expect(out).toBe('‹secret:MY_SERVICE_PASSWORD›\n')
-      // a bare name would be looked up in the project folder first, where a planted program could wait
-      expect(w.programs.every(p => /^(\/|[A-Za-z]:\/)/.test(p))).toBe(true)
+      // a bare name is looked up in the project folder first, and `/usr/bin/env` is C:\usr\bin\env, which any user may
+      // create: on Windows every program has a drive letter
+      expect(w.programs.length).toBeGreaterThan(0)
+      expect(w.programs.every(p => /^[A-Za-z]:\//.test(p))).toBe(true)
     })
   }
 
-  test('Windows: a value cmd\'s set prints over two lines is known whole', async ($, on) => {
+  test('Windows: a multi-line value whose lines look like NAME= pairs is known whole', async ($, on) => {
     const w = world(on, { env: WIN_ENV })
-    w.envDump = WIN_CMD_SET
-    const out = norm(stdoutOf(await bash($, w, 'Qw8-first-Line-k2\nRt5-second-Line-9z\n', 'echo "$MY_MULTI_TOKEN"')))
+    w.envDump = WIN_PS
+    const out = norm(stdoutOf(await bash($, w, 'Qw8-first-Line-k2\nAbC9+/Rt5secondLine==\nPATHX=Zt7-third-Line-4q\n', 'echo "$MY_MULTI_TOKEN"')))
     expect(out).toContain('‹secret:MY_MULTI_TOKEN›')
-    expect(out).not.toContain('Qw8-first-Line-k2')
-    expect(out).not.toContain('Rt5-second-Line-9z')
+    for (const part of ['Qw8-first-Line-k2', 'AbC9+/Rt5secondLine', 'Zt7-third-Line-4q']) expect(out).not.toContain(part)
   })
 
   test('review F7: a source that failed to read is read again, not remembered as empty', async ($, on) => {
