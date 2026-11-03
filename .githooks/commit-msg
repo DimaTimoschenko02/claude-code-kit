@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# The commit message is published too: the same check as pre-commit, on the message (comment lines dropped).
+set -uo pipefail
+
+hits="$(grep -v '^#' "$1" | bash "$(dirname "$0")/private-check.sh")" && exit 0
+
+echo "🚧 commit-msg: personal content in the commit message — this repo is public." >&2
+printf '%s\n' "$hits" >&2
+echo "   Say it generically (\"the user\", \"a project\")." >&2
+exit 1

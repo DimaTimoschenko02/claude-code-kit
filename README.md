@@ -121,11 +121,19 @@ behind the version actually in use. Two things keep that in check:
 
 ```bash
 git config core.hooksPath .githooks   # run once per clone — it is local, not versioned
+git config kit.privatePatterns ~/somewhere-private/kit-private-patterns   # your own words, see below
 ```
 
-- **`.githooks/pre-commit`** blocks personal content (workspace paths, absolute home
-  paths, employer/product names) in **added** lines. Pre-existing matches don't block
-  unrelated work. Deliberate exception: `git commit --no-verify`.
+- **`.githooks/pre-commit`** and **`commit-msg`** block personal content in **added**
+  lines and in the commit message. Pre-existing matches don't block unrelated work.
+  Deliberate exception: `git commit --no-verify`. What counts as personal
+  (`.githooks/private-check.sh`):
+  - generic workspace paths and words, listed in the script;
+  - your login, home folder name, git user and e-mail — computed on the machine;
+  - your project names, people and repo slugs — one extended regex per line in the
+    file at `kit.privatePatterns`, kept **outside** this repo (listing them here would
+    publish them). A `!regex` line allows attribution you publish on purpose;
+  - a UUID that names a transcript under `~/.claude/projects` — a real session id.
 - **`install.sh --link`** (packages that support it) installs a skill as a symlink into
   this working tree instead of a copy, so field edits land here and show up in
   `git status` the same day. Project-specific rules belong in that project's
