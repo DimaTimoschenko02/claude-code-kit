@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 // chat-audit :: forks (precedent audit, step 1 — no LLM)
 //
-// Cuts transcripts into pairs "agent's last reply before Dima's turn -> Dima's turn" and marks, deterministically,
+// Cuts transcripts into pairs "agent's last reply before the user's turn -> the user's turn" and marks, deterministically,
 // which pairs are fork candidates:
 //   explicit forks  — the agent offered options / a recommendation / asked via AskUserQuestion / wrote a `**Развилка:**` block
-//   implicit forks  — the agent just did it and Dima's turn is a correction ("нет", "не так", "верни", swearing at the result)
-// Spec: 99 meta/specs/precedent-audit.md. The labelling (what Dima chose, did it match the recommendation) is a later,
+//   implicit forks  — the agent just did it and the user's turn is a correction ("нет", "не так", "верни", swearing at the result)
+// Spec: 99 meta/specs/precedent-audit.md. The labelling (what the user chose, did it match the recommendation) is a later,
 // model-driven step; this file only finds and anchors the pairs.
 //
 // Cost design (the tool runs in waves on a laptop with other sessions alive):
@@ -14,8 +14,12 @@
 //   engine  — line stream, a regex gate on the first bytes of a line, JSON.parse only for main-thread user/assistant lines.
 //   memory  — one session at a time; pairs are appended to the output per session; the corpus is never held whole.
 //
+// Scopes are workspace data, so they live in the workspace, not here: a JSON file at --config, or $CHAT_AUDIT_SCOPES,
+// or <cwd>/.claude/chat-audit/scopes.json. Shape: { "<name>": { "dir": "~/code/proj", "codexCwd": "code[\\\\/]proj",
+// "repos": ["owner/repo"], "cards": "~/notes/proj/tasks" } } — repos/cards are read by statements.mjs only.
+//
 // Usage:
-//   node forks.mjs --scope knigomania|mind [--since 2026-10-30] [--out forks.jsonl] [--json-summary]
+//   node forks.mjs --scope <name> [--config scopes.json] [--since 2026-10-30] [--out forks.jsonl] [--json-summary]
 //        [--examples N]       print N sample fork candidates per class (anchors + short quotes)
 //   node forks.mjs --files a.jsonl,b.jsonl [--out ...]     (Claude transcripts, for tests)
 //   node forks.mjs --git          git history of the repos under the scope (reverts = outcomes)
@@ -30,10 +34,20 @@ import { scrub } from './scrub.mjs';
 import { projectFolders } from './discover.mjs';
 
 const HOME = os.homedir();
-const SCOPES = {
-  knigomania: { dir: path.join(HOME, 'pprojects', 'knigomania'), codexCwd: /pprojects[\\/]knigomania/i },
-  mind: { dir: path.join(HOME, 'do_chego_doshel_progress', 'mind'), codexCwd: /do_chego_doshel_progress[\\/]mind/i },
-};
+const expandHome = (p) => (p && p.startsWith('~') ? path.join(HOME, p.slice(1)) : p);
+
+/** One named scope from the workspace config, with `~` expanded and codexCwd compiled. Throws when it is missing. */
+export function loadScope(name, configPath = null) {
+  const file = configPath || process.env.CHAT_AUDIT_SCOPES || path.join(process.cwd(), '.claude', 'chat-audit', 'scopes.json');
+  let all;
+  try { all = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new Error(`scopes config not readable: ${file} (${e.code || e.message})`); }
+  const s = all[name];
+  if (!s || !s.dir) throw new Error(`scope "${name}" not in ${file}; known: ${Object.keys(all).join(', ')}`);
+  return { ...s, name, dir: expandHome(s.dir), cards: expandHome(s.cards || null), repos: s.repos || [],
+    codexCwd: new RegExp(s.codexCwd || s.dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') };
+}
+let currentConfig = null;   // set by the CLI's --config, read by the scope helpers below
+const scopeOf = (name) => (typeof name === 'object' ? name : loadScope(name, currentConfig));
 const TEXT_CAP = 1500;            // chars kept per side; head + tail, the tail is where the question is
 const CHARS_PER_TOKEN = 3.5;      // mixed RU/EN estimate, not a tokenizer
 
@@ -79,7 +93,7 @@ function hasOptions(text) {
   return { numbered, lettered, variantWord: variants.size >= 2 };
 }
 
-// Dima's turn as a correction. Superset of extract.mjs CORRECTION (whose measured recall was 43%): adds the
+// The user's turn as a correction. Superset of extract.mjs CORRECTION (whose measured recall was 43%): adds the
 // revert/undo family and the bare "нет" opener. A HINT — the model-driven step confirms it.
 const END = '(?![\\p{L}\\p{N}])';
 const NONWORD = '[^\\p{L}\\p{N}]*';   // \W is ASCII-only: under /u it swallows Cyrillic letters, so "^\W*нет" matched mid-text
@@ -98,7 +112,7 @@ const CORRECTION_WINDOW = 300;   // the opening of the turn; swearing deep insid
 const MUTATING_BASH = /\bgit (?:commit|push|merge|reset|checkout|rebase|apply|add|stash|cherry-pick|revert)\b|\b(?:rm|mv|cp|mkdir|tee) |sed -i|\b(?:npm|pnpm|yarn) (?:i|add|install|run build|publish)\b|\bdocker (?:compose )?(?:up|build|run|rm|stop)\b|\bkubectl (?:apply|delete|rollout|patch)\b|curl[^|]*-X (?:POST|PUT|DELETE|PATCH)|>>?\s*[\w./~"'-]/;
 
 /** Marks of one pair. `acted` = the agent made tool changes in this turn (needed for an implicit fork). */
-export function markPair({ agentText, dimaText, ask, acted }) {
+export function markPair({ agentText, userText, ask, acted }) {
   const tags = [];
   if (ask) tags.push('ask_tool');
   if (agentText) {
@@ -112,7 +126,7 @@ export function markPair({ agentText, dimaText, ask, acted }) {
     if (/\?/.test(tail)) tags.push('q_tail');
     if (ask && ask.hasRecommended) tags.push('ask_rec');
   }
-  if (dimaText && CORRECTION.test(dimaText.slice(0, CORRECTION_WINDOW))) tags.push(acted ? 'correction_after_action' : 'correction');
+  if (userText && CORRECTION.test(userText.slice(0, CORRECTION_WINDOW))) tags.push(acted ? 'correction_after_action' : 'correction');
   return tags;
 }
 
@@ -161,8 +175,8 @@ function pickedRecommended(ask, answer) {
   return rec.some((r) => r && answer.includes(r));
 }
 
-/** Streams one Claude transcript; returns {pairs, stats}. `seen` dedups resumed-session copies by Dima's turn uuid. */
-export async function pairsFromClaude(file, { seen = new Set(), project = null } = {}) {
+/** Streams one Claude transcript; returns {pairs, stats}. `seen` dedups resumed-session copies by the user's turn uuid. */
+export async function pairsFromClaude(file, { seen = new Set(), project = null, keepOrphans = false } = {}) {
   const session = path.basename(file, '.jsonl');
   const stats = { session, file, bytes: fs.statSync(file).size, started: null, cwd: null,
     humanTurns: 0, queuedTurns: 0, pairsNoAgent: 0, dupTurns: 0, convChars: 0, asks: 0 };
@@ -212,27 +226,27 @@ export async function pairsFromClaude(file, { seen = new Set(), project = null }
         const answer = askAnswerText(o, r);
         const rejected = r.is_error === true;
         const agentText = [ask.lead, ask.text].filter(Boolean).join('\n\n');
-        const tags = markPair({ agentText, dimaText: answer, ask });
+        const tags = markPair({ agentText, userText: answer, ask });
         if (rejected) tags.push('ask_rejected');
         else { const rec = pickedRecommended(ask, answer); if (rec === true) tags.push('ask_picked_rec'); else if (rec === false) tags.push('ask_picked_other'); }
-        pairs.push(buildPair({ stats, project, o, kind: 'ask', agentText, agentTs: ask.ts, dimaText: answer, tags, acted: false, toolCalls, edits, uuid: o.uuid }));
+        pairs.push(buildPair({ stats, project, o, kind: 'ask', agentText, agentTs: ask.ts, userText: answer, tags, acted: false, toolCalls, edits, uuid: o.uuid }));
       }
       if (segTexts.length) prevSeg = segTexts.join('\n');
       segTexts = [];
       continue;
     }
 
-    // a user record that is not a tool result: Dima, or something the harness injected in his name
+    // a user record that is not a tool result: the human, or something the harness injected in their name
     const isHuman = o.origin?.kind === 'human';
     const rawText = textBlocks(c);
-    const dimaText = rawText.replace(SYS_REMINDER, '').trim();
+    const userText = rawText.replace(SYS_REMINDER, '').trim();
     if (segTexts.length) prevSeg = segTexts.join('\n');
     const agentLast = segTexts.length ? segTexts.join('\n') : '';
     segTexts = [];
-    if (!isHuman || !dimaText || NOISE_PREFIX.test(dimaText)) continue;
+    if (!isHuman || !userText || NOISE_PREFIX.test(userText)) continue;
 
     stats.humanTurns++;
-    stats.convChars += dimaText.length;
+    stats.convChars += userText.length;
     const queued = o.promptSource === 'queued';
     if (queued) stats.queuedTurns++;
     if (o.uuid && seen.has(o.uuid)) { stats.dupTurns++; toolCalls = 0; edits = 0; prevSeg = ''; continue; }
@@ -244,32 +258,34 @@ export async function pairsFromClaude(file, { seen = new Set(), project = null }
     if (agentLast && agentLast.length < 200 && prevSeg && prevSeg !== agentLast) agentText = `${prevSeg}\n\n${agentLast}`;
     const acted = edits > 0;   // edits = file writes + state-changing Bash; a turn of pure reading is not "did it himself"
     if (!agentText) stats.pairsNoAgent++;
-    const tags = markPair({ agentText, dimaText, acted });
+    const tags = markPair({ agentText, userText, acted });
     if (queued) tags.push('queued');
-    if (agentText) {
-      pairs.push(buildPair({ stats, project, o, kind: 'turn', agentText, agentTs: lastAgentTs, dimaText, tags, acted, toolCalls, edits, uuid: o.uuid }));
+    // keepOrphans: a turn with no agent text before it (session opener, after an interrupt) is often where the user states
+    // the task and how it should be done — not a fork, but a statement the knowledge corpus wants
+    if (agentText || keepOrphans) {
+      pairs.push(buildPair({ stats, project, o, kind: agentText ? 'turn' : 'opener', agentText, agentTs: lastAgentTs, userText, tags, acted, toolCalls, edits, uuid: o.uuid }));
     }
     toolCalls = 0; edits = 0; prevSeg = ''; lastAgentTs = null;
   }
   return { pairs, stats };
 }
 
-function buildPair({ stats, project, o, kind, agentText, agentTs, dimaText, tags, acted, toolCalls, edits, uuid }) {
+function buildPair({ stats, project, o, kind, agentText, agentTs, userText, tags, acted, toolCalls, edits, uuid }) {
   const ts = o.timestamp;
   const wait = agentTs && ts ? Math.max(0, Math.round((Date.parse(ts) - Date.parse(agentTs)) / 1000)) : null;
   return {
     source: 'claude', project, session: stats.session, ts, uuid: uuid || null, cwd: stats.cwd, kind,
     agentTs, waitSec: wait, toolCalls, edits, acted,
-    agentChars: agentText.length, dimaChars: dimaText.length,
-    agent: cut(agentText), dima: cut(dimaText),
+    agentChars: agentText.length, userChars: userText.length,
+    agent: cut(agentText), user: cut(userText),
     tags, cls: classify(tags),
   };
 }
 
 // ------------------------------------------------------------------ Codex
 
-/** Codex interactive sessions only: codex_exec sessions carry ONE prompt delegated by a Claude session, not Dima. */
-export async function pairsFromCodex(file, { project = null } = {}) {
+/** Codex interactive sessions only: codex_exec sessions carry ONE prompt delegated by a Claude session, not the user. */
+export async function pairsFromCodex(file, { project = null, keepOrphans = false } = {}) {
   const session = path.basename(file, '.jsonl');
   const stats = { session, file, bytes: fs.statSync(file).size, started: null, cwd: null, originator: null,
     humanTurns: 0, pairsNoAgent: 0, convChars: 0, asks: 0 };
@@ -292,11 +308,11 @@ export async function pairsFromCodex(file, { project = null } = {}) {
       const ask = pendingAsk.get(p.call_id); pendingAsk.delete(p.call_id);
       const out = typeof p.output === 'string' ? p.output : JSON.stringify(p.output);
       const agentText = ask.text;
-      const tags = markPair({ agentText, dimaText: out, ask: { hasRecommended: /recommend/i.test(agentText) } });
+      const tags = markPair({ agentText, userText: out, ask: { hasRecommended: /recommend/i.test(agentText) } });
       pairs.push({ source: 'codex', project, session, ts: o.timestamp, uuid: p.call_id, cwd: stats.cwd, kind: 'ask',
         agentTs: ask.ts, waitSec: Math.max(0, Math.round((Date.parse(o.timestamp) - Date.parse(ask.ts)) / 1000)),
-        toolCalls, edits, acted: false, agentChars: agentText.length, dimaChars: out.length,
-        agent: cut(agentText), dima: cut(out), tags, cls: classify(tags) });
+        toolCalls, edits, acted: false, agentChars: agentText.length, userChars: out.length,
+        agent: cut(agentText), user: cut(out), tags, cls: classify(tags) });
       continue;
     }
     if (o.type !== 'event_msg' || p.type !== 'item_completed' || !p.item) continue;
@@ -309,18 +325,18 @@ export async function pairsFromCodex(file, { project = null } = {}) {
       stats.convChars += t.length; lastAgentTs = o.timestamp;
       (it.phase === 'final_answer' ? finals : comments).push(t);
     } else if (it.type === 'UserMessage') {
-      const dimaText = (it.content || []).filter((b) => b && typeof b.text === 'string').map((b) => b.text).join('\n').replace(SYS_REMINDER, '').trim();
+      const userText = (it.content || []).filter((b) => b && typeof b.text === 'string').map((b) => b.text).join('\n').replace(SYS_REMINDER, '').trim();
       const agentText = finals.length ? finals.join('\n') : comments.join('\n');
       const acted = edits > 0;
       finals = []; comments = []; const tc = toolCalls, ed = edits; toolCalls = 0; edits = 0;
-      if (!dimaText) continue;
-      stats.humanTurns++; stats.convChars += dimaText.length;
-      if (!agentText) { stats.pairsNoAgent++; continue; }
-      const tags = markPair({ agentText, dimaText, acted });
-      pairs.push({ source: 'codex', project, session, ts: o.timestamp, uuid: it.id || null, cwd: stats.cwd, kind: 'turn',
+      if (!userText) continue;
+      stats.humanTurns++; stats.convChars += userText.length;
+      if (!agentText) { stats.pairsNoAgent++; if (!keepOrphans) continue; }
+      const tags = markPair({ agentText, userText, acted });
+      pairs.push({ source: 'codex', project, session, ts: o.timestamp, uuid: it.id || null, cwd: stats.cwd, kind: agentText ? 'turn' : 'opener',
         agentTs: lastAgentTs, waitSec: lastAgentTs ? Math.max(0, Math.round((Date.parse(o.timestamp) - Date.parse(lastAgentTs)) / 1000)) : null,
-        toolCalls: tc, edits: ed, acted, agentChars: agentText.length, dimaChars: dimaText.length,
-        agent: cut(agentText), dima: cut(dimaText), tags, cls: classify(tags) });
+        toolCalls: tc, edits: ed, acted, agentChars: agentText.length, userChars: userText.length,
+        agent: cut(agentText), user: cut(userText), tags, cls: classify(tags) });
     }
   }
   return { pairs, stats };
@@ -356,9 +372,9 @@ function* walkJsonl(dir) {
 // ------------------------------------------------------------------ scope resolution + run
 
 /** Claude top-level transcripts of the scope, started on/after `since` (first timestamp read from the head of the file). */
-function claudeFiles(scopeName, sinceMs) {
+export function claudeFiles(scopeName, sinceMs) {
   const files = [];
-  for (const { folder } of projectFolders(SCOPES[scopeName].dir, 'subtree')) {
+  for (const { folder } of projectFolders(scopeOf(scopeName).dir, 'subtree')) {
     for (const f of fs.readdirSync(folder)) {
       if (!f.endsWith('.jsonl')) continue;
       const file = path.join(folder, f);
@@ -380,12 +396,13 @@ function firstTimestamp(file) {
   } finally { fs.closeSync(fd); }
 }
 
-function codexFiles(scopeName, sinceMs) {
+export function codexFiles(scopeName, sinceMs) {
   const out = [];
+  const scope = scopeOf(scopeName);
   const root = path.join(HOME, '.codex', 'sessions');
   for (const file of walkJsonl(root)) {
     const m = codexMeta(file);
-    if (!m || !SCOPES[scopeName].codexCwd.test(m.cwd || '')) continue;
+    if (!m || !scope.codexCwd.test(m.cwd || '')) continue;
     if (Date.parse(m.timestamp || 0) < sinceMs) continue;
     out.push({ file, meta: m });
   }
@@ -411,7 +428,7 @@ export async function runScope({ scope, since, out = null, examples = 0 }) {
         sum.wait.all.push(p.waitSec);
         if (['ask_tool', 'fork_block', 'explicit'].includes(p.cls)) sum.wait.fork.push(p.waitSec);
       }
-      sum.pairChars += p.agent.length + p.dima.length;
+      sum.pairChars += p.agent.length + p.user.length;
       if (examples && ['ask_tool', 'fork_block', 'explicit', 'implicit'].includes(p.cls)) {
         const s = (sum.sampleByClass[p.cls] ||= []);
         if (s.length < examples) s.push(p);
@@ -433,7 +450,7 @@ export async function runScope({ scope, since, out = null, examples = 0 }) {
   for (const { file, meta } of codexFiles(scope, sinceMs)) {
     const bytes = fs.statSync(file).size;
     const c = sum.codex;
-    if (meta.originator === 'codex_exec') { c.execSessions++; c.execBytes += bytes; continue; }   // delegated prompt, not Dima
+    if (meta.originator === 'codex_exec') { c.execSessions++; c.execBytes += bytes; continue; }   // delegated prompt, not the user
     const { pairs, stats } = await pairsFromCodex(file, { project: scope });
     c.interactiveSessions++; c.bytes += bytes; c.humanTurns += stats.humanTurns; c.pairs += pairs.length; c.convChars += stats.convChars;
     sum.perSession.push({ id: stats.session.slice(0, 8) + '(codex)', convTokens: Math.round(stats.convChars / CHARS_PER_TOKEN), humanTurns: stats.humanTurns, pairs: pairs.length });
@@ -445,7 +462,7 @@ export async function runScope({ scope, since, out = null, examples = 0 }) {
 // ------------------------------------------------------------------ git (outcomes)
 
 export function gitOutcomes(scopeName, since) {
-  const root = SCOPES[scopeName].dir;
+  const root = scopeOf(scopeName).dir;
   const repos = [];
   for (const e of fs.readdirSync(root, { withFileTypes: true })) {
     if (e.isDirectory() && fs.existsSync(path.join(root, e.name, '.git'))) repos.push(path.join(root, e.name));
@@ -487,8 +504,11 @@ function printSummary(s) {
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const t0 = Date.now();
   const files = arg('files');
+  currentConfig = arg('config');
+  const usage = 'usage: forks.mjs --scope <name> [--config scopes.json] [--since 2026-10-30] [--out file] [--examples N] | --files a,b | --scope <name> --git';
   if (process.argv.includes('--git')) {
-    console.log(JSON.stringify(gitOutcomes(arg('scope', 'knigomania'), arg('since', '2026-10-30')), null, 2));
+    if (!arg('scope')) { console.error(usage); process.exit(1); }
+    console.log(JSON.stringify(gitOutcomes(arg('scope'), arg('since', '2026-10-30')), null, 2));
   } else if (files) {
     const out = arg('out');
     if (out) fs.writeFileSync(out, '');
@@ -500,7 +520,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
     }
   } else {
     const scope = arg('scope');
-    if (!SCOPES[scope]) { console.error('usage: forks.mjs --scope knigomania|mind [--since 2026-10-30] [--out file] [--examples N] | --files a,b | --git'); process.exit(1); }
+    if (!scope) { console.error(usage); process.exit(1); }
+    try { scopeOf(scope); } catch (e) { console.error(e.message); process.exit(1); }
     const s = await runScope({ scope, since: arg('since', '2026-10-30'), out: arg('out'), examples: Number(arg('examples', 0)) });
     if (process.argv.includes('--json-summary')) {
       const { wait, perSession, ...rest } = s;
