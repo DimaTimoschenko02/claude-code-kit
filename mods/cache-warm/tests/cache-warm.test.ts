@@ -76,6 +76,7 @@ function world(on: On, env: Record<string, string> = { HOME: '/home/fake' }): Wo
   })
   on('store.keys', () => ({ value: [...w.store.keys()] }))
   on('session.id', () => ({ value: w.sid.value }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('process.run', () => {
     w.runs++
     return { deny: 'no processes in this world' }
@@ -165,11 +166,11 @@ describe('session', () => {
     await w.clock.advance(50 * MIN)
     expect(w.forks).toBe(2)
     // The last warm is done: no warm left to keep it, the time is the cache's own expiry.
-    expect(w.statuses.at(-1)).toBe('кэш до 15:40')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 15:40')
     await w.clock.advance(59 * MIN)
-    expect(w.statuses.at(-1)).toBe('кэш до 15:40')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 15:40')
     await w.clock.advance(1 * MIN)
-    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(w.statuses.at(-1)).toBe('🔴 кэш сгорел в 15:40')
     await w.clock.advance(120 * MIN)
     expect(w.forks).toBe(2)
   })
@@ -232,7 +233,7 @@ describe('session', () => {
     expect(w.forks).toBe(1)
     await $.prompt.submit({ text: 'дальше', wait: false, origin: { kind: 'composer' } })
     // The warm at 13:50 renewed the cache for an hour; the window's later warms are off.
-    expect(w.statuses.at(-1)).toBe('кэш до 14:50')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 14:50')
     await w.clock.advance(100 * MIN)
     expect(w.forks).toBe(1)
   })
@@ -276,13 +277,13 @@ describe('status line', () => {
     await start($)
     await reply($, NOTHING)
     // Not warmed: no fire, so the hour after the reply does not read as the 2 h window gone wrong.
-    expect(w.statuses.at(-1)).toBe('кэш до 14:00')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 14:00')
     await reply($, MID_WORK)
-    expect(w.statuses.at(-1)).toBe('кэш до 14:00')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 14:00')
     await w.clock.advance(59 * MIN)
-    expect(w.statuses.at(-1)).toBe('кэш до 14:00')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 14:00')
     await w.clock.advance(1 * MIN)
-    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(w.statuses.at(-1)).toBe('🔴 кэш сгорел в 14:00')
     expect(w.forks).toBe(0)
   })
 
@@ -293,10 +294,10 @@ describe('status line', () => {
     await w.clock.advance(30 * MIN)
     await $.prompt.submit({ text: 'дальше', wait: false, origin: { kind: 'composer' } })
     await $.turn.start({ text: 'дальше', turnId: 't2' } as never)
-    expect(w.statuses.at(-1)).toBe('кэш до 14:30')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 14:30')
     // A turn longer than the TTL still sends requests: the cache part does not go mid-turn.
     await w.clock.advance(70 * MIN)
-    expect(w.statuses.at(-1)).toBe('кэш до 15:30')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 15:30')
     // Nothing blank since the first reply (the one before it is the empty line set at start).
     expect(w.statuses.slice(1)).not.toContain(undefined)
   })
@@ -308,7 +309,7 @@ describe('status line', () => {
     await w.clock.advance(50 * MIN)
     expect(w.forks).toBe(1)
     await warm($, 'off')
-    expect(w.statuses.at(-1)).toBe('кэш до 14:50')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 14:50')
   })
 
   test(
@@ -326,6 +327,7 @@ describe('status line', () => {
             on('prompt.submit', ($, e, next) => {
               if (e.text === 'compact') $.ui.status('точка пишется…')
               if (e.text === 'gone') $.ui.status(undefined)
+              if (e.text === 'fresh') $.ui.status('🟢 точка 13:05')
               return next(e)
             })
           },
@@ -339,14 +341,34 @@ describe('status line', () => {
       expect(onScreen(w)).toEqual(['🔥 кэш до 15:40 · точка 13:00'])
       expect(w.rows.get('stop-point')).toBeUndefined()
       await $.prompt.submit({ text: 'compact', wait: false, origin: { kind: 'composer' } })
-      expect(onScreen(w)).toEqual(['кэш до 14:00 · точка пишется…'])
-      // The cache lapsed: the point stays alone on the line.
+      expect(onScreen(w)).toEqual(['🟢 кэш до 14:00 · точка пишется…'])
+      // The cache lapsed: the line says it died instead of leaving the point alone to look alive.
       await w.clock.advance(60 * MIN)
-      expect(onScreen(w)).toEqual(['точка пишется…'])
+      expect(onScreen(w)).toEqual(['🔴 кэш сгорел в 14:00 · точка пишется…'])
+      // stop-point's green circle sat next to a dead cache's time and read as «the cache is alive»: dropped here.
+      await $.prompt.submit({ text: 'fresh', wait: false, origin: { kind: 'composer' } })
+      expect(onScreen(w)).toEqual(['🔴 кэш сгорел в 14:00 · точка 13:05'])
       await $.prompt.submit({ text: 'gone', wait: false, origin: { kind: 'composer' } })
-      expect(onScreen(w)).toEqual([])
+      expect(onScreen(w)).toEqual(['🔴 кэш сгорел в 14:00'])
     },
   )
+
+  test('a process going away leaves 💤 with the cache end: no tick will turn it red, no warm will run', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, WAITS)
+    expect(w.statuses.at(-1)).toBe('🔥 кэш до 15:40')
+    await $.session.end({ reason: 'other', sessionId: 'sess-1' } as never)
+    expect(w.statuses.at(-1)).toBe('💤 кэш до 14:00, дальше не греется')
+  })
+
+  test('a /clear drops the old cache from the line: the new conversation has none yet', async ($, on) => {
+    const w = world(on)
+    await start($)
+    await reply($, WAITS)
+    await $.session.end({ reason: 'clear', sessionId: 'sess-1' } as never)
+    expect(w.statuses.at(-1)).toBeUndefined()
+  })
 
   test('without stop-point (not loaded or stood down) the line is the cache alone', async ($, on) => {
     const w = world(on)
@@ -402,7 +424,7 @@ describe('a sleeping Mac and the warm log', () => {
     await sleepFor($, w, 29 * MIN)
     expect(w.forks).toBe(0)
     // The cache died at 14:00 while the lid was shut: the line no longer promises 15:40.
-    expect(w.statuses.at(-1)).toBeUndefined()
+    expect(w.statuses.at(-1)).toBe('🔴 кэш сгорел в 14:00')
     expect(logLines(w)).toEqual([
       '2026-10-04 13:00 sess-1 armed: reply waits, mode auto, window 2 ч, first warm 13:50',
       '2026-10-04 14:04 sess-1 warm missed: due 13:50, cache expired 14:00, process paused 13:35–14:04 (Mac asleep); window ended',
@@ -426,7 +448,7 @@ describe('a sleeping Mac and the warm log', () => {
     // The grid stays the reply's: the next warm at 14:40.
     await w.clock.advance(45 * MIN)
     expect(w.forks).toBe(2)
-    expect(w.statuses.at(-1)).toBe('кэш до 15:40')
+    expect(w.statuses.at(-1)).toBe('🟢 кэш до 15:40')
   })
 
   test('every attempt is one line: a refused warm is retried in 2 min, a cold one says it rewrote the cache', async ($, on) => {

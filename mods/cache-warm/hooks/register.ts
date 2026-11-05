@@ -4,7 +4,8 @@
 // by session id, so a respawn or resume keeps them.
 //
 // The status line shows the cache's real end, warmed or not — the owner reads it to decide whether to come back before
-// the cache dies — and carries stop-point's part on the same line: `кэш до 20:15 · точка 19:42`. stop-point's own
+// the cache dies — and carries stop-point's part on the same line: `🟢 кэш до 20:15 · точка 19:42`; a dead cache stays
+// on it as `🔴 кэш сгорел в 20:15`, a session whose process ends leaves `💤 кэш до 20:15`. stop-point's own
 // `$.ui.status` calls pass through this module's `ui.status` hook, which takes their text and clears stop-point's own
 // row; without this mod loaded stop-point's row shows as it is.
 //
@@ -124,9 +125,26 @@ function cacheUntil(): number | null {
   return windowUntil !== null && windowUntil > fromLast ? windowUntil : fromLast
 }
 
+/**
+ * The line: the cache's part, then stop-point's. stop-point's green circle («the point is current») is dropped here: next
+ * to the cache's time it read as «the cache is alive» after the cache had died; its yellow and red ones stay.
+ */
 export function composeStatus(cache: string | undefined, point: string | undefined): string | undefined {
-  const parts = [cache, point].filter((p): p is string => p !== undefined && p !== '')
+  const quiet = point?.replace(/^🟢\s*/u, '')
+  const parts = [cache, quiet].filter((p): p is string => p !== undefined && p !== '')
   return parts.length === 0 ? undefined : parts.join(' · ')
+}
+
+/**
+ * The cache's part of the line: alive (🟢, or 🔥 while warms keep it), dead (🔴, with when it died), or, once the process
+ * is going away, 💤 — a frozen line no tick will turn red, so the owner compares its time with the clock.
+ */
+export function cacheText(until: number | null, now: number, opts: { isWarming: boolean; isEnding: boolean; tzOffsetMin: number }): string | undefined {
+  if (until === null) return undefined
+  const at = hhmm(until, opts.tzOffsetMin)
+  if (until <= now) return `🔴 кэш сгорел в ${at}`
+  if (opts.isEnding) return `💤 кэш до ${at}, дальше не греется`
+  return `${opts.isWarming ? '🔥' : '🟢'} кэш до ${at}`
 }
 
 /** Sets the line from the cache's end and stop-point's part; keeps the minute tick running while there is time to watch. */
@@ -136,7 +154,7 @@ async function show($: Engine, force = false): Promise<void> {
   const isAlive = until !== null && until > now
   // The fire says the time is the warmed window's, kept by warms still to come; plain, it is the cache's own expiry.
   const isWarming = nextAt !== null && windowUntil !== null
-  const cache = isAlive ? `${isWarming ? '🔥 ' : ''}кэш до ${hhmm(until, tzOffsetMin)}` : undefined
+  const cache = cacheText(until, now, { isWarming, isEnding: false, tzOffsetMin })
   const text = composeStatus(cache, pointText)
   if (text !== shown || force) {
     shown = text
@@ -441,6 +459,27 @@ export const register: Register = (on, options) => {
       lastReplyAt = null
       await show($)
     }
+    return next(e)
+  })
+
+  // The process is going away (the daemon retires an idle background session, the owner exits): no tick will turn the
+  // line red when the cache dies, and no warm will run, so the last line says so. A /clear goes on under a new session
+  // with a cache of its own: nothing to show for it until its first turn.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') {
+      disarm()
+      refreshedAt = null
+      lastReplyAt = null
+      await show($)
+      return next(e)
+    }
+    tick?.cancel()
+    tick = null
+    const now = await $.clock.now()
+    // Warms stop with the process: what is left is the cache's own end, not the window's.
+    const text = composeStatus(cacheText(cacheEnd(), now, { isWarming: false, isEnding: true, tzOffsetMin }), pointText)
+    shown = text
+    void $.ui.status(text)
     return next(e)
   })
 
