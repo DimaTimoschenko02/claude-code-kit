@@ -92,13 +92,13 @@ const ANSWER = /^\s*(?:[-*]\s*)?\*\*(?:Ответ|Відповідь)(?:\s*\(([^
 const QUESTION_ITEM = /^\s{0,3}\d+\.\s+\S/;
 const DECISION_HEAD = /^#{2,4}\s*(?:Рішення|Решения|Решение)\s*$/;
 
-function* walkMd(dir) {
+function* walkMd(dir, skip = null) {
   let entries;
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
     const p = path.join(dir, e.name);
-    if (e.isDirectory()) yield* walkMd(p);
-    else if (e.name.endsWith('.md')) yield p;
+    if (e.isDirectory()) yield* walkMd(p, skip);
+    else if (e.name.endsWith('.md') && !skip?.test(e.name)) yield p;
   }
 }
 
@@ -131,6 +131,7 @@ export function cardStatements(file, project) {
 // ------------------------------------------------------------------ run
 
 export async function run({ scopeDef, since, prSince, out, repos, cards }) {
+  const skip = scopeDef.cardsSkip ?? null;
   const scope = scopeDef.name;
   fs.writeFileSync(out, '');
   const counts = {};
@@ -144,7 +145,7 @@ export async function run({ scopeDef, since, prSince, out, repos, cards }) {
   // the same decision is copied into the epic card and its child cards — keep the first copy, count the rest
   let cardFiles = 0, cardDupes = 0;
   const seenText = new Set();
-  for (const f of cards ? walkMd(cards) : []) {
+  for (const f of cards ? walkMd(cards, skip) : []) {
     cardFiles++;
     for (const s of cardStatements(f, scope)) {
       const key = s.source + '|' + s.text.replace(/\s+/g, ' ');

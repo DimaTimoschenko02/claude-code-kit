@@ -16,7 +16,9 @@
 //
 // Scopes are workspace data, so they live in the workspace, not here: a JSON file at --config, or $CHAT_AUDIT_SCOPES,
 // or <cwd>/.claude/chat-audit/scopes.json. Shape: { "<name>": { "dir": "~/code/proj", "codexCwd": "code[\\\\/]proj",
-// "repos": ["owner/repo"], "cards": "~/notes/proj/tasks" } } — repos/cards are read by statements.mjs only.
+// "repos": ["owner/repo"], "cards": "~/notes/proj/tasks",
+// "cardsSkip": "^Notes " } } — repos/cards/cardsSkip are read by statements.mjs only; cardsSkip is a regex for file
+// names under cards that are not cards (an agent's working notes beside a card).
 //
 // Usage:
 //   node forks.mjs --scope <name> [--config scopes.json] [--since 2026-10-30] [--out forks.jsonl] [--json-summary]
@@ -44,6 +46,7 @@ export function loadScope(name, configPath = null) {
   const s = all[name];
   if (!s || !s.dir) throw new Error(`scope "${name}" not in ${file}; known: ${Object.keys(all).join(', ')}`);
   return { ...s, name, dir: expandHome(s.dir), cards: expandHome(s.cards || null), repos: s.repos || [],
+    cardsSkip: s.cardsSkip ? new RegExp(s.cardsSkip) : null,
     codexCwd: new RegExp(s.codexCwd || s.dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') };
 }
 let currentConfig = null;   // set by the CLI's --config, read by the scope helpers below
