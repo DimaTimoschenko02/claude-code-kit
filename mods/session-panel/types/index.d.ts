@@ -80,6 +80,8 @@ declare module 'claude-code' {
       /** What the owner unfolded: `more:<section>`, `closed`, `task:<id>`. */
       open: string[]
       refs: Refs
+      /** This session's stop-point file once it exists, '' before; shown on top of the panel. */
+      point: string
     }
   }
 }

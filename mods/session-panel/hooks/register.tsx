@@ -37,6 +37,7 @@ import type { Run } from './markup'
 import { NO_REFS, blocked, candidates, fileHref, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
 import type { Refs } from './refs'
 import { basename, isAbsolute, isRoot, joinPath, toSlash } from './paths'
+import { pointCandidates } from './point'
 
 type Engine = EngineInterface
 
@@ -61,6 +62,7 @@ const PR_REFRESH_MS = 60_000
 /** Pull requests asked per pass, the most recently carried first; the rest wait for the next reply. */
 const PR_PER_PASS = 20
 const refsAtom = atom({ plugin: 'session-panel', key: 'refs' } as const, NO_REFS)
+const pointAtom = atom({ plugin: 'session-panel', key: 'point' } as const, '')
 
 function isPanel(value: unknown): value is Panel {
   if (typeof value !== 'object' || value === null) return false
@@ -94,6 +96,21 @@ async function sync($: Engine): Promise<void> {
   await update($, openAtom, () => [])
   await refreshCards($)
   await resolveRefs($)
+  await refreshPoint($)
+}
+
+/** The stop point's file, looked up again until it exists: stop-point writes it after the first reply. */
+async function refreshPoint($: Engine): Promise<void> {
+  const root = await $.session.root().catch(() => '')
+  let found = ''
+  for (const path of pointCandidates(root, where.home, sid)) {
+    const st = await $.fs.stat(path).catch(() => null)
+    if (st?.kind === 'file') {
+      found = path
+      break
+    }
+  }
+  if (found !== (await read($, pointAtom))) await update($, pointAtom, () => found)
 }
 
 // Where the places a line names are looked up: the session's folder and repo, the owner's home, the GitHub repo, and
@@ -555,6 +572,7 @@ export const register: Register = (on, options) => {
     const named = await withCards($, mentionedIds(e.answer, pattern))
     await change($, p => setWaiting(mention(merge(nextTurn(p), got, pattern), named), wait))
     await refreshCards($)
+    if ((await read($, pointAtom)) === '') await refreshPoint($)
     laterPrs($, false)
     return r
   })
@@ -580,6 +598,8 @@ export const register: Register = (on, options) => {
     const prs: Readonly<Record<string, Pr>> = await read($, prsAtom)
     const unfolded: readonly string[] = await read($, openAtom)
     const cards: Readonly<Record<string, Card>> = await read($, cardsAtom)
+    const point: string = await read($, pointAtom)
+    const pointHref = point === '' ? undefined : fileHref({ abs: point, dir: false })
     const statuses: Record<string, string> = {}
     for (const [task, c] of Object.entries(cards)) if (c.status !== undefined) statuses[task] = c.status
     const v = view(panel, { statuses, prs, doneStatuses: cfg.doneStatuses })
@@ -772,6 +792,13 @@ export const register: Register = (on, options) => {
     return (
       <Box flexDirection="column">
         {blockerBox}
+        {point === '' ? null : (
+          <Text wrap="wrap">
+            <Text dimColor>{'📍 точка: '}</Text>
+            {/* The path is built from the session's own root and id, not from a reply: no gate to pass. */}
+            {pointHref === undefined ? <Text>{point}</Text> : <Link href={pointHref}><Text>{point}</Text></Link>}
+          </Text>
+        )}
         {restart === '' ? null : <Text dimColor wrap="wrap">перезапуск: {restart}</Text>}
         {panel.items.length === 0 && (panel.mentioned ?? []).length === 0 && walls.length === 0 ? <Text dimColor>Пока пусто: задачи, ссылки и итоги из ответов появятся здесь.</Text> : null}
         {block('Ждёт тебя', v.waiting.map(i => row(i)))}

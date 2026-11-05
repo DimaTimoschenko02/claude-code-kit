@@ -7,6 +7,7 @@ import { cardBadge, cardStatus, parsePr, prBadge, pullOf } from '../hooks/status
 import type { Panel, Pr } from '../types'
 import { taskRegex } from '../hooks/logic'
 import { fixturePath } from './fixture-path'
+import { pointCandidates } from '../hooks/point'
 
 const SID = 'sess-fresh'
 const CARDS = '/home/fake/vault/tasks'
@@ -268,5 +269,37 @@ describe('the pane', () => {
     expect(await ui.find({ text: /итог 3/ })).toBeUndefined()
     await ui.unmount()
     expect((w.store.get(`panel:${SID}`) as Panel).turn).toBe(1)
+  })
+})
+
+describe('the stop point on top', () => {
+  test('once stop-point wrote the file the pane shows its path on top, a link to open it; before that nothing', { options: OPTIONS }, async ($, on) => {
+    const w = world(on)
+    mock.env(on, { HOME: '/home/fake' })
+    on('session.root', () => ({ value: '/home/fake/proj' }))
+    const written = new Set<string>()
+    on('fs.stat', (_$, e) =>
+      written.has(fixturePath(e.path)) ? { value: { kind: 'file', size: 10, mtimeMs: 1, isSymlink: false } as never } : { deny: `ENOENT ${e.path}` },
+    )
+    await start($)
+    let ui = await $.ui.mount(PANE)
+    expect(await ui.find({ text: /точка:/ })).toBeUndefined()
+    await ui.unmount()
+    // The repo keeps no resume folder: the point lands in the owner's home, after the first reply.
+    written.add(`/home/fake/.claude/state/stop-point/points/${SID}.md`)
+    await reply($, 'первый ответ')
+    ui = await $.ui.mount(PANE)
+    const link = (await ui.findAll({ type: 'Link' })).find(l => /points\/sess-fresh\.md/.test(l.text))
+    expect(link).toBeDefined()
+    expect(String(link!.props.href)).toMatch(/^webstorm:\/\/open\?file=.*\/\.claude\/state\/stop-point\/points\/sess-fresh\.md$/)
+    await ui.unmount()
+  })
+
+  test('a repo that keeps its points in .claude/state/resume wins over the home folder', () => {
+    expect(pointCandidates('C:\\proj', 'D:\\home\\owner', 'abc')).toEqual([
+      'C:/proj/.claude/state/resume/abc.md',
+      'D:/home/owner/.claude/state/stop-point/points/abc.md',
+    ])
+    expect(pointCandidates('/proj', '/home/me', '')).toEqual([])
   })
 })
