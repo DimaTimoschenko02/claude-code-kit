@@ -96,7 +96,8 @@ if [[ -n $smoke ]]; then
   sep=':'
   ((is_windows)) && sep=';'
   case "$sep${CLAUDE_CODE_PLUGIN_DIRS:-}$sep" in *"$sep$ndir$sep"*) ;; *) extra=(--plugin-dir "$ndir") ;; esac
-  perl -e 'alarm 150; exec @ARGV' claude ${extra[@]+"${extra[@]}"} -p "$smoke" </dev/null >"$tmp/smoke" 2>&1
+  # Git Bash rewrites a lone "/command" argument into a path under its install root; keep the prompt as typed.
+  MSYS_NO_PATHCONV=1 perl -e 'alarm 150; exec @ARGV' claude ${extra[@]+"${extra[@]}"} -p "$smoke" </dev/null >"$tmp/smoke" 2>&1
   status=$?
   grep -q "^$name: \|($name)" "$tmp/smoke" || status=1
   # An answer can come from another copy of the same name while this one never loaded: that is no pass.
