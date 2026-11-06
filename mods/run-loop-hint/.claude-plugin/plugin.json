@@ -1,0 +1,16 @@
+{
+  "name": "run-loop-hint",
+  "version": "0.1.0",
+  "author": {
+    "name": "Dima Timoschenko"
+  },
+  "description": "Nudges the main session to hand a long run → read numbers → rerun Bash loop to a cheaper runner agent, never blocks: one context line on the Nth run in a row.",
+  "userConfig": {
+    "threshold": {
+      "type": "number",
+      "title": "Runs in a row before the hint",
+      "description": "How many run commands (npx, npm run/test, node <file>, python <file>, vitest, ffmpeg, gh run watch, …) the main session makes with no Agent or Workflow call and no new prompt before the hint is added; again every further N runs, at most 3 times per prompt.",
+      "default": 8
+    }
+  }
+}
