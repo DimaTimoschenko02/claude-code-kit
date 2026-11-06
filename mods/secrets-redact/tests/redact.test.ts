@@ -14,8 +14,8 @@ const WIN_ENV_EXE = 'C:/Program Files/Git/usr/bin/env.exe'
 const WIN_PS = 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 /** A variable whose value holds line breaks; its later lines look like `NAME=` pairs, as base64 and PEM lines do. */
 const MULTI_LINE_VAR = 'MY_MULTI_TOKEN=Qw8-first-Line-k2\nAbC9+/Rt5secondLine==\nPATHX=Zt7-third-Line-4q'
-/** The path as the world keys it: the engine hands fs hooks native paths, `C:\work\proj` on Windows for `/work/proj`. */
-const posix = (p: string): string => p.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
+/** POSIX hosts prefix synthetic drive-letter paths with cwd before the fs hook. The path as the world keys it: the engine hands fs hooks native paths, `C:\work\proj` on Windows for `/work/proj`. */
+const posix = (p: string): string => p.replace(/\\/g, '/').replace(/^(?:.*\/)?[A-Za-z]:(?=\/)/, '')
 
 type File = { text: string; mtimeMs: number }
 type Core = (e: Record<string, unknown>) => ToolCallResult

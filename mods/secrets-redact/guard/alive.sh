@@ -27,7 +27,7 @@ if [[ -n $e ]]; then
   IFS=: read -r a b c <<<"$e"
   if [[ -z $c ]]; then h=0; m=$a; s=$b; else h=$a; m=$b; s=$c; fi
   started=$(( $(date +%s) - (10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s) ))
-  enabled=$(stat -f %m "$dir/enabled-at" 2>/dev/null || stat -c %Y "$dir/enabled-at")
+  enabled=$(stat -c %Y "$dir/enabled-at" 2>/dev/null || stat -f %m "$dir/enabled-at")
   (( started < enabled )) && exit 0
 fi
 (( RANDOM % 500 == 0 )) && find "$dir/alive" -type f -mtime +7 -delete 2>/dev/null
