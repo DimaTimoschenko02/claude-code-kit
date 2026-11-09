@@ -99,13 +99,68 @@ function isSessionWarm(v: unknown): v is SessionWarm {
   return (o.mode === 'auto' || o.mode === 'on' || o.mode === 'off') && typeof o.at === 'number'
 }
 
+// The store only carries the owner's choices across a restart. A store the engine cannot read (a file a crash left
+// half-written refuses every call, keys included) must cost only that: the choices then live in this load's memory,
+// the warms go on, and `/warm` names the file to move aside. No store call here throws.
+/** What this load wrote, read back when the store refuses. */
+let memory = new Map<string, unknown>()
+/** '' while the store works; else where its unreadable file is. */
+let storeBroken = ''
+
+/** Where the store's file is, from the engine's refusal; any other failure kept short. */
+export function storeProblem(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ')
+  const file = /store file (.+?\.json)/.exec(text)?.[1]
+  return file !== undefined ? file.slice(0, 300) : text.slice(0, 200)
+}
+
+function storeFailed($: Engine, err: unknown): void {
+  storeBroken = storeProblem(err)
+  $.ui.log(`cache-warm: store refused, choices live in memory only: ${String(err).slice(0, 300)}`, { to: 'debug' })
+}
+
+async function storeGet($: Engine, key: string): Promise<unknown> {
+  try {
+    const v = await $.store.get(key)
+    storeBroken = ''
+    return v
+  } catch (err) {
+    storeFailed($, err)
+    return memory.get(key)
+  }
+}
+
+async function storeSet($: Engine, key: string, value: unknown): Promise<void> {
+  memory.set(key, JSON.parse(JSON.stringify(value)))
+  try {
+    await $.store.set(key, value)
+    storeBroken = ''
+  } catch (err) {
+    storeFailed($, err)
+  }
+}
+
+/** Choices of sessions long gone would pile up in the store. */
+async function sweepStore($: Engine): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(SESSION)) continue
+      const v = await $.store.get(key)
+      if (!isSessionWarm(v) || now - v.at > TTL_MS) await $.store.delete(key)
+    }
+  } catch (err) {
+    storeFailed($, err)
+  }
+}
+
 async function own($: Engine): Promise<SessionWarm | undefined> {
-  const v = await $.store.get(`${SESSION}${sid}`)
+  const v = await storeGet($, `${SESSION}${sid}`)
   return isSessionWarm(v) ? v : undefined
 }
 
 async function defaultHours($: Engine): Promise<number> {
-  const v = await $.store.get(DEFAULT)
+  const v = await storeGet($, DEFAULT)
   return typeof v === 'number' && v > 0 ? v : cfg.defaultHours
 }
 
@@ -387,6 +442,9 @@ async function statusText($: Engine): Promise<string> {
   lines.push(`По умолчанию для новых сессий: ${hoursText(def)}.`)
   lines.push(`Журнал прогревов (все сессии, строка на попытку): ${LOG_PATH}`)
   lines.push('`/warm 3` или `/warm 1h 30m` — окно этой сессии · `/warm off` · `/warm on` (после каждого ответа) · `/warm auto` · `/warm default 2`')
+  if (storeBroken !== '') {
+    lines.push(`⚠ Выбор не сохраняется после перезапуска: хранилище не читается — отодвинь файл: ${storeBroken}`)
+  }
   return lines.join('\n')
 }
 
@@ -417,13 +475,7 @@ export const register: Register = (on, options) => {
     // The zone as of now, from the engine's clock (no `date` on Windows).
     tzOffsetMin = -new Date(await $.clock.now()).getTimezoneOffset()
 
-    // Choices of sessions long gone would pile up in the store.
-    const now = await $.clock.now()
-    for (const key of await $.store.keys()) {
-      if (!key.startsWith(SESSION)) continue
-      const v = await $.store.get(key)
-      if (!isSessionWarm(v) || now - v.at > TTL_MS) await $.store.delete(key)
-    }
+    await sweepStore($)
     // After a reload the screen keeps the old instance's line, whatever this one last set.
     await show($, true)
     return next(e)
@@ -499,11 +551,11 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     const mine = await own($)
     if (c.kind === 'mode') {
-      await $.store.set(`${SESSION}${sid}`, { ...mine, mode: c.mode, at: now })
+      await storeSet($, `${SESSION}${sid}`, { ...mine, mode: c.mode, at: now })
     } else if (c.kind === 'hours') {
-      await $.store.set(`${SESSION}${sid}`, { mode: mine?.mode ?? 'auto', hours: c.hours, at: now })
+      await storeSet($, `${SESSION}${sid}`, { mode: mine?.mode ?? 'auto', hours: c.hours, at: now })
     } else if (c.kind === 'default') {
-      await $.store.set(DEFAULT, c.hours)
+      await storeSet($, DEFAULT, c.hours)
     }
     // A bare `/warm` only reads: re-planning would drop a retry the clock holds.
     if (c.kind !== 'status' && !isTurnRunning) await evaluate($)
