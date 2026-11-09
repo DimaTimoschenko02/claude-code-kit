@@ -1,0 +1,15 @@
+{
+  "repo": "example-owner/two-runners",
+  "host": "root@runner-host.example.invalid",
+  "dir": "/opt/two-runners-ci",
+  "composeName": "two-runners-ci",
+  "runners": [
+    { "name": "two-runners-ci", "labels": ["two-runners"], "limits": { "cpus": 1, "mem": "1536m" }, "testDb": true },
+    { "name": "two-runners-ci-light", "labels": ["two-runners-light"], "limits": { "cpus": 0.5, "mem": "512m" } }
+  ],
+  "testDb": { "image": "pgvector/pgvector:pg18", "port": 5435, "user": "two_runners", "db": "two_runners", "cpus": 0.5, "mem": "512m" },
+  "extraApt": ["postgresql-client"],
+  "features": [],
+  "runnerVersion": "2.338.0",
+  "runnerSha256": "af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32"
+}

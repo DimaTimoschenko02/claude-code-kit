@@ -14,6 +14,12 @@ that were originally coupled to a particular setup have been decoupled before pu
 |---|---|
 | **research** | A cost-aware web-research dispatcher. Triages trivial lookups to a single `WebSearch`, routes real research through a tiered workflow engine (lite/normal/deep) with per-phase model routing (Haiku/Sonnet/Opus). Ships its engine as `research.js` (a Workflow script). |
 
+### Infrastructure
+
+| Package | What it does |
+|---|---|
+| [**ci-runner**](ci-runner/README.md) | Renders and checks per-project self-hosted GitHub Actions runners from one Docker canon; installs with a busy-runner guard and stdin-only registration token, with optional Playwright and test Postgres. |
+
 ### Hooks (`hooks/`)
 
 | Hook | Event | What it does |

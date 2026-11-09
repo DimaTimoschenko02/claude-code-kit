@@ -1,0 +1,32 @@
+# Playwright runner with CPU affinity, low CPU weight, bounded memory without swap,
+# high OOM priority, bounded pids and logs to protect other workloads on a shared host.
+# Job code runs as an unprivileged user without a Docker socket or host mounts.
+name: playwright-ci
+
+services:
+  runner:
+    build: .
+    environment:
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      RUNNER_REPO_URL: https://github.com/example-owner/playwright
+      RUNNER_NAME: playwright-ci
+      RUNNER_LABELS: playwright
+    volumes:
+      - runner:/home/runner
+    cpuset: "2,3"
+    cpu_shares: 256
+    mem_limit: 3g
+    memswap_limit: 3g
+    oom_score_adj: 1000
+    pids_limit: 4096
+    # Chromium keeps its renderer buffers in /dev/shm; Docker's default 64 MB crashes a WebGL page.
+    shm_size: 1g
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  runner:

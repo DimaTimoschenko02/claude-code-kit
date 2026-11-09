@@ -1,0 +1,19 @@
+{
+  "repo": "example-owner/pgvector",
+  "host": "root@runner-host.example.invalid",
+  "dir": "/opt/pgvector-ci",
+  "composeName": "pgvector-ci",
+  "runners": [
+    {
+      "name": "pgvector-ci",
+      "labels": ["pgvector"],
+      "limits": { "cpuset": "2,3", "cpuShares": 256, "mem": "1536m", "oomScoreAdj": 1000, "pids": 4096 },
+      "testDb": true
+    }
+  ],
+  "testDb": { "image": "ankane/pgvector:v0.5.1", "port": 5436, "user": "myuser", "db": "pgvector_test", "mem": "384m", "cpus": 0.5 },
+  "extraApt": ["postgresql-client"],
+  "features": [],
+  "runnerVersion": "2.338.2",
+  "runnerSha256": "baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
+}

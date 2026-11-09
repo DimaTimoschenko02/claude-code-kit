@@ -1,0 +1,35 @@
+{
+  "name": "playwright-ci",
+  "services": {
+    "runner": {
+      "build": ".",
+      "cpu_shares": 256,
+      "cpuset": "2,3",
+      "environment": {
+        "RUNNER_LABELS": "playwright",
+        "RUNNER_NAME": "playwright-ci",
+        "RUNNER_REPO_URL": "https://github.com/example-owner/playwright",
+        "RUNNER_TOKEN": "${RUNNER_TOKEN:-}"
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "mem_limit": "3g",
+      "memswap_limit": "3g",
+      "oom_score_adj": 1000,
+      "pids_limit": 4096,
+      "restart": "unless-stopped",
+      "shm_size": "1g",
+      "volumes": [
+        "runner:/home/runner"
+      ]
+    }
+  },
+  "volumes": {
+    "runner": null
+  }
+}

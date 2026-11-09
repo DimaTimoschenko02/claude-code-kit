@@ -1,0 +1,81 @@
+{
+  "name": "two-runners-ci",
+  "services": {
+    "postgres": {
+      "command": [
+        "postgres",
+        "-p",
+        "5435",
+        "-c",
+        "jit=off",
+        "-c",
+        "fsync=off",
+        "-c",
+        "synchronous_commit=off",
+        "-c",
+        "full_page_writes=off"
+      ],
+      "cpus": 0.5,
+      "environment": {
+        "POSTGRES_DB": "two_runners",
+        "POSTGRES_HOST_AUTH_METHOD": "trust",
+        "POSTGRES_USER": "two_runners"
+      },
+      "image": "pgvector/pgvector:pg18",
+      "mem_limit": "512m",
+      "restart": "unless-stopped",
+      "volumes": [
+        "pgdata:/var/lib/postgresql"
+      ]
+    },
+    "runner": {
+      "build": ".",
+      "cpus": 1,
+      "depends_on": [
+        "postgres"
+      ],
+      "environment": {
+        "RUNNER_TOKEN": "${RUNNER_TOKEN:-}"
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "mem_limit": "1536m",
+      "network_mode": "service:postgres",
+      "restart": "unless-stopped",
+      "volumes": [
+        "runner:/home/runner"
+      ]
+    },
+    "runner-light": {
+      "build": ".",
+      "cpus": 0.5,
+      "environment": {
+        "RUNNER_LABELS": "two-runners-light",
+        "RUNNER_NAME": "two-runners-ci-light",
+        "RUNNER_TOKEN": "${RUNNER_TOKEN:-}"
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "3",
+          "max-size": "10m"
+        }
+      },
+      "mem_limit": "512m",
+      "restart": "unless-stopped",
+      "volumes": [
+        "runner-light:/home/runner"
+      ]
+    }
+  },
+  "volumes": {
+    "pgdata": {},
+    "runner": {},
+    "runner-light": {}
+  }
+}

@@ -1,0 +1,59 @@
+# Main and light runners with a disposable test database.
+# Hard resource limits isolate CI workloads on a shared host. Jobs run as a non-root user,
+# with no Docker socket, host mounts or access to the host's loopback.
+name: two-runners-ci
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    # Tests reach the DB at 127.0.0.1:5435 through the shared network namespace.
+    # Durability is unnecessary for a database recreated by each workflow run.
+    command: ["postgres", "-p", "5435", "-c", "jit=off", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"]
+    environment:
+      POSTGRES_USER: two_runners
+      POSTGRES_DB: two_runners
+      # nothing outside this namespace can reach the port: it is not published
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata:/var/lib/postgresql
+    cpus: 0.5
+    mem_limit: 512m
+    restart: unless-stopped
+  runner:
+    build: .
+    network_mode: service:postgres
+    depends_on: [postgres]
+    environment:
+      # read once, on the first start (entrypoint.sh); afterwards the registration lives in the volume
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+    volumes:
+      # the runner's home: registration, its self-updates, the node tool cache, the pnpm store and job workspaces survive
+      # a rebuild. The image's runner is copied in only into an empty volume — later versions come by the runner's own
+      # self-update, not by a new RUNNER_VERSION.
+      - runner:/home/runner
+    cpus: 1.0
+    mem_limit: 1536m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+  # A separate light runner prevents short checks from waiting behind long builds.
+  # It takes only jobs labelled two-runners-light. It needs
+  # no test DB, so it sits on the project network, not in Postgres's namespace; same image, same non-root user.
+  runner-light:
+    build: .
+    environment:
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      RUNNER_NAME: two-runners-ci-light
+      RUNNER_LABELS: two-runners-light
+    volumes:
+      - runner-light:/home/runner
+    cpus: 0.5
+    mem_limit: 512m
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+volumes:
+  pgdata: {}
+  runner: {}
+  runner-light: {}
