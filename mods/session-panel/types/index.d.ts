@@ -82,6 +82,8 @@ declare module 'claude-code' {
       refs: Refs
       /** This session's stop-point file once it exists, '' before; shown on top of the panel. */
       point: string
+      /** '' while the store works; else where its unreadable file is — the panel then lives in memory only. */
+      store: string
     }
   }
 }

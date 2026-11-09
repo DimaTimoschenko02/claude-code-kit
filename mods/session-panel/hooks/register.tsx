@@ -63,6 +63,7 @@ const PR_REFRESH_MS = 60_000
 const PR_PER_PASS = 20
 const refsAtom = atom({ plugin: 'session-panel', key: 'refs' } as const, NO_REFS)
 const pointAtom = atom({ plugin: 'session-panel', key: 'point' } as const, '')
+const storeAtom = atom({ plugin: 'session-panel', key: 'store' } as const, '')
 
 function isPanel(value: unknown): value is Panel {
   if (typeof value !== 'object' || value === null) return false
@@ -86,11 +87,65 @@ let tzOffsetMin = 0
 /** claude-in-chrome calls in a row that found the extension down; one is a hiccup a reconnect fixes, two a blocker. */
 let chromeDowns = 0
 
+// The store is a convenience: the panel outlives a restart through it. A store the engine cannot read (a file a crash
+// left half-written refuses every call) must cost only that — never the links, cards and rows of the session itself,
+// which every hook computes after a store call. Each store call goes through these three and never throws.
+
+/** Where the store's file is, from the engine's refusal: shown so the owner can move it aside. */
+export function storeProblem(err: unknown): string {
+  const text = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ')
+  const file = /store file (.+?\.json)/.exec(text)?.[1]
+  return file !== undefined ? file.slice(0, 300) : text.slice(0, 200)
+}
+
+async function storeState($: Engine, problem: string): Promise<void> {
+  if ((await read($, storeAtom)) !== problem) await update($, storeAtom, () => problem)
+}
+
+async function storeFailed($: Engine, err: unknown): Promise<void> {
+  $.ui.log(`session-panel: store refused, the panel lives in memory only: ${String(err).slice(0, 300)}`, { to: 'debug' })
+  await storeState($, storeProblem(err))
+}
+
+async function storeGet($: Engine, key: string): Promise<unknown> {
+  try {
+    const value = await $.store.get(key)
+    await storeState($, '')
+    return value
+  } catch (err) {
+    await storeFailed($, err)
+    return undefined
+  }
+}
+
+async function storeSet($: Engine, key: string, value: unknown): Promise<void> {
+  try {
+    await $.store.set(key, value)
+    await storeState($, '')
+  } catch (err) {
+    await storeFailed($, err)
+  }
+}
+
+/** Panels of sessions long gone would fill the store's 4 MiB. */
+async function sweepStore($: Engine): Promise<void> {
+  try {
+    const now = await $.clock.now()
+    for (const key of await $.store.keys()) {
+      if (!key.startsWith(KEY)) continue
+      const value = await $.store.get(key)
+      if (!isPanel(value) || now - value.at > TTL_MS) await $.store.delete(key)
+    }
+  } catch (err) {
+    await storeFailed($, err)
+  }
+}
+
 async function sync($: Engine): Promise<void> {
   const id = await $.session.id()
   if (id === sid) return
   sid = id
-  const stored = await $.store.get(`${KEY}${id}`)
+  const stored = await storeGet($, `${KEY}${id}`)
   await update($, panelAtom, () => (isPanel(stored) ? normalize(stored) : emptyPanel(0)))
   await update($, editingAtom, () => null)
   await update($, openAtom, () => [])
@@ -213,7 +268,7 @@ async function change($: Engine, fn: (p: Panel) => Panel): Promise<void> {
   if (after === before) return
   const stamped = { ...after, at: await $.clock.now() }
   await update($, panelAtom, () => stamped)
-  await $.store.set(`${KEY}${sid}`, stamped)
+  await storeSet($, `${KEY}${sid}`, stamped)
   if (after.items !== before.items) await resolveRefs($)
 }
 
@@ -481,13 +536,7 @@ export const register: Register = (on, options) => {
     interactive = e.isInteractive
     chromeDowns = 0
 
-    // Panels of sessions long gone would fill the store's 4 MiB.
-    const now = await $.clock.now()
-    for (const key of await $.store.keys()) {
-      if (!key.startsWith(KEY)) continue
-      const value = await $.store.get(key)
-      if (!isPanel(value) || now - value.at > TTL_MS) await $.store.delete(key)
-    }
+    await sweepStore($)
 
     sid = ''
     prFailed = new Map()
@@ -503,7 +552,7 @@ export const register: Register = (on, options) => {
     const jobDir = await $.env.get('CLAUDE_JOB_DIR').catch(() => undefined)
     const job = jobDir === undefined ? undefined : basename(jobDir)
     restart = job !== undefined && job !== '' ? `claude respawn ${job}` : `claude --resume ${sid}`
-    if (e.isInteractive && !(await $.ui.panes()).some(p => p.id === PANE)) {
+    if (e.isInteractive && !(await $.ui.panes().catch(() => [])).some(p => p.id === PANE)) {
       void $.ui.open({ id: PANE, title: 'Сессия', columns: COLUMNS })
     }
     return next(e)
@@ -599,6 +648,7 @@ export const register: Register = (on, options) => {
     const unfolded: readonly string[] = await read($, openAtom)
     const cards: Readonly<Record<string, Card>> = await read($, cardsAtom)
     const point: string = await read($, pointAtom)
+    const storeBroken: string = await read($, storeAtom)
     const pointHref = point === '' ? undefined : fileHref({ abs: point, dir: false })
     const statuses: Record<string, string> = {}
     for (const [task, c] of Object.entries(cards)) if (c.status !== undefined) statuses[task] = c.status
@@ -800,6 +850,9 @@ export const register: Register = (on, options) => {
           </Text>
         )}
         {restart === '' ? null : <Text dimColor wrap="wrap">перезапуск: {restart}</Text>}
+        {storeBroken === '' ? null : (
+          <Text color="warning" wrap="wrap">{`⚠ панель не сохраняется: хранилище не читается — отодвинь файл, следующая сессия начнёт с чистого: ${storeBroken}`}</Text>
+        )}
         {panel.items.length === 0 && (panel.mentioned ?? []).length === 0 && walls.length === 0 ? <Text dimColor>Пока пусто: задачи, ссылки и итоги из ответов появятся здесь.</Text> : null}
         {block('Ждёт тебя', v.waiting.map(i => row(i)))}
         {block('Задачи', taskRows)}
