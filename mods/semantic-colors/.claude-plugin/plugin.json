@@ -1,0 +1,8 @@
+{
+  "name": "semantic-colors",
+  "version": "0.1.0",
+  "author": {
+    "name": "Dima Timoschenko"
+  },
+  "description": "Colours Claude's replies by meaning on the terminal — failures red, successes green, task ids purple, paths cyan, amounts yellow, verdict lines accented — with no model tokens, and warns once when the render hook stops working."
+}
