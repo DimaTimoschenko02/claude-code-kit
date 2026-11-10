@@ -29,6 +29,10 @@ function ts(s) {
   return Number.isNaN(t) ? null : t / 1000;
 }
 
+const iso = (sec) => new Date(sec * 1000).toISOString();
+// Local calendar day (YYYY-MM-DD): waiting is split by the owner's days, not UTC ones.
+const localDay = (isoTs) => new Date(isoTs).toLocaleDateString('sv-SE');
+
 function textOf(msg) {
   const c = msg?.content;
   if (typeof c === 'string') return c;
@@ -163,7 +167,7 @@ export function extractAgent(file, parentSession, mainModel = null) {
   const errClasses = new Map();    // class -> count (this agent)
   const hookBlocks = new Map();    // hook file -> count (this agent)
   const errExamples = new Map();   // "tool::class" -> example
-  const slow = [];                 // {sec, tool, desc}
+  const slow = [];                 // {sec, ts, tool, desc} — ts is when the call started
   const events = [];               // {ts, kind}
   const T = [];
   let calls = 0, errors = 0, maxGap = 0, gapAt = null, prev = null;
@@ -206,7 +210,7 @@ export function extractAgent(file, parentSession, mainModel = null) {
           if (x?.type !== 'tool_result') continue;
           const src = pend.get(x.tool_use_id) || {};
           if (t !== null && src.t !== null && src.t !== undefined && t - src.t > 120) {
-            slow.push({ sec: Math.round(t - src.t), tool: src.name || '?', desc: (src.desc || '').slice(0, 90) });
+            slow.push({ sec: Math.round(t - src.t), ts: iso(src.t), tool: src.name || '?', desc: (src.desc || '').slice(0, 90) });
           }
           if (!x.is_error) continue;
           errors++;
@@ -240,6 +244,8 @@ export function extractAgent(file, parentSession, mainModel = null) {
     model,
     inherited: !meta.model && !typeHasOwnModel(meta.agentType || meta.subagent_type, cwd) &&
       (mainModel === null || model === null || model === mainModel),
+    startedAt: T.length ? iso(Math.min(...T)) : null,
+    endedAt: T.length ? iso(Math.max(...T)) : null,
     durationSec: Math.round(dur), calls, errors,
     maxGapSec: Math.round(maxGap), gapAt,
     errClasses: Object.fromEntries(errClasses),
@@ -333,7 +339,18 @@ function printReport(res) {
   const slow = res.agents.flatMap((r) => r.slow.map((s) => ({ ...s, parent: r.parent })));
   console.log(`\nslow tool calls >2min: ${slow.length}`);
   for (const s of slow.sort((a, b) => b.sec - a.sec).slice(0, 12)) {
-    console.log(`  ${s.sec}s  ${s.parent}  ${s.tool}  ${s.desc}`);
+    console.log(`  ${s.sec}s  ${s.ts}  ${s.parent}  ${s.tool}  ${s.desc}`);
+  }
+  if (slow.length) {
+    // A call is counted on the day it started, even when it ran past midnight.
+    const byDay = new Map();
+    for (const s of slow) {
+      const day = localDay(s.ts);
+      const d = byDay.get(day) || byDay.set(day, { n: 0, sec: 0 }).get(day);
+      d.n++; d.sec += s.sec;
+    }
+    console.log('\nslow calls by day (local date of call start):');
+    for (const [day, d] of [...byDay].sort()) console.log(`  ${day}  ${String(d.n).padStart(4)} calls  ${(d.sec / 3600).toFixed(1)}h`);
   }
 
   if (t.stalls) {

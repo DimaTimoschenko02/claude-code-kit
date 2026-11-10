@@ -12,11 +12,13 @@
 // only honest answer; the transcript slice cannot see it.
 //
 // Usage:
+//   node agent-cost.mjs --project <dir> [--days N] [--scope exact|subtree|all] [--json] [--per-session]
 //   node agent-cost.mjs --sessions <f1.jsonl,f2.jsonl> [--json] [--per-session]
 import fs from 'node:fs';
 import path from 'node:path';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { listSessions } from './discover.mjs';
 
 const ZERO = () => ({ calls: 0, msgs: 0, out: 0, in: 0, cacheCreate: 0, cacheRead: 0, perCall: [] });
 
@@ -85,8 +87,16 @@ const k = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).t
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const list = arg('sessions');
-  if (!list) { console.error('usage: agent-cost.mjs --sessions a.jsonl,b.jsonl [--json] [--per-session]'); process.exit(1); }
-  const r = agentCost(list.split(',').map((x) => x.trim()).filter(Boolean));
+  const project = arg('project');
+  if (!list && !project) {
+    console.error('usage: agent-cost.mjs --project <dir> [--days N] [--scope exact|subtree|all] | --sessions a.jsonl,b.jsonl  [--json] [--per-session]');
+    process.exit(1);
+  }
+  // Same session discovery as agents.mjs / analyze.mjs, so the three reports cover the same set.
+  const files = list
+    ? list.split(',').map((x) => x.trim()).filter(Boolean)
+    : listSessions(path.resolve(project), { scope: arg('scope', 'subtree'), days: arg('days') ? Number(arg('days')) : null }).map((m) => m.file);
+  const r = agentCost(files);
   // no exit() after a big write to a pipe: it drops the unflushed tail (memory-drift, 2026-09-23)
   if (process.argv.includes('--json')) {
     console.log(JSON.stringify(r, null, 2));
