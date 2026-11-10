@@ -1,8 +1,8 @@
 {
   "name": "semantic-colors",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Dima Timoschenko"
   },
-  "description": "Colours Claude's replies by meaning on the terminal — failures red, successes green, task ids purple, paths cyan, amounts yellow, verdict lines accented — with no model tokens, and warns once when the render hook stops working."
+  "description": "Lets Claude colour the whole phrase that carries a reply's point on the terminal — what works green, what broke red, what you must do yellow — by inline marks the mod teaches the model and draws as colour with the marks hidden; task ids, paths and links keep a regex colour, and it warns once when the render hook stops working."
 }

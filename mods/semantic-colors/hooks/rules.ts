@@ -1,4 +1,8 @@
-// The colour rules — the one place to edit them. A change shows in sessions started (or respawned) after it.
+// The colours — the one place to edit them. A change shows in sessions started (or respawned) after it.
+//
+// MARKS are what carries meaning: the model wraps a whole phrase in one (taught by hooks/instruction.ts), the mod
+// draws the phrase in the mark's colour and hides the mark characters. RULES only tag things a regex can find
+// reliably (task ids, URLs, paths), and never inside a marked phrase.
 //
 // Each rule colours what its `pattern` finds in a reply's prose; code spans and code blocks are never touched.
 // `pattern` is a JavaScript regex source, matched with the `u` flag and, unless `caseSensitive`, the `i` flag.
@@ -27,32 +31,23 @@ export const PALETTE = {
   accent: '#5ce5dc',
 } as const
 
+export type Mark = {
+  readonly name: string
+  readonly open: string
+  readonly close: string
+  readonly color: string
+}
+
+// Inline marks the model writes: `{+деплой прошёл+}`. Open and close are two characters each; the planner and
+// the stripper read them from here, so a change of colour is one line. Changing the characters also needs the
+// instruction text changed.
+export const MARKS: readonly Mark[] = [
+  { name: 'good', open: '{+', close: '+}', color: PALETTE.green },
+  { name: 'bad', open: '{-', close: '-}', color: PALETTE.red },
+  { name: 'act', open: '{!', close: '!}', color: PALETTE.yellow },
+]
+
 export const RULES: readonly Rule[] = [
-  {
-    name: 'bad',
-    color: PALETTE.red,
-    pattern: word(
-      [
-        'не\\s+(?:работа\\p{L}*|взлет\\p{L}*|запуска\\p{L}*|проход\\p{L}*)',
-        'слома\\p{L}*',
-        'упал\\p{L}*',
-        'упад\\p{L}*',
-        'ошибк\\p{L}*',
-        'ошибок',
-        'errors?',
-        'fail(?:ed|s|ing|ure)?',
-        'про[её]б\\p{L}*',
-        'бля(?:ть|дь)?',
-      ].join('|'),
-    ),
-  },
-  {
-    name: 'good',
-    color: PALETTE.green,
-    pattern: `${word(
-      ['работа(?:ет|ют)', 'заработал\\p{L}*', 'взлетел\\p{L}*', 'готово', 'почин\\p{L}+', 'зел[её]н\\p{L}*', 'passed', 'passing'].join('|'),
-    )}|✅`,
-  },
   {
     name: 'task',
     color: PALETTE.purple,
@@ -79,16 +74,6 @@ export const RULES: readonly Rule[] = [
       '(?<![\\p{L}\\p{N}_/.~:-])[\\w.@-]+(?:/[\\w.@-]+){2,}/?(?![\\w/])',
       // register.ts:42 — a file with a line
       '(?<![\\p{L}\\p{N}_/.~:-])[\\w.-]+\\.[A-Za-z]\\w{0,5}:\\d+(?::\\d+)?(?![\\w])',
-    ].join('|'),
-  },
-  {
-    name: 'amount',
-    color: PALETTE.yellow,
-    pattern: [
-      // 350 МБ, 12 дн, 40%, 1.5 GB, 200ms, 3 ч, 100 грн — longer units first
-      '(?<![\\p{L}\\p{N}_.,])\\d+(?:[.,]\\d+)?\\s?(?:ГБ|МБ|КБ|ТБ|GB|MB|KB|TB|мс|ms|сек\\p{L}{0,4}|мин\\p{L}{0,4}|дн\\p{L}{0,3}|час\\p{L}{0,3}|грн|ч|с)(?![\\p{L}\\p{N}_])',
-      '(?<![\\p{L}\\p{N}_.,])\\d+(?:[.,]\\d+)?\\s?[%₴$]',
-      '[₴$]\\s?\\d+(?:[.,]\\d+)?(?![\\p{N}])',
     ].join('|'),
   },
 ]

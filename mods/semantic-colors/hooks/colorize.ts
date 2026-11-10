@@ -1,8 +1,8 @@
 // Pure planning: which blocks of a reply get coloured runs and which stay with the engine's own markdown renderer.
 // No `$` here, so the tests and the sample command run the same code the render hook does.
 
-import { LINE_RULE, RULES } from './rules'
-import type { Rule } from './rules'
+import { LINE_RULE, MARKS, RULES } from './rules'
+import type { Mark, Rule } from './rules'
 
 export type Run = {
   readonly text: string
@@ -12,6 +12,8 @@ export type Run = {
   readonly strike?: boolean
   readonly code?: boolean
   readonly href?: string
+  // Inside a model's mark: the colour is the mark's, and no rule recolours it.
+  readonly marked?: boolean
 }
 
 export type Line = {
@@ -44,6 +46,89 @@ export function compileRules(rules: readonly Rule[] = RULES, line: Rule | null =
   }
   const compiled = rules.map(rule => compile(rule, 'g')).filter((c): c is Compiled => c !== null)
   return { rules: compiled, line: line ? compile(line, '') : null, broken }
+}
+
+// ---- marks ---------------------------------------------------------------------------------------------------------
+
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')
+const MARK_TOKEN = new RegExp(MARKS.flatMap(m => [m.open, m.close]).map(escapeRe).join('|'))
+const MARK_TOKENS = new RegExp(MARK_TOKEN.source, 'g')
+const OPEN_HEAD = new RegExp(`^(?:\\*\\*|__|${MARKS.map(m => escapeRe(m.open)).join('|')})+`)
+const ESCAPABLE = /[!-/:-@[-`{-~]/
+
+// The first character of every token: most characters of a reply skip the lookup.
+const MARK_START = new Set(MARKS.flatMap(m => [m.open[0], m.close[0]]))
+
+function openingAt(source: string, at: number): Mark | undefined {
+  if (!MARK_START.has(source[at])) return undefined
+  return MARKS.find(m => source.startsWith(m.open, at))
+}
+
+function closingAt(source: string, at: number): Mark | undefined {
+  if (!MARK_START.has(source[at])) return undefined
+  return MARKS.find(m => source.startsWith(m.close, at))
+}
+
+// Cheap and loose: also true when the only marks sit in code, where they stay text.
+export function hasMarkers(text: string): boolean {
+  return MARK_TOKEN.test(text)
+}
+
+// Where the code span opening at `at` ends (past its closing ticks), or -1 when those ticks open none.
+function codeSpanEnd(source: string, at: number): number {
+  const ticks = /^`+/.exec(source.slice(at))?.[0] ?? '`'
+  const end = source.indexOf(ticks, at + ticks.length)
+  return end > 0 && source[end + ticks.length] !== '`' ? end + ticks.length : -1
+}
+
+function stripLine(line: string): string {
+  let out = ''
+  let i = 0
+  while (i < line.length) {
+    const ch = line[i] ?? ''
+    if (ch === '\\' && i + 1 < line.length && ESCAPABLE.test(line[i + 1] ?? '')) {
+      out += line.slice(i, i + 2)
+      i += 2
+      continue
+    }
+    if (ch === '`') {
+      const end = codeSpanEnd(line, i)
+      const stop = end > 0 ? end : i + (/^`+/.exec(line.slice(i))?.[0].length ?? 1)
+      out += line.slice(i, stop)
+      i = stop
+      continue
+    }
+    const token = openingAt(line, i) ?? closingAt(line, i)
+    if (token) {
+      i += token.open.length
+      continue
+    }
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+// The mark characters out, their text kept; code spans and fenced blocks stay as written. For what the engine's
+// Markdown draws: a mark it cannot colour must never reach the screen as `{+`.
+export function stripMarkers(text: string): string {
+  if (!hasMarkers(text)) return text
+  let fence: string | null = null
+  return text
+    .split('\n')
+    .map(line => {
+      if (fence !== null) {
+        if (line.trim().startsWith(fence)) fence = null
+        return line
+      }
+      const opens = FENCE.exec(line)
+      if (opens) {
+        fence = opens[1]?.[0]?.repeat(opens[1].length) ?? '```'
+        return line
+      }
+      return stripLine(line)
+    })
+    .join('\n')
 }
 
 // ---- splitting into blocks ----------------------------------------------------------------------------------------
@@ -114,9 +199,19 @@ type Style = { bold: boolean; italic: boolean; strike: boolean }
 export function inline(source: string): Run[] {
   const runs: Run[] = []
   const style: Style = { bold: false, italic: false, strike: false }
+  // A mark lives on one line: one left open (a reply still streaming in) colours to the line's end.
+  let mark: Mark | null = null
   let buffer = ''
+  const tint = () => (mark ? { color: mark.color, marked: true } : {})
   const flush = () => {
-    if (buffer) runs.push({ text: buffer, ...(style.bold && { bold: true }), ...(style.italic && { italic: true }), ...(style.strike && { strike: true }) })
+    if (buffer)
+      runs.push({
+        text: buffer,
+        ...(style.bold && { bold: true }),
+        ...(style.italic && { italic: true }),
+        ...(style.strike && { strike: true }),
+        ...tint(),
+      })
     buffer = ''
   }
   let i = 0
@@ -129,23 +224,40 @@ export function inline(source: string): Run[] {
     }
     if (ch === '`') {
       const ticks = /^`+/.exec(source.slice(i))?.[0] ?? '`'
-      const end = source.indexOf(ticks, i + ticks.length)
-      if (end > 0 && source[end + ticks.length] !== '`') {
+      const end = codeSpanEnd(source, i)
+      if (end > 0) {
         flush()
-        const body = source.slice(i + ticks.length, end)
+        const body = source.slice(i + ticks.length, end - ticks.length)
         runs.push({ text: /^ .* $/.test(body) && body.trim() ? body.slice(1, -1) : body, code: true })
-        i = end + ticks.length
+        i = end
         continue
       }
       buffer += ticks
       i += ticks.length
       continue
     }
+    const opening = openingAt(source, i)
+    const closing = closingAt(source, i)
+    if (opening && !mark) {
+      flush()
+      mark = opening
+      i += opening.open.length
+      continue
+    }
+    // A mark's own close ends it; any other mark token — a stray close, an opener inside a mark — is dropped.
+    if (opening || closing) {
+      if (mark && closing === mark) {
+        flush()
+        mark = null
+      }
+      i += 2
+      continue
+    }
     if (ch === '[') {
       const link = /^\[([^\]\n]+)\]\(\s*<?([^\s()<>]+)>?(?:\s+"[^"]*")?\s*\)/.exec(source.slice(i))
       if (link) {
         flush()
-        runs.push({ text: stripMarks(link[1] ?? ''), href: link[2] ?? '' })
+        runs.push({ text: stripMarks(link[1] ?? ''), href: link[2] ?? '', ...tint() })
         i += link[0].length
         continue
       }
@@ -154,7 +266,7 @@ export function inline(source: string): Run[] {
       const auto = /^<(https?:\/\/[^\s<>]+)>/.exec(source.slice(i))
       if (auto) {
         flush()
-        runs.push({ text: auto[1] ?? '', href: auto[1] ?? '' })
+        runs.push({ text: auto[1] ?? '', href: auto[1] ?? '', ...tint() })
         i += auto[0].length
         continue
       }
@@ -197,7 +309,7 @@ function canToggle(source: string, at: number, width: number, isOpen: boolean, m
 }
 
 function stripMarks(label: string): string {
-  return label.replace(/\*\*|__|`/g, '')
+  return label.replace(/\*\*|__|`/g, '').replace(MARK_TOKENS, '')
 }
 
 // ---- rules over runs ------------------------------------------------------------------------------------------------
@@ -229,6 +341,7 @@ export function findHits(text: string, set: RuleSet): Hit[] {
 
 function colorRun(run: Run, set: RuleSet): Run[] {
   if (run.code) return [{ ...run, color: CODE_COLOR }]
+  if (run.marked) return [run]
   if (run.href !== undefined) return [{ ...run, color: urlColor(set) }]
   const hits = findHits(run.text, set)
   if (hits.length === 0) return [run]
@@ -259,6 +372,7 @@ function urlColor(set: RuleSet): string | undefined {
 
 export function hasHit(text: string, set: RuleSet): boolean {
   const prose = text.replace(/`+[^`\n]*`+/g, ' ')
+  if (hasMarkers(prose)) return true
   if (set.line && prose.split('\n').some(line => set.line?.re.test(lineHead(line)))) return true
   return findHits(prose, set).length > 0
 }
@@ -267,7 +381,7 @@ function lineHead(line: string): string {
   return line
     .replace(QUOTE, '')
     .replace(/^\s*(?:[-*+]|\d{1,9}[.)])\s+/, '')
-    .replace(/^(?:\*\*|__)/, '')
+    .replace(OPEN_HEAD, '')
     .trimStart()
 }
 
@@ -303,7 +417,8 @@ export function plan(text: string, set: RuleSet): Segment[] | null {
       segments.push({ kind: 'colored', lines: block.lines.map(line => (BLANK.test(line) ? { prefix: '', runs: [] } : planLine(line, set))) })
       colored += 1
     } else {
-      pending.push(joined)
+      // The engine's Markdown cannot colour a mark: its characters go, its text stays.
+      pending.push(stripMarkers(joined))
     }
   }
   flushMarkdown()
