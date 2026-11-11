@@ -34,7 +34,8 @@ def skills(ts, *named):
 
 class Gate(unittest.TestCase):
     def run_gate(self, transcript_lines, invocations, agent_id=None, agent_type=None, agents=None,
-                 agent_lines=(), agent_invocations=(), agent_file=True, codex=False, bom=False):
+                 agent_lines=(), agent_invocations=(), agent_file=True, codex=False, bom=False,
+                 gates=None, home_file=None):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, ".claude", "state"))
             os.makedirs(os.path.join(root, ".claude", "agents"))
@@ -42,7 +43,7 @@ class Gate(unittest.TestCase):
                 with open(os.path.join(root, ".claude", "agents", fname), "w") as f:
                     f.write("---\n" + fm + "\n---\n\nbody\n")
             with open(os.path.join(root, ".claude", "skill-gate.config.json"), "w") as f:
-                json.dump({"gates": [{"path_prefix": "brain/", "skill": "vault-write"}]}, f)
+                json.dump({"gates": gates or [{"path_prefix": "brain/", "skill": "vault-write"}]}, f)
             with open(os.path.join(root, ".claude", "state", "skill-invocations.jsonl"), "w") as f:
                 for ts in invocations:
                     f.write(json.dumps({"skill": "vault-write", "ts": ts, "session_id": SID}) + "\n")
@@ -57,7 +58,9 @@ class Gate(unittest.TestCase):
                 os.makedirs(sub)
                 with open(os.path.join(sub, "agent-" + agent_id + ".jsonl"), "w") as f:
                     f.write("\n".join([entry("2026-10-11T10:30:00.000Z", type="user")] + list(agent_lines)) + "\n")
-            payload = {"tool_name": "Write", "tool_input": {"file_path": os.path.join(root, "brain", "n.md")},
+            home = tempfile.mkdtemp()  # a home outside the project, as on a real machine
+            target = os.path.join(home, *home_file) if home_file else os.path.join(root, "brain", "n.md")
+            payload = {"tool_name": "Write", "tool_input": {"file_path": target},
                        "transcript_path": transcript, "cwd": root, "session_id": SID}
             if agent_id:
                 payload["agent_id"] = agent_id
@@ -65,12 +68,19 @@ class Gate(unittest.TestCase):
                 payload["agent_type"] = agent_type
             env = {k: v for k, v in os.environ.items()
                    if k not in ("CLAUDE_PROJECT_DIR", "SKILL_GATE_LOG", "CODEX_COMPAT")}
-            env["HOME"] = root
+            env["HOME"] = home if home_file else root
             if codex:
                 env["CODEX_COMPAT"] = "1"
             stdin = ("﻿" if bom else "") + json.dumps(payload)
             return subprocess.run(GATE_CMD, input=stdin.encode("utf-8"), capture_output=True,
                                   env=env).returncode
+
+    def test_gate_path_from_home_matches_on_this_machine(self):
+        # `~/vault/` in the config must govern <home>/vault on Windows and on a Mac alike (audit 2026-11-10: Mac-absolute
+        # entries never matched on Windows, so edits there went ungated).
+        gates = [{"path_prefix": "~/vault/", "skill": "vault-write"}]
+        self.assertEqual(self.run_gate([], [], gates=gates, home_file=("vault", "n.md")), 2)
+        self.assertEqual(self.run_gate([], [], gates=gates, home_file=("other", "n.md")), 0)
 
     def test_skill_loaded_after_compaction_passes(self):
         self.assertEqual(self.run_gate([compact("2026-10-11T12:00:00.000Z")], ["2026-10-11T12:05:00.000Z"]), 0)

@@ -80,11 +80,14 @@ fi
 # Which skill owns a path? First matching gate wins (prefix or exact).
 # Bind fields to vars BEFORE the `$rel | ...` pipe — inside startswith(), `.`
 # is $rel (a string), so `.path_prefix` there would index the string and error.
+# A gate path written from `~/` means the same file on every machine: it resolves against $HOME.
+home_w="${HOME:-}"; win_var home_w
 owner() {
-  jq -r --arg rel "$1" '
+  jq -r --arg rel "$1" --arg home "$home_w" '
+    def fromhome: if . != null and startswith("~/") then $home + ltrimstr("~") else . end;
     .gates[]?
-    | (.path_prefix // null) as $p
-    | (.path_exact // null) as $e
+    | (.path_prefix // null | fromhome) as $p
+    | (.path_exact // null | fromhome) as $e
     | select( ($p != null and ($rel | startswith($p))) or ($e != null and ($rel == $e)) )
     | .skill' "$CONFIG" 2>/dev/null | head -1
 }
