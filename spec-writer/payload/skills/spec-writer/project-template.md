@@ -5,6 +5,8 @@ language: en                      # ru | en — the language of the spec text an
 spec_glob: docs/specs/*-spec.md   # repo-relative glob; spec-lint checks files matching it
 extra_sections:                   # project headings every full spec also has, comma-separated; empty for none
 split_lines: 400                  # added lines of code above which a task splits
+asks_dir:                         # folder holding task cards (`<task>.md`, any depth ≤4); empty — asks are not checked
+ask_label:                        # id prefix of a numbered ask in the card, written `**<label>1**`; e.g. R
 ---
 
 # Specs in <project>

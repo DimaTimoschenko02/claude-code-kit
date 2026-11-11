@@ -35,7 +35,8 @@ the coder and from risky inputs nobody named — the two things Decisions and «
 `spec-lint` in its gate table — a settings entry on top would run the hook twice.
 
 Then fill `.claude/spec-writer.project.md` — frontmatter `language` (ru | en), `spec_glob`, `extra_sections`,
-`split_lines`, and in the body only what the code does not say: where specs live, the contract format, how to measure
+`split_lines`, optionally `asks_dir` + `ask_label` (spec-lint then requires every ask the task card numbers
+`**<label><n>**` to be named in the spec), and in the body only what the code does not say: where specs live, the contract format, how to measure
 a query, who codes and how a stop comes back, gates and reviewers, project gotchas. That file is never overwritten.
 
 Needs `node` for the hook and `jq` for the install. A Codex coder reads the same spec; generate its role from the

@@ -14,7 +14,7 @@ gap found in review costs a rewrite and a review round.
 Read the spec the caller names, then the code it points to — at the commit or branch the caller gives, else the
 working tree. Read-only: Bash only for `git show`, `git grep`, `ls`; never edit, commit or run builds.
 
-Report three things, in the spec's own language:
+Report four things, in the spec's own language:
 
 1. **Questions** — places where you would have to choose and the choice changes what gets built: a design choice the
    spec leaves to you (how a class is registered, where validation lives, one schema or hand checks), behaviour on
@@ -27,6 +27,11 @@ Report three things, in the spec's own language:
 3. **Inputs nobody tests** — at most five inputs or states the spec implies (from the data shape, existing callers,
    neighbouring features, what a re-run or a partial failure leaves behind) that no acceptance line and no «where it
    bites» line pins with a test. Name the input and what a reasonable user would expect to happen.
+
+4. **Asks read narrower than their words** — when the task card quotes the requester's asks (the spec's «Outcome»
+   names their ids), open the card and set each quote beside what the spec builds. A spec that serves a narrower or
+   different reading than the words — another screen, one entry point of several, the example taken as the whole
+   scope — is listed with the quote and the spec line. This is what the owner finds on the screen otherwise.
 
 Rank each list by cost of a wrong guess, most expensive first. Do not pad: a list with nothing in it says so.
 End with `итого: <n>` — or `итого: 0 — можно отдавать` / `total: 0 — ready to hand over`, in the spec's language.

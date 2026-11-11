@@ -46,9 +46,11 @@ the task splits — say so to the owner before the spec grows.
 ## Checks
 
 - **spec-lint** runs on every write of a spec file (hook `spec-lint.sh`): missing sections, placeholders («TBD»,
-  «handle errors»), an acceptance line without a test. Fix what it reports; by hand: `node <this skill>/scripts/spec-lint.mjs <spec>`.
+  «handle errors»), an acceptance line without a test, an ask the card numbers that the spec never names. Fix what it
+  reports; by hand: `node <this skill>/scripts/spec-lint.mjs <spec>`.
 - **The builder check** — agent `spec-builder-check` reads the spec as the coder and returns what it would have to
-  guess. Run it on every full spec before hand-off and sort its answer → `builder-check.md`.
+  guess. Run it on every full spec before hand-off, and on a short one whose card quotes asks (a one-line fix read
+  narrower than the ask is the rework it catches), and sort its answer → `builder-check.md`.
 
 ## Hand-off and after
 

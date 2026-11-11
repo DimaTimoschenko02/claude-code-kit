@@ -132,6 +132,30 @@ test('hook is silent on a clean spec, a file outside the glob, and a project wit
   assert.equal(hook(join(bare, 'x-spec.md')).stdout, '');
 });
 
+// PH-237: the card asked «нельзя перейти в наш товар» from the title click; the short spec built a button in another
+// window, no check read the ask against the spec, and the owner found it on the screen.
+test('every ask the card marks must be named in the spec; no card or no fields — no check', () => {
+  const root = project();
+  const cards = join(root, 'cards', 'PH-16 Epic', 'PH-1');
+  mkdirSync(cards, { recursive: true });
+  writeFileSync(join(cards, 'PH-1.md'), '## Навіщо\n- **З1** — заказчик 10.11: «из названия нельзя перейти в наш товар»\n- **З2** — «и из окна тоже»\n');
+  writeFileSync(join(root, '.claude', 'spec-writer.project.md'),
+    `---\nlanguage: ru\nspec_glob: docs/design/PH-*-spec.md\nasks_dir: ${join(root, 'cards')}\nask_label: З\n---\n`);
+  const f = join(root, 'docs', 'design', 'PH-1-spec.md');
+
+  writeFileSync(f, GOOD_RU.replace('Повторно присланный файл', 'З1 → П1. Повторно присланный файл'));
+  const out = JSON.parse(hook(f).stdout);
+  assert.match(out.reason, /просьба З2 из карточки не названа/);
+  assert.doesNotMatch(out.reason, /З1 /, 'a named ask passes');
+
+  writeFileSync(f, GOOD_RU.replace('Повторно присланный файл', 'З1 → П1; З2 — не делаем: окно уходит в PH-9. Файл'));
+  assert.equal(hook(f).stdout, '');
+
+  writeFileSync(f, GOOD_RU.replace('task: PH-1', 'task: PH-2'));
+  assert.equal(hook(f).stdout, '', 'no card for the task → nothing to check');
+  assert.equal(lint(GOOD_RU, { language: 'ru' }).errors.length, 0, 'no asks given → no check');
+});
+
 test('hook finds a spec inside a worktree under the project root', () => {
   const root = project();
   const wt = join(root, '.claude', 'worktrees', 'PH-2', 'docs', 'design');

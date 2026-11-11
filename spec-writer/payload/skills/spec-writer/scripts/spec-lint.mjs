@@ -8,7 +8,11 @@
 // The project's `.claude/spec-writer.project.md` (nearest above the spec) gives the language, the glob of spec files
 // and extra sections. A file outside the glob, or a project without that file, is not a spec: the hook stays silent.
 // Sections, placeholders and limits come from ../sections.json, the one source the templates also follow.
-import { readFileSync, existsSync, realpathSync } from 'node:fs';
+// With `asks_dir` and `ask_label` in the project file, the task's card (`<task>.md` under asks_dir) is read too: every
+// numbered ask it marks `**<label><n>**` — the requester's own words — must be named in the spec, as built or as
+// «not doing: why». An ask read narrowly or dropped is found when the spec is written, not when the owner opens the screen.
+import { readFileSync, readdirSync, existsSync, realpathSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -25,6 +29,7 @@ const MSG = {
     placeholder: (p, line) => `заглушка «${p}»: «${line}»`,
     long: (n, max) => `${n} строк — длиннее ${max}: спека длиннее кода или задачу пора делить`,
     noCode: 'в «Решениях» нет ни одного блока кода — сигнатуры и главный запрос пишутся кодом',
+    noAsk: (id) => `просьба ${id} из карточки не названа в спеке — «${id} → П…» или «${id} — не делаем: почему»`,
     head: (n) => {
       const w = n % 10 === 1 && n % 100 !== 11 ? 'ошибка'
         : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'ошибки' : 'ошибок';
@@ -41,6 +46,7 @@ const MSG = {
     placeholder: (p, line) => `placeholder «${p}»: «${line}»`,
     long: (n, max) => `${n} lines — over ${max}: the spec is longer than its code or the task should split`,
     noCode: '«Decisions» has no code block — signatures and the main query are written as code',
+    noAsk: (id) => `ask ${id} from the card is not named in the spec — «${id} → A…» or «${id} — not doing: why»`,
     head: (n) => `spec-lint: ${n} error${n === 1 ? '' : 's'} in the spec — fix before handing it to a coder`,
     more: (n) => `… and ${n} more`,
   },
@@ -75,7 +81,37 @@ function parseProject(text) {
     specGlob: fields.spec_glob || '**/*-spec.md',
     extraSections: (fields.extra_sections || '').split(',').map((s) => s.trim()).filter(Boolean),
     splitLines: Number(fields.split_lines) || 400,
+    asksDir: fields.asks_dir ? fields.asks_dir.replace(/^~(?=$|[\\/])/, homedir()) : null,
+    askLabel: fields.ask_label || null,
   };
+}
+
+/** The ids of the numbered asks a card marks `**<label><n>**`, in order, once each. */
+export function askIds(cardText, label) {
+  const esc = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [...new Set([...cardText.matchAll(new RegExp(`\\*\\*(${esc}\\d+)\\*\\*`, 'gu'))].map((m) => m[1]))];
+}
+
+/** `<task>.md` under dir, at most four folders deep (cards sit in epic and task folders); null when absent. */
+export function findCard(dir, task, depth = 4) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+  const hit = entries.find((e) => e.isFile() && e.name === `${task}.md`);
+  if (hit) return join(dir, hit.name);
+  if (!depth) return null;
+  for (const e of entries.filter((x) => x.isDirectory() && !x.name.startsWith('.'))) {
+    const found = findCard(join(dir, e.name), task, depth - 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** The ask ids of the spec's task card, when the project names where cards live. */
+function cardAsks(text, project) {
+  if (!project?.asksDir || !project.askLabel) return [];
+  const task = frontmatter(text).fields.task;
+  const card = task && findCard(project.asksDir, task);
+  return card ? askIds(readFileSync(card, 'utf8'), project.askLabel) : [];
 }
 
 export function globToRegExp(glob) {
@@ -103,7 +139,7 @@ function proseLines(body) {
 
 const isTemplateHint = (l) => /^\s*<[^>]*>\s*$/.test(l) || /^\s*\|?\s*<[^>]*>\s*\|/.test(l);
 
-export function lint(text, { language = 'en', extraSections = [] } = {}) {
+export function lint(text, { language = 'en', extraSections = [], asks = [] } = {}) {
   const msg = MSG[language];
   const { fields, body } = frontmatter(text);
   const form = fields.form === 'short' ? 'short' : 'full';
@@ -160,6 +196,11 @@ export function lint(text, { language = 'en', extraSections = [] } = {}) {
     if (m) errors.push(msg.placeholder(m[2], l.raw.trim().slice(0, 70)));
   }
 
+  const prose = lines.filter((l) => !l.code).map((l) => l.raw).join('\n');
+  for (const id of asks) {
+    if (!new RegExp(`(?<![\\p{L}\\p{N}])${id}(?![\\p{L}\\p{N}])`, 'u').test(prose)) errors.push(msg.noAsk(id));
+  }
+
   const n = text.split('\n').length;
   if (n > CFG.maxLines) warnings.push(msg.long(n, CFG.maxLines));
   return { form, errors, warnings };
@@ -167,7 +208,8 @@ export function lint(text, { language = 'en', extraSections = [] } = {}) {
 
 function runFile(path, json) {
   const project = findProject(path);
-  const res = lint(readFileSync(path, 'utf8'), project ?? {});
+  const text = readFileSync(path, 'utf8');
+  const res = lint(text, { ...project, asks: cardAsks(text, project) });
   if (json) console.log(JSON.stringify(res, null, 2));
   else {
     for (const e of res.errors) console.log(`✗ ${e}`);
@@ -190,7 +232,8 @@ function runHook() {
   const re = globToRegExp(project.specGlob);
   const parts = rel.split('/');
   if (!parts.some((_, i) => re.test(parts.slice(i).join('/')))) return;
-  const res = lint(readFileSync(path, 'utf8'), project);
+  const text = readFileSync(path, 'utf8');
+  const res = lint(text, { ...project, asks: cardAsks(text, project) });
   if (!res.errors.length) return;
   const msg = MSG[project.language];
   const shown = res.errors.slice(0, 5).map((e) => `- ${e}`);

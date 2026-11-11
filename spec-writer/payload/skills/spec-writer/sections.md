@@ -7,6 +7,9 @@ file; they never replace these.
 
 One or two sentences on what changes for the person who uses the result, and the link to the task card. It tells the
 coder and the reviewer which of two readings of a line serves the purpose. Not a summary of the spec.
+When the card numbers the requester's asks in their own words (`asks_dir` in the project file), each is named here:
+`<id> → <acceptance line>` or `<id> — not doing: <why>`. Read the ask as its words say, not as the narrower thing that
+is easier to build; a reading narrower than the words is a question to the owner before the spec, not a decision in it.
 
 ## Contract
 
