@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { codexReason, codexSandboxFix } from '../hooks/codex'
+import { codexReason, codexSandboxFix, launcherReason, launchesCodexExec } from '../hooks/codex'
 import { countByCheck, decideAgent, parseAgent, parseRoutes, promptSection, shortLine, type AgentDef, type Routes } from '../hooks/routes'
 
 const KARTS = JSON.stringify({
@@ -177,4 +177,22 @@ test('the deny gives the rule, the problem and the fixed command; a huge command
   expect(r).toContain('без флага sandbox')
   expect(r).toContain('```bash\ncodex exec -s danger-full-access "p"\n```')
   expect(codexReason(['x'], 'y'.repeat(9000)).length).toBeLessThan(4500)
+})
+
+// ---- the project's own Codex launcher ----
+
+test('codexLauncher is optional text, kept trimmed only when present', () => {
+  expect(parseRoutes('{"routes":[],"codexLauncher":"  bin/codex-run --cd <wt>  "}')).toEqual({ routes: [], notes: [], codexLauncher: 'bin/codex-run --cd <wt>' })
+  expect('error' in parseRoutes('{"routes":[],"codexLauncher":3}')).toBe(true)
+  expect(parseRoutes('{"routes":[]}')).toEqual({ routes: [], notes: [] })
+})
+
+test('a raw codex exec is a launch; text about it and the launcher itself are not', () => {
+  for (const c of ['codex exec -s danger-full-access - < prompt.md', 'cd wt && codex e "p"', 'C:/tools/codex.cmd exec "p"']) {
+    expect([c, launchesCodexExec(c)]).toEqual([c, true])
+  }
+  for (const c of ['bin/codex-run --cd wt --prompt p.md --out x', 'grep "codex exec" .claude', 'codex --version', "cat > p.md <<'EOF'\ncodex exec x\nEOF"]) {
+    expect([c, launchesCodexExec(c)]).toEqual([c, false])
+  }
+  expect(launcherReason('bin/codex-run --cd <wt>')).toContain('```bash\nbin/codex-run --cd <wt>\n```')
 })

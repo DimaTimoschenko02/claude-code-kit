@@ -1,6 +1,6 @@
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import { codexReason, codexSandboxFix } from './codex'
+import { codexReason, codexSandboxFix, launcherReason, launchesCodexExec } from './codex'
 import {
   ancestors,
   appendBounded,
@@ -223,6 +223,17 @@ export const register: Register = on => {
       fix = codexSandboxFix(e.command)
     } catch (err) {
       debug($, `codex check skipped: ${String(err)}`)
+    }
+    // A project that names its own Codex launcher gets it instead of any raw `codex exec`, sandbox right or not.
+    let launcher: string | undefined
+    try {
+      if (launchesCodexExec(e.command)) launcher = (await loadRoutes($, await $.session.root())).routes?.codexLauncher
+    } catch (err) {
+      debug($, `codex launcher check skipped: ${String(err)}`)
+    }
+    if (launcher) {
+      await record($, 'codex-launcher', null, 'deny', e.command)
+      return { deny: launcherReason(launcher) }
     }
     if (!fix) return next(e)
     await record($, 'codex-sandbox', null, 'deny', e.command)

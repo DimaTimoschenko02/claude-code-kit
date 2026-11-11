@@ -1,8 +1,8 @@
 {
   "name": "agent-routes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": {
     "name": "Dima Timoschenko"
   },
-  "description": "Keeps the agent routing rules in the system prompt from the first turn (general rules plus the project's .claude/agent-routes.json table) and checks Agent and codex exec calls against them: Sol routes, catch-all agents, model above frontmatter, Codex sandbox."
+  "description": "Keeps the agent routing rules in the system prompt from the first turn (general rules plus the project's .claude/agent-routes.json table) and checks Agent and codex exec calls against them: Sol routes, catch-all agents, model above frontmatter, Codex sandbox, the project's own Codex launcher."
 }

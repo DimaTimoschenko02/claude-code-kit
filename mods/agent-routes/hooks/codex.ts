@@ -167,23 +167,27 @@ function headIndex(words: Word[]): number {
 
 type Edit = { start: number; end: number; text: string }
 
-/** A `codex exec` launch in one segment: what is wrong with its sandbox and the edits that fix it; null if fine. */
-function judgeSegment(text: string, words: Word[]): { problem: string; edits: Edit[] } | null {
+/** The segment's `codex exec`: its arguments and where `exec` sits in them; null when the segment launches no exec. */
+function execOf(words: Word[]): { args: Word[]; execAt: number } | null {
   const h = headIndex(words)
   if (h >= words.length || commandName(words[h]!.value) !== 'codex') return null
   const args = words.slice(h + 1)
-
-  let execAt = -1
   for (let i = 0; i < args.length; i += 1) {
     const v = args[i]!.value
     if (v.startsWith('-')) {
       if (VALUE_FLAGS.has(v)) i += 1
       continue
     }
-    if (v === 'exec' || v === 'e') execAt = i
-    break
+    return v === 'exec' || v === 'e' ? { args, execAt: i } : null
   }
-  if (execAt < 0) return null
+  return null
+}
+
+/** A `codex exec` launch in one segment: what is wrong with its sandbox and the edits that fix it; null if fine. */
+function judgeSegment(text: string, words: Word[]): { problem: string; edits: Edit[] } | null {
+  const found = execOf(words)
+  if (!found) return null
+  const { args, execAt } = found
 
   const bad: { problem: string; from: number; to: number }[] = []
   let hasFull = false
@@ -244,6 +248,24 @@ export function codexSandboxFix(command: string): { problems: string[]; fixed: s
     fixed = fixed.slice(0, e.start) + e.text + fixed.slice(e.end)
   }
   return { problems, fixed }
+}
+
+/** Does any segment of the command launch `codex exec` (a `grep 'codex exec'` or `codex --version` does not). */
+export function launchesCodexExec(command: string): boolean {
+  if (!command.includes('codex')) return false
+  const text = command.length > MAX_SCAN ? command.slice(0, MAX_SCAN) : command
+  return segments(text).some(words => execOf(words) !== null)
+}
+
+/** The deny for a raw launch in a project that starts Codex through its own launcher. */
+export function launcherReason(launcher: string): string {
+  return [
+    'agent-routes (a mod the owner installed): в этом проекте Codex запускается не голым `codex exec`, а запускателем проекта —',
+    'в нём проверки и журнал, которых у прямого запуска нет (`codexLauncher` в .claude/agent-routes.json). Запусти так:',
+    '```bash',
+    launcher,
+    '```',
+  ].join('\n')
 }
 
 /** The deny the model reads: the rule, what was wrong, the command to run instead (bounded). */

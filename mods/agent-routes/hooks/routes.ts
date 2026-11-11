@@ -11,7 +11,8 @@ export type Route = {
   marker?: string
 }
 
-export type Routes = { routes: Route[]; notes: string[] }
+/** `codexLauncher`: the command the project starts Codex with; a raw `codex exec` is then refused with it. */
+export type Routes = { routes: Route[]; notes: string[]; codexLauncher?: string }
 
 /** A typed agent as its file declares it; `model` is the frontmatter family, null when it inherits. */
 export type AgentDef = { name: string; description: string; model: Family | null }
@@ -83,7 +84,12 @@ export function parseRoutes(text: string): Routes | { error: string } {
   }
   const notes = obj.notes ?? []
   if (!Array.isArray(notes) || !notes.every(isText)) return { error: '`notes` is not a list of text' }
-  return { routes: routes.slice(0, ROUTES_MAX), notes: (notes as string[]).slice(0, NOTES_MAX) }
+  if (!isOptText(obj.codexLauncher)) return { error: '`codexLauncher` is not text' }
+  return {
+    routes: routes.slice(0, ROUTES_MAX),
+    notes: (notes as string[]).slice(0, NOTES_MAX),
+    ...(obj.codexLauncher === undefined ? {} : { codexLauncher: (obj.codexLauncher as string).trim() }),
+  }
 }
 
 /** The system-prompt section: the general rules always, the project's table and notes when its file is valid. */
