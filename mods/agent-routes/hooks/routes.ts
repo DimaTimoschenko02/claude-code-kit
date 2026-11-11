@@ -36,7 +36,7 @@ const ESCALATE = /\bescalate:/i
 
 export const GENERAL_RULES = [
   '- Модель Claude-агента — из его frontmatter, в вызове не пиши; поднять — `escalate: <почему>` в description.',
-  '- Встроенные (`general-purpose`, `Explore`, `claude`) — на Sonnet, Opus — с `escalate:`; есть типизированный агент под задачу — зови его.',
+  '- Встроенные (`general-purpose`, `Explore`, `claude`) — с `model: "sonnet"` в вызове, Opus — с `escalate:`; есть типизированный агент под задачу — зови его.',
   '- Codex — всегда `-s danger-full-access`.',
 ]
 
@@ -174,8 +174,6 @@ export type Check = 'sol-route' | 'catch-all' | 'model-typed' | 'model-builtin'
 export type Decision =
   | { kind: 'pass' }
   | { kind: 'deny'; check: Check; reason: string }
-  | { kind: 'drop-model'; check: Check; note: string }
-  | { kind: 'set-sonnet'; check: Check; note: string }
 
 const SOURCE = 'agent-routes (a mod the owner installed)'
 
@@ -215,29 +213,31 @@ export function decideAgent(call: AgentCall, routes: Routes | null, agents: Agen
     return { kind: 'deny', check: 'sol-route', reason: solReason(sol) }
   }
 
+  const want = family(call.model)
+  // A built-in above Sonnet is named in the catch-all denial too, so the retry it asks for is the one that runs.
+  const builtinHigh = isBuiltin(type) && (want === null || RANK[want] > RANK.sonnet)
+
   if (isCatchAll(type) && agents.length > 0 && claim(`${type}\u0000${call.description ?? ''}`)) {
-    return { kind: 'deny', check: 'catch-all', reason: catchAllReason(type, agents) }
+    const reason = catchAllReason(type, agents)
+    return { kind: 'deny', check: 'catch-all', reason: builtinHigh ? `${reason} Повторяя, укажи \`model: "sonnet"\`.` : reason }
   }
 
-  const want = family(call.model)
   if (isBuiltin(type)) {
-    if (want === null || RANK[want] > RANK.sonnet) {
-      const was = want === null ? 'модель не указана, наследовал бы родительскую' : `было ${call.model}`
-      return {
-        kind: 'set-sonnet',
-        check: 'model-builtin',
-        note: `${SOURCE}: \`${type || 'general-purpose'}\` запущен на sonnet (${was}). Встроенным — Sonnet; Opus — тем же вызовом с \`escalate: <почему>\` в description.`,
-      }
+    if (!builtinHigh) return { kind: 'pass' }
+    const was = want === null ? 'модель не указана, унаследовал бы родительскую' : `указан ${call.model}`
+    return {
+      kind: 'deny',
+      check: 'model-builtin',
+      reason: `${SOURCE}: \`${type || 'general-purpose'}\` — ${was}. Встроенные идут на Sonnet: повтори тот же вызов с \`model: "sonnet"\`; нужен Opus — с \`escalate: <почему>\` в description.`,
     }
-    return { kind: 'pass' }
   }
   if (want === null || isForeign(type)) return { kind: 'pass' }
   const own = agents.find(a => a.name === type)?.model ?? null
   if (own === null || RANK[want] <= RANK[own]) return { kind: 'pass' }
   return {
-    kind: 'drop-model',
+    kind: 'deny',
     check: 'model-typed',
-    note: `${SOURCE}: \`${type}\` запущен на модели из своего frontmatter \`${own}\`, а не \`${call.model}\` — вызов может её только понизить. Нужна сильнее — повтори с \`escalate: <почему>\` в description.`,
+    reason: `${SOURCE}: \`${type}\` идёт на модели из своего frontmatter \`${own}\`, вызов может её только понизить. Повтори тот же вызов без \`model\`; нужна \`${call.model}\` — с \`escalate: <почему>\` в description.`,
   }
 }
 

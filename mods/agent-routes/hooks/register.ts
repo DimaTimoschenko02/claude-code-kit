@@ -211,11 +211,9 @@ export const register: Register = on => {
     const d = await agentDecision($, e)
     if (d.kind === 'pass') return next(e)
     await record($, d.check, e.subagent_type ?? null, d.kind, e.description ?? '')
-    if (d.kind === 'deny') return { deny: d.reason }
-    const { model: _dropped, ...rest } = e
-    const result = await next(d.kind === 'drop-model' ? rest : { ...e, model: 'sonnet' })
-    if (result.deny !== undefined) return result
-    return { ...result, context: [...(result.context ?? []), d.note] }
+    // Deny with the fix, never rewrite the call: auto mode reviews the call as sent, so a changed input gets no
+    // verdict and fails anyway, and the rewrite loses fields the event does not carry (run_in_background).
+    return { deny: d.reason }
   }).catch(($, e, next) => next(e))
 
   // Hot path: every Bash call. `codexSandboxFix` returns at once when the text has no `codex`.

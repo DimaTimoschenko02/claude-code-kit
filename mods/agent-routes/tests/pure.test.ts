@@ -99,10 +99,10 @@ test('escalate: is a word in the description, any case; it passes every check', 
   expect(decideAgent({ subagent_type: 'karts-coder', description: 'deescalate: no' }, r, AGENTS, always).kind).toBe('deny')
 })
 
-test('a model check reads the frontmatter rank: only a raise is dropped', () => {
+test('a model check reads the frontmatter rank: only a raise is denied', () => {
   const d = (subagent_type: string, model?: string) => decideAgent({ subagent_type, description: 'd', ...(model ? { model } : {}) }, null, AGENTS, always).kind
-  expect(d('checker', 'opus')).toBe('drop-model')
-  expect(d('checker', 'fable')).toBe('drop-model')
+  expect(d('checker', 'opus')).toBe('deny')
+  expect(d('checker', 'fable')).toBe('deny')
   expect(d('checker', 'sonnet')).toBe('pass')
   expect(d('checker', 'haiku')).toBe('pass')
   expect(d('checker')).toBe('pass')

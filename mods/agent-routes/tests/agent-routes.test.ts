@@ -153,7 +153,7 @@ test('/agent-routes prints the section as the model gets it and the decisions of
   expect(out).toContain(`${PROJ}/.claude/agent-routes.json`)
   expect(out).toContain('- sol-route (deny): 1')
   expect(out).toContain('- catch-all (deny): 1')
-  expect(out).toContain('- model-builtin (set-sonnet): 1')
+  expect(out).toContain('- model-builtin (deny): 1')
 })
 
 // ---- check 1: Sol routes (ported from the karts pre-agent sol-route cases) ----
@@ -188,7 +188,7 @@ test('sol-route needs the routes file: without it a typed agent runs', async ($,
 
 // ---- check 2: catch-all ----
 
-test('a general-purpose call is denied once with the typed agents listed; the same call repeated runs on sonnet', async ($, on) => {
+test('a general-purpose call is denied once with the typed agents listed; the same call repeated with sonnet runs', async ($, on) => {
   const w = world(on)
   await start($)
   const first = await agent($, { subagent_type: 'general-purpose', description: 'find the bug' })
@@ -200,17 +200,18 @@ test('a general-purpose call is denied once with the typed agents listed; the sa
   expect(lines.some(l => l.includes('Shadowed'))).toBe(false)
   expect(w.calls.length).toBe(0)
 
-  const again = await agent($, { subagent_type: 'general-purpose', description: 'find the bug' })
+  expect(lines[lines.length - 1]).toContain('укажи `model: "sonnet"`')
+  const again = await agent($, { subagent_type: 'general-purpose', model: 'sonnet', description: 'find the bug' })
   expect(again.deny).toBe(undefined)
   expect(w.calls[0]?.model).toBe('sonnet')
-  expect(notes(again)[0]).toContain('запущен на sonnet')
+  expect(notes(again)).toEqual([])
 })
 
 test('no subagent_type and `claude` are catch-all; Explore, Plan and plugin agents are not', async ($, on) => {
   world(on)
   expect((await agent($, { description: 'a' })).deny).toBeDefined()
   expect((await agent($, { subagent_type: 'claude', description: 'b' })).deny).toBeDefined()
-  expect((await agent($, { subagent_type: 'Explore', description: 'c' })).deny).toBe(undefined)
+  expect((await agent($, { subagent_type: 'Explore', model: 'sonnet', description: 'c' })).deny).toBe(undefined)
   expect((await agent($, { subagent_type: 'Plan', description: 'd' })).deny).toBe(undefined)
   expect((await agent($, { subagent_type: 'feature-dev:code-reviewer', description: 'e' })).deny).toBe(undefined)
   expect((await agent($, { subagent_type: 'statusline-setup', description: 'f' })).deny).toBe(undefined)
@@ -219,9 +220,9 @@ test('no subagent_type and `claude` are catch-all; Explore, Plan and plugin agen
 test('a parallel batch: each distinct description is denied once, a duplicate in the batch runs', async ($, on) => {
   const w = world(on)
   const results = await Promise.all([
-    agent($, { subagent_type: 'general-purpose', description: 'sweep A' }),
-    agent($, { subagent_type: 'general-purpose', description: 'sweep B' }),
-    agent($, { subagent_type: 'general-purpose', description: 'sweep A' }),
+    agent($, { subagent_type: 'general-purpose', model: 'sonnet', description: 'sweep A' }),
+    agent($, { subagent_type: 'general-purpose', model: 'sonnet', description: 'sweep B' }),
+    agent($, { subagent_type: 'general-purpose', model: 'sonnet', description: 'sweep A' }),
   ])
   expect(results.filter(r => r.deny !== undefined).length).toBe(2)
   expect(w.calls.length).toBe(1)
@@ -229,20 +230,19 @@ test('a parallel batch: each distinct description is denied once, a duplicate in
 
 test('no typed agents anywhere: a general-purpose call is not denied', async ($, on) => {
   const w = world(on, {})
-  expect((await agent($, { subagent_type: 'general-purpose', description: 'x' })).deny).toBe(undefined)
+  expect((await agent($, { subagent_type: 'general-purpose', model: 'sonnet', description: 'x' })).deny).toBe(undefined)
   expect(w.calls[0]?.model).toBe('sonnet')
 })
 
 // ---- check 3: model (ported from agent-model-guard) ----
 
-test('raising a typed agent above its frontmatter drops model, with a note naming its own model', async ($, on) => {
+test('raising a typed agent above its frontmatter is denied with the fix, never rewritten', async ($, on) => {
   const w = world(on)
   const r = await agent($, { subagent_type: 'checker', model: 'opus', description: 'check spec' })
-  expect('model' in (w.calls[0] ?? {})).toBe(false)
-  expect(w.calls[0]?.description).toBe('check spec')
-  expect(r.context?.[0]).toBe('from below')
-  expect(notes(r)[0]).toContain('frontmatter `sonnet`')
-  expect(notes(r)[0]).toContain('escalate: <почему>')
+  expect(w.calls.length).toBe(0)
+  expect(r.deny).toContain('frontmatter `sonnet`')
+  expect(r.deny).toContain('без `model`')
+  expect(r.deny).toContain('escalate: <почему>')
 })
 
 test('escalate: keeps the raise; lowering and equal pass untouched', async ($, on) => {
@@ -264,25 +264,29 @@ test('no model in the call, no frontmatter model, and plugin agents pass untouch
 
 test('user agents apply when the project has none; the project one shadows the user one', async ($, on) => {
   const w = world(on)
-  await agent($, { subagent_type: 'global-reader', model: 'sonnet', description: 'a' })
+  expect((await agent($, { subagent_type: 'global-reader', model: 'sonnet', description: 'a' })).deny).toContain('global-reader')
   await agent($, { subagent_type: 'checker', model: 'sonnet', description: 'b' })
-  expect(w.calls.map(c => c.model)).toEqual([undefined, 'sonnet'])
+  expect(w.calls.map(c => c.model)).toEqual(['sonnet'])
 })
 
-test('built-ins run on sonnet: no model or opus/fable becomes sonnet, haiku stays, escalate: keeps opus', async ($, on) => {
+test('built-ins: no model or opus/fable is denied with model: "sonnet" to retry; sonnet, haiku and escalate: run as sent', async ($, on) => {
   const w = world(on, {})
-  await agent($, { subagent_type: 'Explore', description: 'a' })
-  await agent($, { subagent_type: 'general-purpose', model: 'opus', description: 'b' })
-  await agent($, { subagent_type: 'claude', model: 'fable', description: 'c' })
+  for (const call of [
+    { subagent_type: 'Explore', description: 'a' },
+    { subagent_type: 'general-purpose', model: 'opus', description: 'b' },
+    { subagent_type: 'claude', model: 'fable', description: 'c' },
+  ] as const) expect((await agent($, call)).deny).toContain('model: "sonnet"')
+  expect(w.calls.length).toBe(0)
   const kept = await agent($, { subagent_type: 'Explore', model: 'haiku', description: 'd' })
+  await agent($, { subagent_type: 'Explore', model: 'sonnet', description: 'e' })
   await agent($, { subagent_type: 'general-purpose', model: 'opus', description: 'escalate: deep design' })
-  expect(w.calls.map(c => c.model)).toEqual(['sonnet', 'sonnet', 'sonnet', 'haiku', 'opus'])
+  expect(w.calls.map(c => c.model)).toEqual(['haiku', 'sonnet', 'opus'])
   expect(notes(kept)).toEqual([])
 })
 
 // ---- journal and fail-open ----
 
-test('every deny and rewrite is one journal line; passes are not', async ($, on) => {
+test('every deny is one journal line; passes are not', async ($, on) => {
   const w = world(on, { ...BASE_FILES, [`${PROJ}/.claude/agent-routes.json`]: KARTS_ROUTES })
   await agent($, { subagent_type: 'karts-coder', description: 'step 3 of the drift fix with a long long long long long long long long tail' })
   await agent($, { subagent_type: 'checker', model: 'opus', description: 'check' })
@@ -291,7 +295,7 @@ test('every deny and rewrite is one journal line; passes are not', async ($, on)
   const lines = journal(w)
   expect(lines.map(l => [l.check, l.action, l.subagent_type])).toEqual([
     ['sol-route', 'deny', 'karts-coder'],
-    ['model-typed', 'drop-model', 'checker'],
+    ['model-typed', 'deny', 'checker'],
     ['codex-sandbox', 'deny', null],
   ])
   expect(lines[0]).toMatchObject({ ts: '2026-11-07T10:00:00.000Z', session: 'sess-1', cwd: ROOT })
@@ -301,8 +305,8 @@ test('every deny and rewrite is one journal line; passes are not', async ($, on)
 test('a journal that cannot be written never blocks the decision', async ($, on) => {
   const w = world(on, BASE_FILES, { writeFails: true })
   const r = await agent($, { subagent_type: 'checker', model: 'opus', description: 'x' })
-  expect(r.deny).toBe(undefined)
-  expect('model' in (w.calls[0] ?? {})).toBe(false)
+  expect(r.deny).toContain('frontmatter')
+  expect(w.files.has(JOURNAL)).toBe(false)
 })
 
 test('a check that fails passes the call unchanged', async ($, on) => {
