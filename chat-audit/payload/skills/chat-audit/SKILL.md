@@ -26,6 +26,12 @@ returns platitudes. Establish the purpose first, always.
 6. **Repeat runs must not repeat findings.** Everything reported is logged to the ledger
    (`.claude/state/chat-audit/ledger.jsonl`). Check it before reporting; re-surface only what changed.
 
+## Home
+
+Read `~/.claude/chat-audit/home.md` before step 0 when it exists, and the notes it names. The owner keeps there
+the decisions on how audits run — team, models, mandatory items, per-project plans — so it governs over the
+defaults in this skill and over a project's config. No such file → this skill as written.
+
 ## Route
 
 Run in order. Each mode file says what it needs and what it hands on.
@@ -38,7 +44,8 @@ Run in order. Each mode file says what it needs and what it hands on.
 | 3 | `modes/extract.md` | Run the deterministic slice over the chosen sessions |
 | 4 | `modes/analyze.md` | Dispatch agents per lens over the slice |
 | 5 | `modes/memory-audit.md` | Check what should have been written down and was not |
-| 6 | `modes/land.md` | Present proposals, apply what the user accepts, write the ledger |
+| 6 | `modes/synthesize.md` | Fable connects verified evidence; Opus challenges costly proposals |
+| 7 | `modes/land.md` | Present proposals, apply what the user accepts, write the ledger |
 
 Steps 1–2 may swap order when the user already named the sessions. Nothing else reorders.
 
@@ -51,6 +58,7 @@ the global install (`~/.claude/skills/chat-audit/`) the project has no copy: run
 
 ```bash
 node .claude/skills/chat-audit/lib/discover.mjs config    --project <dir>       # config dirs, memory, infra inventory
+node .claude/skills/chat-audit/lib/models.mjs            --project <dir>       # resolved model/effort per phase; no agents started
 node .claude/skills/chat-audit/lib/discover.mjs sessions  --project <dir> [--days N] [--grep RE] [--exclude ID] [--scope exact|subtree|all] [--include-auto]
 node .claude/skills/chat-audit/lib/extract.mjs   --sessions a.jsonl,b.jsonl --out slice.json   # per-session slice, with user turns
 node .claude/skills/chat-audit/lib/analyze.mjs   --project <dir> [--days N] [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
@@ -84,17 +92,26 @@ audit reports get committed.
 
 ## Configuration
 
-`.claude/chat-audit.config.json` in the project, seeded by a project install. Read it in intake; it sets the
-agent model, default horizon, session-size ceiling and where reports land. No config in the project (a global
-install seeds none) → use the kit defaults (`agent_model: sonnet`, 14 days, 20 sessions, lenses friction +
-repetition) and say so in the intake block. Never hardcode paths — memory location differs per project and
-is discovered by `discover.mjs`.
+`.claude/chat-audit.config.json` in the project, seeded by a project install, sets the horizon, session-size
+ceiling, report location and optional phase model overrides. Resolve models in intake with `lib/models.mjs
+--project <dir>`; its output is the model plan used in every dispatch. No config (a global install seeds none)
+uses the defaults: Sonnet readers, Opus critic, Fable 5.2 synthesis at high effort; 14 days, 20 sessions,
+friction + repetition. `agent_model` remains the legacy default for lens, free-reader and memory agents only.
+Override a phase with `models.<phase>: {model, effort}`; phase names and defaults come from the resolver.
+Never hardcode paths — memory location is discovered by `discover.mjs`.
+
+Keep the main session on its current model; it handles intake, evidence checks, discussion and accepted changes.
+Each agent gets its phase's explicit `model`, `effort` and `description` from the plan. The description includes
+`escalate: chat-audit ...` so an installed routing guard preserves the approved phase model. Do not switch the
+whole conversation to Fable or use a fork of its history for synthesis. If the host cannot run a planned model,
+or runtime routing changes it, report the missing phase before spending on a substitute; let the user choose.
 
 ## Cost
 
-Agents, not the main session: a slice of 20 sessions does not fit a single context, and analysis is
-parallel by nature. Default model comes from config (`sonnet` unless changed) — the main session stays the
-orchestrator that decides, the agents only read and report.
+Agents read the slices in independent contexts. Budget the reader count, one synthesis agent and at most one
+batched critic separately, using the resolved model plan. Synthesis follows memory-audit, before proposals are
+presented; no surviving findings or verified lens candidates means no Fable call. `synthesize.md` owns its
+evidence contract and the independent critic. Neither agent applies changes.
 
 Say the budget out loud before spending it: session count, megabytes and roughly what it costs. The user
 approves the number, not a surprise.

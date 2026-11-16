@@ -26,9 +26,16 @@ mirror case `cd repo/apps/api && sed -i … src/x.ts` from the workspace root re
 Quotes, comments and heredoc bodies are read by `shell_text.scan`: a `;`, `>` or `<<EOF` inside a quoted string is
 text, not shell syntax.
 
+Paths are shell paths on every OS: `/` joins, a path is absolute when it starts with `/` or a drive (`C:/`, `C:\\`), and
+a drive path is printed with `/` (`C:\\a\\b` -> `C:/a/b`); `/c/x` (Git Bash) stays as is. os.path was ntpath on Windows:
+`/v/x.md` came out as `\\v\\x.md`, `os.path.join` folded heredoc paths with `\\`, and a Git Bash `/c/Users/…` joined to
+`C:/w` became `C:/c/Users/…`. `~` and `~/…` expand to the home directory; `~user` is left as written.
+Twin: bash-write-targets.mjs (pure JS, same output); tests run both (BWT_IMPL=node).
+
 Usage: bash-write-targets.py <cwd>   (command on stdin)
 """
 import os
+import posixpath
 import re
 import shlex
 import sys
@@ -38,10 +45,41 @@ from shell_text import OPENER, scan  # noqa: E402
 
 INTERPRETERS = ("python", "python3", "node", "perl", "ruby")
 SEG_WRITERS = {"rm", "mv", "truncate"}
+DRIVE = re.compile(r"[A-Za-z]:[\\/]")
+
+
+def respell(p):
+    """A Windows drive path with `/` only: `C:\\a\\b` -> `C:/a/b`. Anything else unchanged."""
+    return p.replace("\\", "/") if DRIVE.match(p) else p
+
+
+def isabs(p):
+    return p.startswith("/") or DRIVE.match(p) is not None
+
+
+def join(a, *rest):
+    for b in rest:
+        a = b if isabs(b) else posixpath.join(a, b)
+    return a
+
+
+def normpath(p):
+    return p[:2] + posixpath.normpath(p[2:]) if DRIVE.match(p) else posixpath.normpath(p)
+
+
+def basename(p):
+    return re.split(r"[\\/]", p)[-1]
+
+
+def expanduser(s, home):
+    """`~` and `~/…` -> the home directory; `~user/…` and an unknown home leave s as written."""
+    if not home or (s != "~" and not s.startswith("~/")):
+        return s
+    return (home.rstrip("/") + s[1:]) or "/"
 
 # Interpreter heredoc bodies — heredoc_targets(). In a statement's code string literal i stands as \x01i\x02, so a
 # bracket, `#` or `;` inside a string is text.
-LIT = re.compile(r"\x01(\d+)\x02")
+LIT = re.compile(r"\x01([0-9]+)\x02")
 _L, _PATH = LIT.pattern, r"(?:pathlib\.)?(?:Pure)?(?:Posix)?Path"
 # Read on a statement whose literals are emptied except a short mode ('w', 'ab+', '>'): `open(` may hold a nested call
 # (`open(os.path.join(…), 'w')`) and a quoted `.write(` is text.
@@ -67,7 +105,7 @@ FOLDS = (
                 rf"\(\s*{_L}\s*\)|{_L}\.(?:expanduser|resolve|absolute)\(\s*\)"), lambda v, js: v[0]),
     (re.compile(rf"(?<![\w.$])(?:{_PATH}|os\.path\.join|posixpath\.join|path\.resolve|(?P<js>path\.join))"
                 rf"\(\s*{_L}(?:\s*,\s*{_L})*\s*,?\s*\)"), None),  # join: node's path.join only concatenates
-    (re.compile(rf"{_L}\s*/\s*{_L}"), lambda v, js: os.path.join(*v)),  # pathlib's `/`
+    (re.compile(rf"{_L}\s*/\s*{_L}"), lambda v, js: join(*v)),  # pathlib's `/`
     (re.compile(rf"{_L}\s*\+\s*{_L}"), lambda v, js: "".join(v)),
     (re.compile(rf"(?<![\w$\])])\(\s*{_L}\s*\)"), lambda v, js: v[0]),
 )
@@ -151,14 +189,14 @@ def fold(code, lits, js, argv):
         lits.append(value)
         return f"\x01{len(lits) - 1}\x02"
 
-    code = re.sub(r"(?<![\w.$])(?:sys|process)\.argv\[(\d+)\]",
+    code = re.sub(r"(?<![\w.$])(?:sys|process)\.argv\[([0-9]+)\]",
                   lambda m: new(argv[int(m.group(1))]) if int(m.group(1)) < len(argv) else m.group(), code)
     for _ in range(100):
         for rx, value in FOLDS:
             m = rx.search(code)
             if m:
                 v = [lits[int(x)] for x in LIT.findall(m.group())]
-                path = ("/".join(v) if js and m.group("js") else os.path.join(*v)) if value is None else value(v, js)
+                path = ("/".join(v) if js and m.group("js") else join(*v)) if value is None else value(v, js)
                 code = code[:m.start()] + new(path) + code[m.end():]
                 break
         else:
@@ -366,13 +404,11 @@ def heredoc_targets(body, js, argv):
     return found
 
 
-def main():
-    # The command and the paths are UTF-8 whatever the locale says. Under Windows' cp1252 the A0 byte of «Р» read as a
-    # no-break space, `\s` cut `> /tmp/Рецепт.md` to `/tmp/\xd0`, and the gate checked a path nobody wrote.
-    sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
-    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
-    cwd = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
-    cmd = sys.stdin.read()
+def targets(cmd, cwd, environ=None, home=None):
+    """The files cmd writes, absolute, in order, once each. environ answers `$VAR` the command does not assign itself
+    (default os.environ); home is what `~` expands to (default os.path.expanduser("~"))."""
+    environ = os.environ if environ is None else environ
+    home = respell(os.path.expanduser("~") if home is None else home)
     shell, mask, bodies = scan(cmd)
 
     env = dict(re.findall(r"(?:^|[\s;&|(])([A-Za-z_]\w*)=(\"[^\"]*\"|'[^']*'|[^\s;&|]+)", shell))
@@ -382,31 +418,31 @@ def main():
         for _ in range(3):  # values may reference other variables or $HOME
             s = re.sub(
                 r"\$\{(\w+)\}|\$(\w+)",
-                lambda m: env.get(m.group(1) or m.group(2), os.environ.get(m.group(1) or m.group(2), m.group(0))),
+                lambda m: env.get(m.group(1) or m.group(2), environ.get(m.group(1) or m.group(2), m.group(0))),
                 s,
             )
-        return os.path.expanduser(s)
+        return expanduser(s, home)
 
     found = []
-    here = [cwd]  # the shell's directory at this point of the command; None after a cd we cannot resolve
+    here = [respell(cwd)]  # the shell's directory at this point of the command; None after a cd we cannot resolve
     subshells = []  # directory to restore when a ( … ) subshell closes
 
     def add(p):
-        p = expand(p).strip("'\"")
+        p = respell(expand(p).strip("'\""))
         if not p or p.startswith("-") or p.startswith("/dev/") or "$" in p:
             return
-        if not os.path.isabs(p) and here[0] is None:
+        if not isabs(p) and here[0] is None:
             return  # relative to an unknown directory: drop rather than guess
-        found.append(os.path.normpath(os.path.join(here[0] or "/", p)))
+        found.append(normpath(join(here[0] or "/", p)))
 
     def change_dir(args):
-        target = expand(args[0] if args else "~").strip("'\"")
+        target = respell(expand(args[0] if args else "~").strip("'\""))
         if target == "-" or "$" in target or "`" in target:
             here[0] = None
-        elif os.path.isabs(target):
-            here[0] = os.path.normpath(target)
+        elif isabs(target):
+            here[0] = normpath(target)
         elif here[0] is not None:
-            here[0] = os.path.normpath(os.path.join(here[0], target))
+            here[0] = normpath(join(here[0], target))
 
     heredoc_ctx = []  # per heredoc opener, in order: (shell directory, the interpreter that reads it or "", its argv)
     bounds, start = [], 0  # segments are cut where the mask has a separator, so a quoted `;` or `|` cuts nothing
@@ -433,9 +469,9 @@ def main():
         # skip env assignments and sudo-like prefixes
         while tok and re.match(r"^[A-Za-z_]\w*=", tok[0]):
             tok = tok[1:]
-        prog = os.path.basename(tok[0]) if tok else ""
-        at = next((k for k, t in enumerate(tok[:2]) if os.path.basename(t).startswith(INTERPRETERS)), None)
-        interpreter = os.path.basename(tok[at]) if at is not None else ""
+        prog = basename(tok[0]) if tok else ""
+        at = next((k for k, t in enumerate(tok[:2]) if basename(t).startswith(INTERPRETERS)), None)
+        interpreter = basename(tok[at]) if at is not None else ""
         script_args = []  # `python3 - "$F" <<EOF` — the body reads them as sys.argv[1…]
         for t in tok[at + 1:] if at is not None else []:
             if t.startswith("<<"):
@@ -480,11 +516,17 @@ def main():
         for p in heredoc_targets(body, interpreter.startswith("node"), argv):
             add(p)
 
-    seen = set()
-    for p in found:
-        if p not in seen:
-            seen.add(p)
-            print(p)
+    return list(dict.fromkeys(found))
+
+
+def main():
+    # The command and the paths are UTF-8 whatever the locale says. Under Windows' cp1252 the A0 byte of «Р» read as a
+    # no-break space, `\s` cut `> /tmp/Рецепт.md` to `/tmp/\xd0`, and the gate checked a path nobody wrote.
+    sys.stdin.reconfigure(encoding="utf-8", errors="surrogateescape")
+    sys.stdout.reconfigure(encoding="utf-8", errors="surrogateescape")
+    cwd = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+    for p in targets(sys.stdin.read(), cwd):
+        print(p)
 
 
 if __name__ == "__main__":

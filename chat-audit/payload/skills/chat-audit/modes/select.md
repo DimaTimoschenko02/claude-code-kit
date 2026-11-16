@@ -38,7 +38,10 @@ title before excluding. Include it only if the user explicitly asks.
 ```
 selected: <n> sessions · <total> MB · <date range>
 excluded: <n> (current session, background jobs, outside horizon)
-extract:  ~<n> KB slice   →  <n> agents on <model>
+extract:  ~<n> KB slice
+readers:  <n> lens + <n> free-reader + <0 or 1> memory agents — <resolved models and efforts>
+synthesis: at most 1 — <resolved model and effort>, after verified findings and memory checks
+critic:   at most 1 batched pass — <resolved model and effort>, only for costly proposals
 ```
 
 The slice is roughly 1% of raw size — a 2.4 MB session compresses to about 17 KB. That ratio is what makes the
@@ -47,6 +50,9 @@ silently. When you drop something to fit, say which ones and why — a silent ca
 
 Wait for confirmation on the number when the user is present. If they said "decide for me" in intake, state the
 budget anyway and proceed.
+
+Include all four phase lines in that budget, not only the readers. A changed phase model or another synthesis
+or critic pass needs a revised budget; do not quietly multiply Fable calls by the shard or lens count.
 
 ## Output of this mode
 

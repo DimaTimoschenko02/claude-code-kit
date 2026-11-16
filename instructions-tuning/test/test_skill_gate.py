@@ -34,7 +34,7 @@ def skills(ts, *named):
 
 class Gate(unittest.TestCase):
     def run_gate(self, transcript_lines, invocations, agent_id=None, agent_type=None, agents=None,
-                 agent_lines=(), agent_invocations=(), agent_file=True, codex=False, bom=False,
+                 agent_lines=(), agent_invocations=(), agent_file=True, codex=False, bom=False, command=None,
                  gates=None, home_file=None):
         with tempfile.TemporaryDirectory() as root:
             os.makedirs(os.path.join(root, ".claude", "state"))
@@ -62,6 +62,8 @@ class Gate(unittest.TestCase):
             target = os.path.join(home, *home_file) if home_file else os.path.join(root, "brain", "n.md")
             payload = {"tool_name": "Write", "tool_input": {"file_path": target},
                        "transcript_path": transcript, "cwd": root, "session_id": SID}
+            if command is not None:
+                payload.update(tool_name="Bash", tool_input={"command": command})
             if agent_id:
                 payload["agent_id"] = agent_id
             if agent_type:
@@ -91,6 +93,12 @@ class Gate(unittest.TestCase):
     def test_payload_with_a_bom_still_resets(self):
         # A writer that prefixes a UTF-8 BOM (.NET, PowerShell) must not turn a deny into a fail-open.
         self.assertEqual(self.run_gate([compact("2026-10-11T12:00:00.000Z")], ["2026-10-11T11:00:00.000Z"], bom=True), 2)
+
+    # Bash targets come from bash-write-targets (python for the bash gate, the in-process JS twin for the node gate).
+    def test_bash_edit_of_a_governed_file_resets_and_a_read_passes(self):
+        reset = ([compact("2026-10-11T12:00:00.000Z")], ["2026-10-11T11:00:00.000Z"])
+        self.assertEqual(self.run_gate(*reset, command="cd brain && sed -i 's/a/b/' n.md"), 2)
+        self.assertEqual(self.run_gate(*reset, command="grep a brain/n.md > /tmp/o"), 0)
 
     def test_reattached_whole_after_compaction_passes(self):
         lines = [compact("2026-10-11T12:00:00.000Z"), skills("2026-10-11T12:00:00.000Z", ("vault-write", 1083))]

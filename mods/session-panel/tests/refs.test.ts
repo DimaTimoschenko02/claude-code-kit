@@ -263,8 +263,8 @@ describe('the pane links in place', () => {
     expect(await href('/home/fake/proj/Calc.app')).toBeUndefined()
     // The owner's kit and vault link from any session: a kit file in the editor, a vault note in the vault.
     expect(await href('~/claude-code-kit/mods/bin/mod-check')).toBe('webstorm://open?file=/home/fake/claude-code-kit/mods/bin/mod-check')
-    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://open?vault=mind&file=notes%2Fplan')
-    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://open?vault=mind&file=tasks%2FPH-95')
+    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://vault/mind/notes/plan')
+    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://vault/mind/tasks/PH-95')
     // A link out of every root stays text; a folder opens in Finder.
     expect(await href('docs/out.md')).toBeUndefined()
     expect(await href('/home/fake/proj/docs')).toBe('file:///home/fake/proj/docs/')
@@ -284,8 +284,8 @@ describe('the pane links in place', () => {
     const href = async (text: string) => (await ui.findAll({ type: 'Link' })).find(l => l.text === `${String(l.props.href)}${text}`)?.props.href
     expect(await href('hooks/refs.ts')).toBe('webstorm://open?file=/home/fake/proj/hooks/refs.ts')
     expect(await href('~/claude-code-kit/mods/bin/mod-check')).toBe('webstorm://open?file=/home/fake/claude-code-kit/mods/bin/mod-check')
-    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://open?vault=mind&file=notes%2Fplan')
-    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://open?vault=mind&file=tasks%2FPH-95')
+    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://vault/mind/notes/plan')
+    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://vault/mind/tasks/PH-95')
     expect(await href('/home/fake/proj/docs')).toBe('file:///home/fake/proj/docs/')
     expect(await href('docs/out.md')).toBeUndefined()
     await ui.unmount()
@@ -316,7 +316,7 @@ describe('Windows paths', () => {
     const at: Places = { ...AT, files }
     expect(links(draw('папка C:\\Users\\me\\proj и план C:\\Users\\me\\mind\\notes\\plan.md', at))).toEqual([
       ['C:\\Users\\me\\proj', 'file:///C:/Users/me/proj/'],
-      ['C:\\Users\\me\\mind\\notes\\plan.md', 'obsidian://open?vault=mind&file=notes%2Fplan'],
+      ['C:\\Users\\me\\mind\\notes\\plan.md', 'obsidian://vault/mind/notes/plan'],
     ])
     expect(blocked('C:\\Users\\me\\Calc.app\\x', false)).toBe(true)
   })

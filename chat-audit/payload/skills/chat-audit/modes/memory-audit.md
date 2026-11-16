@@ -6,6 +6,10 @@ knows but never wrote down, and what it wrote down that is no longer true.*
 Skip only if recon found no memory anywhere — then the single finding is "there is no durable memory; here is
 what a first entry would hold", built from the strongest repeated facts in the slice.
 
+Give the semantic checks to one agent on the resolved plan's `memory` route, with the slice paths, verified
+findings, recon inventory and ledger. The main session runs the deterministic drift check and verifies the
+returned anchors. This reader reports evidence; it does not synthesize proposals or edit memory.
+
 ## Four checks
 
 **1. Learned and not written.** From the slice: facts established in a session that never reached memory or
@@ -46,7 +50,8 @@ fix had the wrong form, and repeating it produces the same result. Say so explic
 
 ## Output of this mode
 
-Findings in the same shape as `analyze.md`, tagged `source: memory`. Then go to `land.md`.
+Findings in the same shape as `analyze.md`, tagged `source: memory`. Verify their anchors and counts as in
+`analyze.md`, then go to `synthesize.md`.
 
 ## Do not
 

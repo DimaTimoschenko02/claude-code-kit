@@ -5,8 +5,8 @@ Dispatch one agent per lens over the slice, then verify what comes back.
 ## Dispatch
 
 One agent per lens chosen in intake. They are independent — send them in a single message so they run in
-parallel. Model comes from `chat-audit.config.json` (`agent_model`, default `sonnet`); the main session stays
-the orchestrator and does not do the reading.
+parallel. Use the resolved plan's `lens` model, effort and description explicitly. The main session stays the
+orchestrator and does not do the reading. `SKILL.md` owns model resolution and routing.
 
 Each agent gets, in its prompt:
 
@@ -21,7 +21,7 @@ Each agent gets, in its prompt:
 
 ## Free reader
 
-Dispatched alongside the lens agents by default, one per shard, no lens at all. Its job isn't findings — it's
+Dispatched on the plan's `free_reader` route alongside the lens agents, one per shard, no lens at all. Its job isn't findings — it's
 naming lenses nobody defined yet. Same slice and recon inventory, no goal/destination framing. Required output
 per candidate:
 
@@ -91,11 +91,8 @@ An agent's report is a claim. Cheap verification, in this order:
 3. **Not already covered.** Check the named skill/hook/rule actually lacks it — read that file now, not the
    whole inventory.
 
-For findings that would cost real work to act on (a new hook, a rewritten skill), send a second agent to argue
-the opposite: *"here is the claim and the evidence — show why this is not worth doing"*. A finding that
-survives a hostile read is worth the user's attention; one that doesn't was going to waste their afternoon.
-
-Skip the adversarial pass for cheap findings — a one-line memory entry costs less to accept than to double-check.
+Keep verified findings and lens candidates for synthesis. The independent hostile read of costly proposals
+runs once, after synthesis has combined the session and memory evidence (`synthesize.md`), not per finding here.
 
 ## Rank
 

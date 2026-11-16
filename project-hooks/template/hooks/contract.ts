@@ -43,7 +43,8 @@ export type HookIo = {
   readonly home: string;
   /** True under Codex (node/runner.mjs started by the Codex runtime). */
   readonly codex: boolean;
-  /** CCLL_INACTIVE, CCLL_ENABLED, CCLL_THRESHOLD, CCLL_STALE_LOCK_MINUTES, CLAUDE_PROJECT_DIR, CLAUDE_CONFIG_DIR, PATH, HOME only. */
+  /** CCLL_INACTIVE, CCLL_ENABLED, CCLL_THRESHOLD, CCLL_STALE_LOCK_MINUTES, CLAUDE_PROJECT_DIR, CLAUDE_CONFIG_DIR, PATH, HOME, USERPROFILE, TMPDIR, TMP, TEMP, HOOK_TEST,
+   * CLAUDE_CODE_ENTRYPOINT, CLAUDE_JOB_DIR only in the mod (the runner passes every name). */
   env(name: string): Promise<string | undefined>;
   /** File text; null when missing, unreadable, or (in the mod) over 4 MiB. */
   read(path: string): Promise<string | null>;
@@ -51,6 +52,8 @@ export type HookIo = {
   write(path: string, text: string): Promise<void>;
   append(path: string, text: string): Promise<void>;
   exists(path: string): Promise<boolean>;
+  /** Where the path lands through every symlink, `C:/x` spelling on Windows; null when it leads nowhere. */
+  realpath(path: string): Promise<string | null>;
   /** What the path leads to (a link followed); one kind spelling in both shells (engine.mjs#fsKind). */
   stat(path: string): Promise<{ kind: EntryKind; size: number; mtimeMs: number } | null>;
   /** The entries as they stand: a symlink is `other`, so a walk does not go through linked folders (find -type d). */

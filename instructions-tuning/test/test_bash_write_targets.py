@@ -4,19 +4,31 @@ Cases are the gate's real catches and misfires: a python heredoc writing a TSV w
 as an edit of that hook (every quoted path in a writing heredoc counted); `cd brain && python3 - <<EOF` writing a
 relative card path is the catch the heredoc scan exists for.
 Run from the kit root: python3 -B -m unittest discover -s instructions-tuning/test
+BWT_IMPL=node runs the same cases against the JS twin (bash-write-targets-cli.mjs → bash-write-targets.mjs);
+ParityOnTranscripts runs both engines over real Bash commands from ~/.claude/projects transcripts.
 """
+import importlib.util
+import json
 import os
+import shutil
 import subprocess
 import sys
 import unittest
 
-SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "payload", "hooks", "_lib",
-                      "bash-write-targets.py")
+LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "payload", "hooks", "_lib")
+SCRIPT = os.path.join(LIB, "bash-write-targets.py")
+JS_CLI = os.path.join(LIB, "bash-write-targets-cli.mjs")
+ENGINE = ["node", JS_CLI] if os.environ.get("BWT_IMPL") == "node" else [sys.executable, "-B", "-X", "utf8", SCRIPT]
 
 
 def targets(cmd, cwd="/w"):
-    out = subprocess.run([sys.executable, "-B", SCRIPT, cwd], input=cmd, capture_output=True, text=True, check=True)
-    return out.stdout.splitlines()
+    out = subprocess.run(ENGINE + [cwd], input=cmd.encode("utf-8"), capture_output=True, check=True)
+    return out.stdout.decode("utf-8").splitlines()
+
+
+def home(rel):
+    """`~/rel` as the helper prints it: the home directory with `/` (C:/Users/x on Windows)."""
+    return os.path.expanduser("~").replace("\\", "/").rstrip("/") + "/" + rel
 
 
 def py(body, opener="python3 - <<'EOF'"):
@@ -73,12 +85,16 @@ class HeredocAssignedPath(unittest.TestCase):
 
     def test_python_expanduser(self):
         body = "import os\np = os.path.expanduser('~/x.md')\nopen(p, 'a').write(s)"
-        self.assertEqual(targets(py(body)), [os.path.expanduser("~/x.md")])
+        self.assertEqual(targets(py(body)), [home("x.md")])
 
     def test_node_const_path_join(self):
         body = "const fs = require('fs'), path = require('path');\nconst p = path.join('/v', 'x.md');\n" \
                "fs.writeFileSync(p, s);"
         self.assertEqual(targets(node(body)), ["/v/x.md"])
+
+    def test_name_with_a_non_ascii_letter(self):
+        # Python's \w is Unicode: `pathф` is one name. The JS twin compiles ASCII classes for ASCII text only.
+        self.assertEqual(targets(py("pathф = '/v/a.md'\nopen(pathф, 'w').write('привет')")), ["/v/a.md"])
 
     def test_node_let_and_var(self):
         body = "let p = '/v/a.md';\nvar q = '/v/b.md';\nfs.appendFileSync(p, s);\nfs.writeFileSync(q, s);"
@@ -125,7 +141,7 @@ class HeredocPythonBindings(unittest.TestCase):
 
     def test_home_based_path(self):
         body = "p = Path.home()/'.claude'/'hooks'/'x.sh'\nt = p.read_text()\np.write_text(t.replace('a', 'b'))"
-        self.assertEqual(targets(py(body)), [os.path.expanduser("~/.claude/hooks/x.sh")])
+        self.assertEqual(targets(py(body)), [home(".claude/hooks/x.sh")])
 
     def test_f_string_file_name(self):
         cmd = py("for n in ['39', '40']:\n    p=f'PH-{n}.md'; s=open(p).read()\n    open(p,'w').write(s)",
@@ -140,7 +156,7 @@ class HeredocPythonBindings(unittest.TestCase):
     def test_helper_building_the_path_with_a_call(self):
         body = "H=os.path.expanduser\ndef apply(fn, reps):\n    p=pathlib.Path(H(fn)); s=p.read_text()\n" \
                "    p.write_text(s)\napply('~/w/.claude/hooks/x.sh', [('/a', '/b')])"
-        self.assertEqual(targets(py(body)), [os.path.expanduser("~/w/.claude/hooks/x.sh")])
+        self.assertEqual(targets(py(body)), [home("w/.claude/hooks/x.sh")])
 
     def test_ledger_rows_quoting_hook_paths(self):
         body = "with open('.claude/state/ledger.jsonl', 'a') as f:\n" \
@@ -172,7 +188,7 @@ class HeredocPythonBindings(unittest.TestCase):
 
     def test_loop_over_a_comprehension(self):
         body = "for p in [os.path.expanduser(x) for x in ['~/a/.claude/hooks/s.sh']]:\n    open(p, 'w').write(s)"
-        self.assertEqual(targets(py(body)), [os.path.expanduser("~/a/.claude/hooks/s.sh")])
+        self.assertEqual(targets(py(body)), [home("a/.claude/hooks/s.sh")])
 
     def test_loop_over_tuples_holding_a_nested_comprehension(self):
         body = "groups = [('a.spec.ts', ['a.util.spec.ts'], {n: 'x.' + n for n in ['f']})]\n" \
@@ -266,6 +282,81 @@ class OtherBranchesUnchanged(unittest.TestCase):
     def test_data_heredoc_body_is_text(self):
         cmd = "cat > /v/x.md <<'EOF'\nsee '/other/p'\nopen('/other/q', 'w')\nEOF"
         self.assertEqual(targets(cmd), ["/v/x.md"])
+
+
+class WindowsPathSpelling(unittest.TestCase):
+    """Claude Code on Windows passes cwd as `C:\\…`; Git Bash commands say `/c/…` or `C:/…`. Under os.path (ntpath)
+    every target came out with `\\`, and `/c/x` joined to `C:/w` became `C:/c/x`. Same answer on every OS."""
+
+    def test_relative_target_under_a_drive_cwd(self):
+        self.assertEqual(targets("sed -i 's/a/b/' brain/x.md", cwd="C:\\w\\p"), ["C:/w/p/brain/x.md"])
+
+    def test_git_bash_absolute_path_is_kept_whole(self):
+        self.assertEqual(targets("echo x > /c/w/p/x.md", cwd="C:\\w"), ["/c/w/p/x.md"])
+
+    def test_backslashed_drive_path_and_cd(self):
+        self.assertEqual(targets("cd 'C:\\w\\p' && echo x > a/../b.md", cwd="/w"), ["C:/w/p/b.md"])
+
+    def test_heredoc_join_under_a_drive_cwd(self):
+        body = "import os\nopen(os.path.join('brain', 'x.md'), 'w').write(s)"
+        self.assertEqual(targets(py(body), cwd="C:/w"), ["C:/w/brain/x.md"])
+
+    def test_interpreter_named_by_a_windows_path(self):
+        cmd = "\"C:\\Program Files\\nodejs\\node.exe\" <<'EOF'\nfs.writeFileSync('/v/x.md', s);\nEOF"
+        self.assertEqual(targets(cmd), ["/v/x.md"])
+
+
+def transcript_commands(limit):
+    """Up to `limit` distinct (command, cwd) of Bash calls from ~/.claude/projects transcripts, newest files first."""
+    import glob
+    import json
+    files = glob.glob(os.path.join(os.path.expanduser("~"), ".claude", "projects", "**", "*.jsonl"), recursive=True)
+    seen, out = set(), []
+    for path in sorted(files, key=os.path.getmtime, reverse=True):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"name":"Bash"' not in line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                content = (entry.get("message") or {}).get("content")
+                for block in content if isinstance(content, list) else []:
+                    cmd = (block.get("input") or {}).get("command") if isinstance(block, dict) else None
+                    if block.get("type") == "tool_use" and block.get("name") == "Bash" and isinstance(cmd, str) \
+                            and cmd not in seen:
+                        seen.add(cmd)
+                        out.append((cmd, entry.get("cwd") or "/w"))
+                        if len(out) >= limit:
+                            return out
+    return out
+
+
+@unittest.skipUnless(shutil.which("node"), "node not on PATH")
+class ParityOnTranscripts(unittest.TestCase):
+    """Both engines over real Bash commands (BWT_PARITY_N, default 400): a JS regex or path rule that drifts from the
+    Python one shows up here first. Skipped where there are no transcripts (CI)."""
+
+    def test_same_targets_as_python(self):
+        cases = transcript_commands(int(os.environ.get("BWT_PARITY_N", "400")))
+        if not cases:
+            self.skipTest("no transcripts")
+        spec = importlib.util.spec_from_file_location("bash_write_targets", SCRIPT)
+        engine = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(engine)
+        expected = []
+        for cmd, cwd in cases:
+            try:
+                expected.append(engine.targets(cmd, cwd))
+            except Exception:  # the CLI exits non-zero there: no targets
+                expected.append(None)
+        out = subprocess.run(["node", JS_CLI, "--batch"], input=json.dumps(cases).encode("utf-8"),
+                             capture_output=True, check=True)
+        got = json.loads(out.stdout)
+        diffs = [f"{cmd[:300]!r} @ {cwd}\n  py: {e}\n  js: {g}"
+                 for (cmd, cwd), e, g in zip(cases, expected, got) if e != g]
+        self.assertEqual(diffs, [], f"{len(diffs)} of {len(cases)} commands differ:\n" + "\n".join(diffs[:10]))
 
 
 if __name__ == "__main__":

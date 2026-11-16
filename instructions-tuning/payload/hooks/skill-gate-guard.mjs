@@ -4,7 +4,8 @@
 // Why a second implementation: on Windows (Git Bash) every fork costs ≈0.5 s under load, and the bash gate forks jq a
 // dozen times per call, so every Write/Edit/Bash waited 1.5–10 s. This file is a line-for-line port: same config, same
 // boundary (later of session start and the last /compact), same compaction re-attachment and subagent rules, same deny
-// text and exit 2. Bash targets still come from _lib/bash-write-targets.py (one python start, Bash calls only).
+// text and exit 2. Bash targets come from _lib/bash-write-targets.mjs, in this process: the python twin the bash gate
+// starts cost another 0.3–0.9 s a Bash call on Windows.
 // The transcript is read line by line in 1 MB chunks and only marker lines are parsed: a late session's transcript is
 // 10–50 MB, and reading it whole cost about three times its size in memory on every governed write.
 // skill-gate-guard.sh stays the reference: a rule change lands in both. Tests run both:
@@ -13,13 +14,11 @@
 // Use: the install.sh --link shim runs this file whenever node is on PATH (measured 01.11 on Windows under load: 0.4–0.7 s
 // a call against 14–31 s for the bash gate), else the bash gate; or import { skillGate } from a project's own dispatcher.
 // SKILL_GATE_LOG (the project's hook-log.sh) -> its twin hook-log.mjs beside it writes the decision line.
-import { execFileSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-
-const LIB = join(dirname(fileURLToPath(import.meta.url)), '_lib');
+import { bashWriteTargets } from './_lib/bash-write-targets.mjs';
 
 /** One spelling for `C:\x`, `C:/x` and `/c/x` (what cygpath -m gives); other paths unchanged. */
 export function winPath(p) {
@@ -46,31 +45,11 @@ const readText = (path) => {
   }
 };
 
-/** A real python: the Microsoft Store stub in WindowsApps prints an install hint instead of running. */
-function pythonExe(env) {
-  if (env.CODEX_COMPAT_PYTHON) return env.CODEX_COMPAT_PYTHON;
-  const exts = process.platform === 'win32' ? ['.exe', ''] : [''];
-  for (const name of ['python3', 'python']) {
-    for (const dir of String(env.PATH ?? '').split(delimiter)) {
-      if (!dir || /[\\/]WindowsApps([\\/]|$)/i.test(dir)) continue;
-      for (const ext of exts) {
-        const p = join(dir, name + ext);
-        try {
-          if (statSync(p).isFile()) return p;
-        } catch {
-          // next
-        }
-      }
-    }
-  }
-  return null;
-}
-
-function bashTargets(command, cwd, env) {
-  const py = pythonExe(env);
-  if (!py || !command) return '';
+/** The files a Bash command writes, one per line; '' where the parser throws (the python twin's non-zero exit). */
+function bashTargets(command, cwd, env, home) {
+  if (!command) return '';
   try {
-    return execFileSync(py, ['-B', join(LIB, 'bash-write-targets.py'), cwd], { input: command, encoding: 'utf8', env, stdio: ['pipe', 'pipe', 'ignore'] });
+    return bashWriteTargets(command, cwd, { env, home }).join('\n');
   } catch {
     return '';
   }
@@ -248,9 +227,8 @@ export function skillGate(payload, { env = process.env, home = env.HOME || homed
   if (!config) return null; // no gates configured (or unreadable) -> fail-open
   const gates = Array.isArray(config.gates) ? config.gates : [];
 
-  if (tool === 'Bash' && !pythonExe(env)) log('skip', 'no python'); // Bash targets unknown: ungated, but on the record
   const targets = tool === 'Bash'
-    ? bashTargets(payload.tool_input?.command ?? '', cwd || root, env)
+    ? bashTargets(payload.tool_input?.command ?? '', cwd || root, env, home)
     : String(payload.tool_input?.file_path ?? '');
   if (!targets) return null;
 

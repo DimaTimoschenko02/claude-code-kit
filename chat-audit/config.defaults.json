@@ -1,5 +1,6 @@
 {
   "agent_model": "sonnet",
+  "models": {},
   "default_days": 14,
   "max_sessions": 20,
   "max_slice_kb": 600,

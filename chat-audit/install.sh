@@ -2,7 +2,7 @@
 # chat-audit installer — copies the package into a target project's .claude/ and
 # registers the nudge hook. Idempotent: safe to re-run (upgrade path).
 #
-# Installs: the chat-audit skill (router + 7 modes + Node extractors) and the
+# Installs: the chat-audit skill (router + modes + Node extractors) and the
 # UserPromptSubmit nudge hook, and seeds .claude/chat-audit.config.json.
 #
 # Usage:
@@ -156,10 +156,10 @@ fi
 cat >&2 <<SUMMARY
 
 chat-audit v$PKG_VERSION installed into: $CLAUDE_DIR
-  skill:  skills/chat-audit/SKILL.md  + modes/ (7) + lib/ (5 Node scripts)
+  skill:  skills/chat-audit/SKILL.md  + modes/ + lib/ (Node tools)
   hook:   chat-audit-nudge.sh  (UserPromptSubmit — routes "re-read the last chats"
                                 requests through the skill instead of answering them flat)
-  config: chat-audit.config.json   <-- agent model, horizon, report location
+  config: chat-audit.config.json   <-- phase models, horizon, report location
   state:  .claude/state/chat-audit/  (ledger + nudge markers; gitignored)
   requires: node · jq (install only)
 

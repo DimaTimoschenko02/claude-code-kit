@@ -60,6 +60,13 @@ async function envOf($: EngineInterface, name: string): Promise<string | undefin
     case 'CLAUDE_CONFIG_DIR': return $.env.get('CLAUDE_CONFIG_DIR')
     case 'PATH': return $.env.get('PATH')
     case 'HOME': return $.env.get('HOME')
+    case 'USERPROFILE': return $.env.get('USERPROFILE')
+    case 'TMPDIR': return $.env.get('TMPDIR')
+    case 'TMP': return $.env.get('TMP')
+    case 'TEMP': return $.env.get('TEMP')
+    case 'HOOK_TEST': return $.env.get('HOOK_TEST')
+    case 'CLAUDE_CODE_ENTRYPOINT': return $.env.get('CLAUDE_CODE_ENTRYPOINT')
+    case 'CLAUDE_JOB_DIR': return $.env.get('CLAUDE_JOB_DIR')
     default:
       $.ui.log(`project-hooks: env ${name} is not in the list a mod may read`, { to: 'debug' })
       return undefined
@@ -83,6 +90,7 @@ async function ioOf($: EngineInterface): Promise<HookIo> {
       if (r.exitCode !== 0) throw new Error(`append to ${p} failed: ${r.stderr.trim()}`)
     },
     exists: (p) => $.fs.exists(p).catch(() => false),
+    realpath: (p) => $.fs.stat(p, { resolve: true }).then((s) => (s.realPath ? normalPath(s.realPath, platform) : null), () => null),
     stat,
     list: (dir) => $.fs.list(dir).then((es) => es.map((e) => ({ name: e.name, kind: fsKind(e.kind) })), () => []),
     run: (argv, init) => $.process.run(argv, init).then((r) => ({ exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr })),

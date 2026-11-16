@@ -71,11 +71,11 @@ function isPanel(value: unknown): value is Panel {
   return Array.isArray(v.items) && Array.isArray(v.dropped) && Array.isArray(v.report) && typeof v.seq === 'number'
 }
 
-type Config = { pattern: RegExp; cardsDir: string; doneStatuses: string[]; linkRoots: string[]; vault: string; wait: RegExp | null }
+type Config = { pattern: RegExp; cardsDirs: string[]; doneStatuses: string[]; linkRoots: string[]; vault: string; wait: RegExp | null }
 /** The owner's own repos and vault: their files link from any session. */
 const LINK_ROOTS = ['~/claude-code-kit', '~/mind']
 const VAULT = '~/mind'
-let cfg: Config = { pattern: taskRegex(undefined), cardsDir: '', doneStatuses: ['Done'], linkRoots: LINK_ROOTS, vault: VAULT, wait: markerRegex(undefined) }
+let cfg: Config = { pattern: taskRegex(undefined), cardsDirs: [], doneStatuses: ['Done'], linkRoots: LINK_ROOTS, vault: VAULT, wait: markerRegex(undefined) }
 // Bumped per owner line so the add field empties; an auto capture mid-typing leaves it alone.
 let addRound = 0
 // The session the atom holds; `/clear` starts a new id, whose panel is loaded fresh.
@@ -170,7 +170,7 @@ async function refreshPoint($: Engine): Promise<void> {
 
 // Where the places a line names are looked up: the session's folder and repo, the owner's home, the GitHub repo, and
 // the roots a path must lie in to be linked — as spelt (checked before any disk access) and as they really are.
-let where = { cwd: '', top: '', home: '', repo: '', spelt: [] as string[], real: [] as string[], vault: '' }
+let where = { cwd: '', top: '', home: '', repo: '', spelt: [] as string[], real: [] as string[], vault: '', cards: [] as string[] }
 // What this load already looked up: a sha → a commit or not, a path → its checked target or nothing.
 let seenShas = new Map<string, boolean>()
 let seenPaths = new Map<string, Refs['files'][string] | null>()
@@ -199,16 +199,18 @@ async function locate($: Engine, rawCwd: string): Promise<void> {
   // Windows has no HOME in the engine's environment (Git Bash sets it only for its own children).
   const home = toSlash((await $.env.get('HOME').catch(() => undefined)) ?? (await $.env.get('USERPROFILE').catch(() => undefined)) ?? '')
   const expand = (p: string) => (/^~[\\/]/.test(p) && home !== '' ? joinPath(home, p.slice(2)) : p)
-  const spelt = [cwd, top, cfg.cardsDir, expand(cfg.vault), ...cfg.linkRoots.map(expand)]
+  const usable = (p: string) => isAbsolute(p) && !isRoot(p) && !p.split('/').some(s => s === '.' || s === '..')
+  const cards = [...new Set(cfg.cardsDirs.map(p => toSlash(expand(p)).replace(/\/+$/, '')).filter(usable))]
+  const spelt = [cwd, top, ...cards, expand(cfg.vault), ...cfg.linkRoots.map(expand)]
     .map(p => toSlash(p).replace(/\/+$/, ''))
-    .filter(p => isAbsolute(p) && !isRoot(p) && !p.split('/').some(s => s === '.' || s === '..'))
+    .filter(usable)
   const real: string[] = []
   for (const p of spelt) {
     const r = await realDir($, p)
     if (r !== undefined && !isRoot(r)) real.push(r)
   }
   const vault = cfg.vault === '' ? undefined : await realDir($, expand(cfg.vault))
-  where = { cwd, top, home, repo: githubRepo(repo?.remote ?? ''), spelt: [...new Set([...spelt, ...real])], real, vault: vault ?? '' }
+  where = { cwd, top, home, repo: githubRepo(repo?.remote ?? ''), spelt: [...new Set([...spelt, ...real])], real, vault: vault ?? '', cards }
   seenShas = new Map()
   seenPaths = new Map()
 }
@@ -272,12 +274,13 @@ async function change($: Engine, fn: (p: Panel) => Panel): Promise<void> {
   if (after.items !== before.items) await resolveRefs($)
 }
 
-// Where each task's card file is: cards sit at any depth under the cards folder (an epic is a folder of its tasks).
+// Where each task's card file is: cards sit at any depth under each cards folder (an epic is a folder of its tasks), one
+// folder per board — a project's own and the vault's boards of the other projects. An id in two folders: the first wins.
 let cardIndex = new Map<string, string>()
 let indexedAt = -Infinity
 /** A card not found starts a new walk of the cards folder at most this often. */
 const REINDEX_MS = 30_000
-/** Folders below the cards folder a walk goes down, and entries it reads at most. */
+/** Folders below a cards folder a walk goes down, and entries a walk of all of them reads at most. */
 const INDEX_DEPTH = 4
 const INDEX_ENTRIES = 5_000
 // A card path → its vault address ('' when the card is no vault note), looked up once per load.
@@ -296,21 +299,22 @@ async function walkCards($: Engine, dir: string, depth: number, into: Map<string
   }
 }
 
-/** Walks the cards folder again unless it was walked within the last half minute; true when it walked. */
+/** Walks the cards folders again unless they were walked within the last half minute; true when it walked. */
 async function reindex($: Engine): Promise<boolean> {
-  if (cfg.cardsDir === '') return false
+  if (where.cards.length === 0) return false
   const now = await $.clock.now()
   if (now - indexedAt < REINDEX_MS) return false
   indexedAt = now
   const into = new Map<string, string>()
-  await walkCards($, cfg.cardsDir, 0, into, { left: INDEX_ENTRIES })
+  const budget = { left: INDEX_ENTRIES }
+  for (const dir of where.cards) await walkCards($, dir, 0, into, budget)
   cardIndex = into
   return true
 }
 
 /** The ids a reply named that have a card; a card made since the last walk is found by one more walk. */
 async function withCards($: Engine, ids: readonly string[]): Promise<string[]> {
-  if (cfg.cardsDir === '' || ids.length === 0) return []
+  if (where.cards.length === 0 || ids.length === 0) return []
   const prefixes = new Set([...cardIndex.keys()].map(prefixOf))
   const unknown = ids.filter(id => !cardIndex.has(id) && (cardIndex.size === 0 || prefixes.has(prefixOf(id))))
   if (unknown.length > 0) await reindex($)
@@ -332,13 +336,22 @@ async function cardHref($: Engine, path: string): Promise<string | undefined> {
 
 /** Every task the panel names gets what its card says — status, title, address — whether or not a reply linked the card. */
 async function refreshCards($: Engine): Promise<void> {
-  if (cfg.cardsDir === '') return
+  if (where.cards.length === 0) return
   const cards: Record<string, Card> = {}
   const tasks = panelTasks(await read($, panelAtom))
-  const readCard = async (task: string) => {
-    const path = cardIndex.get(task) ?? `${cfg.cardsDir}/${task}.md`
+  const readAt = async (path: string) => {
     const text = await $.fs.read(path).catch(() => null)
     return text === null ? null : { path, text: typeof text === 'string' ? text : '' }
+  }
+  // An indexed card where the walk found it; one made since, at the top of a cards folder, the first that has it.
+  const readCard = async (task: string) => {
+    const known = cardIndex.get(task)
+    if (known !== undefined) return readAt(known)
+    for (const dir of where.cards) {
+      const f = await readAt(`${dir}/${task}.md`)
+      if (f !== null) return f
+    }
+    return null
   }
   let found = await Promise.all(tasks.map(readCard))
   // A card moved into an epic's folder since the last walk: walk again and read the missing ones once more.
@@ -474,7 +487,10 @@ async function watchChrome($: Engine, tool: string, text: string, isError: boole
 export const register: Register = (on, options) => {
   cfg = {
     pattern: taskRegex(typeof options.taskPattern === 'string' ? options.taskPattern : undefined),
-    cardsDir: typeof options.cardsDir === 'string' ? toSlash(options.cardsDir).replace(/\/+$/, '') : '',
+    // One folder as a string (as written before boards of several projects), or a list of them.
+    cardsDirs: (Array.isArray(options.cardsDir) ? options.cardsDir : [options.cardsDir]).filter(
+      (s): s is string => typeof s === 'string' && s.trim() !== '',
+    ),
     doneStatuses: Array.isArray(options.doneStatuses)
       ? options.doneStatuses.filter((s): s is string => typeof s === 'string')
       : ['Done'],

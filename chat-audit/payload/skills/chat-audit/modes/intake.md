@@ -48,6 +48,9 @@ uses.
 
 ## Output of this mode
 
+Run `node <skill-dir>/lib/models.mjs --project <dir>` before budgeting agents. Retain that resolved plan for
+the run; do not infer agent models from the main conversation. Invalid configuration is fixed before dispatch.
+
 One short block, shown to the user before continuing:
 
 ```

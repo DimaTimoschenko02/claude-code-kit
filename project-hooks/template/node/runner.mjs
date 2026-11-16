@@ -4,10 +4,11 @@
 // .codex/hooks.json (`--codex`: Codex payloads are translated, rows with `codex: false` are skipped); tests use it
 // to run the table without Claude Code.
 //
-// usage: node runner.mjs <Event> [--only <name>] [--codex]   (stdin: the hook input)
+// usage: node runner.mjs <Event> [--only <name>] [--codex] [--root <dir>] [--home <dir>]   (stdin: the hook input)
+// --root / --home stand in for the project root and the home folder: tests run the table against a throwaway tree.
 // Copied from claude-code-kit/project-hooks: change the kit, then `project-hooks install`, not this copy.
 import { spawn } from 'node:child_process';
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -56,7 +57,7 @@ function runProcess(argv, { cwd, env, stdin, timeoutMs = 30000 } = {}) {
 }
 
 /** The io of hooks/contract.ts over node:fs and child_process. */
-export function nodeIo({ root = ROOT, codex = process.env.CODEX_COMPAT === '1', env = process.env } = {}) {
+export function nodeIo({ root = ROOT, home = homedir(), codex = process.env.CODEX_COMPAT === '1', env = process.env } = {}) {
   const tryOr = (fn, fallback) => {
     try {
       return fn();
@@ -65,7 +66,7 @@ export function nodeIo({ root = ROOT, codex = process.env.CODEX_COMPAT === '1', 
     }
   };
   return {
-    root, platform: PLATFORM, home: fsPath(homedir()), codex,
+    root: fsPath(root), platform: PLATFORM, home: fsPath(home), codex,
     env: async (name) => env[name],
     read: async (p) => tryOr(() => readFileSync(fsPath(p), 'utf8'), null),
     write: async (p, text) => {
@@ -77,6 +78,7 @@ export function nodeIo({ root = ROOT, codex = process.env.CODEX_COMPAT === '1', 
       appendFileSync(fsPath(p), text);
     },
     exists: async (p) => existsSync(fsPath(p)),
+    realpath: async (p) => tryOr(() => fsPath(realpathSync.native(fsPath(p))), null),
     stat: async (p) => tryOr(() => {
       const s = statSync(fsPath(p));
       return { kind: s.isDirectory() ? 'directory' : s.isFile() ? 'file' : 'other', size: s.size, mtimeMs: s.mtimeMs };
@@ -111,18 +113,19 @@ export async function runCodex(event, raw, options = {}) {
 async function main() {
   const [event, ...rest] = process.argv.slice(2);
   if (!event) {
-    process.stderr.write('usage: node runner.mjs <Event> [--only <name>] [--codex]\n');
+    process.stderr.write('usage: node runner.mjs <Event> [--only <name>] [--codex] [--root <dir>] [--home <dir>]\n');
     process.exit(64);
   }
-  const at = rest.indexOf('--only');
-  const only = at >= 0 ? rest[at + 1] : null;
+  const flag = (name) => (rest.includes(name) ? rest[rest.indexOf(name) + 1] : undefined);
+  const only = flag('--only') ?? null;
+  const dirs = { ...(flag('--root') ? { root: flag('--root') } : {}), ...(flag('--home') ? { home: flag('--home') } : {}) };
   let input = {};
   try {
     input = JSON.parse(readFileSync(0, 'utf8') || '{}');
   } catch {
     input = {};
   }
-  const out = rest.includes('--codex') ? await runCodex(event, input, { only }) : await runTable(event, input, { only });
+  const out = rest.includes('--codex') ? await runCodex(event, input, { only, ...dirs }) : await runTable(event, input, { only, ...dirs });
   if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
 }
 

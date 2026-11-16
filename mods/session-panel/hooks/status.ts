@@ -1,13 +1,19 @@
 // What a task row says about its state: the card's status and each pull request's, as short coloured badges.
 import type { Pr } from '../types'
+import { scalar } from './cards'
 
 /** A badge: the words, a theme colour (emoji carry colour where a surface draws none), dim when unknown. */
 export type Badge = { text: string; color?: string; dim?: true }
 
+// Two schemas: a project board's (To Do … Done) and the vault's own boards (idea, draft, active, paused, done, dropped).
 const CARD: readonly [RegExp, Badge][] = [
   [/^backlog$/i, { text: '💤 бэклог', dim: true }],
+  [/^idea$/i, { text: '💡 идея', dim: true }],
+  [/^draft$/i, { text: '✏ черновик', dim: true }],
+  [/^paused$/i, { text: '⏸ на паузе', color: 'inactive' }],
+  [/^(?:dropped|cancell?ed|won'?t ?do)$/i, { text: '✖ отменено', dim: true }],
   [/^(?:to ?do|open|new)$/i, { text: '📋 к работе', color: 'inactive' }],
-  [/^(?:in ?progress|doing|wip)$/i, { text: '⚙ в работе', color: 'suggestion' }],
+  [/^(?:in ?progress|doing|wip|active)$/i, { text: '⚙ в работе', color: 'suggestion' }],
   [/^(?:in ?)?review$/i, { text: '👀 ждёт ревью', color: 'warning' }],
   [/^(?:testing|in ?testing|qa)$/i, { text: '🧪 на стенде', color: 'merged' }],
   [/^(?:done|closed|merged)$/i, { text: '✅ готово', color: 'success' }],
@@ -21,10 +27,11 @@ export function cardBadge(status: string): Badge {
   return { text: s.length > 24 ? `${s.slice(0, 23)}…` : s, dim: true }
 }
 
-/** The card's frontmatter `status:`, or undefined when the card has none. */
+/** The card's frontmatter `status:` as YAML reads it (quotes and a trailing `# comment` off), or undefined. */
 export function cardStatus(text: string): string | undefined {
   const head = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)
-  const status = head === null ? undefined : /^status:\s*["']?(.+?)["']?\s*$/m.exec(head[1]!)?.[1]
+  const raw = head === null ? undefined : /^status:[ \t]*(.+?)[ \t]*$/m.exec(head[1]!)?.[1]
+  const status = raw === undefined ? undefined : scalar(raw).trim()
   return status === undefined || status === '' ? undefined : status
 }
 

@@ -1,4 +1,4 @@
-# Mode 6 — land
+# Mode 7 — land
 
 Turn verified findings into changes the user accepts one by one, then record what was said so the next run
 starts where this one stopped.
@@ -20,6 +20,7 @@ Group by destination — memory entries together, instruction edits together, ne
 user is deciding in batches, not reading a report.
 
 Then the counts: how many findings, how many dropped in verification, what was excluded from the audit and why.
+Include the actual model and effort per phase from synthesis, with skipped or unavailable phases named.
 State the coverage honestly — sessions skipped for budget are sessions unexamined, and a silent cap reads as
 full coverage when it was not.
 
