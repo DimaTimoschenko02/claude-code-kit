@@ -10,7 +10,7 @@
     "cardsDir": {
       "type": "string",
       "title": "Task cards folder",
-      "description": "Absolute path of the folder with task cards named <TASK-ID>.md, at any depth (an epic may be a folder of its tasks): every task id a reply names whose card is here gets a row with the card's frontmatter status and title, the id opening the card; a done status closes the task.",
+      "description": "Absolute (or ~/, so one value serves every machine) path of the folder with task cards named <TASK-ID>.md, at any depth (an epic may be a folder of its tasks): every task id a reply names whose card is here gets a row with the card's frontmatter status and title, the id opening the card; a done status closes the task.",
       "default": ""
     },
     "doneStatuses": {
@@ -41,7 +41,7 @@
     "vault": {
       "type": "string",
       "title": "Obsidian vault",
-      "description": "Absolute (or ~/) folder of the Obsidian vault: a .md file inside it links as obsidian://open with the folder's name as the vault; '' links every file to the editor.",
+      "description": "Absolute (or ~/) folder of the Obsidian vault: a .md file inside it links as obsidian://open with the folder's name as the vault, which works from any machine the vault is synced to; '' links every file to the editor.",
       "default": "~/mind"
     },
     "waitMarker": {

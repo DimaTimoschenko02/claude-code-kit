@@ -138,6 +138,22 @@ export function fileHref(file: Target, line?: string): string | undefined {
   return `webstorm://open?file=${encodePath(file.abs)}${line === undefined ? '' : `&line=${line}`}`
 }
 
+/** The engine's environment variables that say where the session runs and who looks at it; unset ones absent. */
+export type Host = { OS?: string | undefined; HOME?: string | undefined; DISPLAY?: string | undefined; WAYLAND_DISPLAY?: string | undefined; SSH_CONNECTION?: string | undefined; SSH_CLIENT?: string | undefined; SSH_TTY?: string | undefined }
+
+/**
+ * True when a `webstorm://` or `file://` link to a file of this machine can open where the owner clicks: the session
+ * runs on a desktop he sits at — Windows, macOS, a Linux desktop — and not over SSH. A headless server is looked at from
+ * another machine (SSH, `claude agents`, the web), whose disk has no `/home/...` path: such a link is dead there, so
+ * only the vault's `obsidian://` (the vault is synced to every machine) and web addresses link.
+ */
+export function opensFilesHere(env: Host): boolean {
+  if ([env.SSH_CONNECTION, env.SSH_CLIENT, env.SSH_TTY].some(v => v !== undefined && v !== '')) return false
+  if (env.OS === 'Windows_NT') return true
+  if (/^\/Users\//.test(env.HOME ?? '')) return true
+  return [env.DISPLAY, env.WAYLAND_DISPLAY].some(v => v !== undefined && v !== '')
+}
+
 /** A file under the vault's real folder, as Obsidian names it: the vault's folder name and the note's path, no `.md`. */
 export function vaultNote(real: string, vault: string): Target['vault'] {
   if (vault === '' || !/\.md$/i.test(real) || !within(real, [vault]) || real === vault) return undefined

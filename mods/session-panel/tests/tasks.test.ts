@@ -108,6 +108,19 @@ describe('a task named in a reply', () => {
     await ui.unmount()
   })
 
+  // The settings travel between a Mac, a Windows laptop and a Linux server: `~/` names the cards folder on all three.
+  test('a cards folder spelt from ~/ is the same folder under each machine’s home', { options: { ...OPTIONS, cardsDir: '~/proj/brain/tasks' } }, async ($, on) => {
+    world(on)
+    mock.env(on, { HOME: '/home/fake' })
+    await start($)
+    await reply($, 'Закрыл ревью по PH-197')
+    expect(await taskLines($)).toEqual([PH197])
+    const ui = await $.ui.mount(PANE)
+    const note = encodeURIComponent('proj/tasks/PH-161 Редизайн списков/PH-197')
+    expect((await ui.findAll({ type: 'Link' })).some(l => l.props.href === `obsidian://open?vault=mind&file=${note}`)).toBe(true)
+    await ui.unmount()
+  })
+
   test('the task named most recently comes first; one named in no reply yet is not there', { options: OPTIONS }, async ($, on) => {
     world(on)
     await start($)

@@ -5,7 +5,7 @@ import type { On } from 'claude-code'
 import { emptyPanel, lastSegment, taskRegex } from '../hooks/logic'
 import { plain, runs } from '../hooks/markup'
 import type { Run } from '../hooks/markup'
-import { blocked, candidates, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote } from '../hooks/refs'
+import { blocked, candidates, fileHref, gate, githubRepo, linked, opensFilesHere, placeByName, repoOfLinks, vaultNote } from '../hooks/refs'
 import type { Places } from '../hooks/refs'
 import type { Panel } from '../types'
 import { basename, dirname, isAbsolute, isRoot, joinPath, listSeparator, toSlash } from '../hooks/paths'
@@ -177,7 +177,8 @@ function world(on: On, panel: Panel, shape: Shape = {}): Calls {
   })
   on('store.keys', () => ({ value: [...store.keys()] }))
   mock.clock(on, { now: 1_000 })
-  mock.env(on, shape.env ?? { HOME: '/home/fake' })
+  // A Linux desktop unless the test says where it runs.
+  mock.env(on, shape.env ?? { HOME: '/home/fake', DISPLAY: ':0' })
   on('session.id', () => ({ value: SID }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('tool.register', (_$, e) => ({ value: { tool: `mcp__session-panel__${e.name}` } }))
@@ -277,7 +278,7 @@ describe('the pane links in place', () => {
 
   // Windows: no HOME in the engine's environment, only USERPROFILE; the disk answers with backslashes.
   test('home from USERPROFILE and backslash real paths link the same', async ($, on) => {
-    world(on, STORED, { env: { USERPROFILE: '/home/fake' }, backslash: true })
+    world(on, STORED, { env: { USERPROFILE: '/home/fake', OS: 'Windows_NT' }, backslash: true })
     await start($)
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     await ui.drawn()
@@ -289,6 +290,87 @@ describe('the pane links in place', () => {
     expect(await href('/home/fake/proj/docs')).toBe('file:///home/fake/proj/docs/')
     expect(await href('docs/out.md')).toBeUndefined()
     await ui.unmount()
+  })
+})
+
+// The owner runs Claude on a headless Linux server and looks at it from a Windows laptop (SSH, `claude agents`): a
+// `webstorm://` or `file://` link names a server path the laptop does not have. Only the web and the vault, which is
+// synced to every machine, lead anywhere from there.
+describe('a session on a headless server', () => {
+  const SERVER: Panel = {
+    ...emptyPanel(1_000),
+    seq: 2,
+    items: [
+      { id: 'i1', kind: 'link', text: 'PR #468', href: `${REPO}/pull/468`, checked: false, by: 'auto', seen: 0 },
+      {
+        id: 'i2',
+        kind: 'done',
+        text: 'правка в hooks/refs.ts, папка /home/fake/proj/docs, кит ~/claude-code-kit/mods/bin/mod-check, [markup](webstorm://open?file=/home/fake/proj/hooks/refs.ts&line=3), план ~/mind/notes/plan.md, карточка brain/tasks/PH-95.md, #140',
+        checked: true,
+        by: 'auto',
+        seen: 0,
+      },
+    ],
+  }
+
+  for (const [where, env] of [
+    ['run by systemd: no display, no SSH', { HOME: '/home/fake' }],
+    ['a shell over SSH', { HOME: '/home/fake', SSH_CONNECTION: '10.0.0.2 51000 10.0.0.1 22', DISPLAY: ':0' }],
+  ] as const) {
+    test(`${where}: a PR, #140 and vault notes link, no address names a server path`, async ($, on) => {
+      world(on, SERVER, { env })
+      await start($)
+      const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+      await ui.drawn()
+      const all = await ui.findAll({ type: 'Link' })
+      const href = (text: string) => all.find(l => l.text === `${String(l.props.href)}${text}`)?.props.href
+      expect(href('PR #468')).toBe(`${REPO}/pull/468`)
+      expect(href('#140')).toBe(`${REPO}/issues/140`)
+      expect(href('~/mind/notes/plan.md')).toBe('obsidian://open?vault=mind&file=notes%2Fplan')
+      expect(href('brain/tasks/PH-95.md')).toBe('obsidian://open?vault=mind&file=tasks%2FPH-95')
+      for (const text of ['hooks/refs.ts', '/home/fake/proj/docs', '~/claude-code-kit/mods/bin/mod-check', 'markup']) expect([text, href(text)]).toEqual([text, undefined])
+      // Drawn as words, the place names stay readable.
+      expect((await ui.findAll({ type: 'Text' })).some(t => t.text.includes('hooks/refs.ts'))).toBe(true)
+      for (const l of all) expect(String(l.props.href)).toMatch(/^(?:https:\/\/github\.com\/|obsidian:\/\/open\?vault=mind&file=)/)
+      await ui.unmount()
+    })
+  }
+
+  test('where a file of this machine opens: a desktop the owner sits at, never over SSH', () => {
+    expect(opensFilesHere({ HOME: '/home/fake' })).toBe(false)
+    expect(opensFilesHere({ HOME: '/home/fake', SSH_CLIENT: '10.0.0.2 51000 22', SSH_TTY: '/dev/pts/1' })).toBe(false)
+    expect(opensFilesHere({ HOME: '/home/fake', DISPLAY: ':0' })).toBe(true)
+    expect(opensFilesHere({ HOME: '/home/fake', WAYLAND_DISPLAY: 'wayland-0' })).toBe(true)
+    expect(opensFilesHere({ HOME: '/Users/fake' })).toBe(true)
+    expect(opensFilesHere({ HOME: '/Users/fake', SSH_CONNECTION: '10.0.0.2 51000 10.0.0.1 22' })).toBe(false)
+    expect(opensFilesHere({ OS: 'Windows_NT' })).toBe(true)
+    expect(opensFilesHere({ HOME: '/home/fake', DISPLAY: '' })).toBe(false)
+  })
+})
+
+describe('a vault note’s address', () => {
+  const NOTE = '01 projects/proj/tasks/PH-161 Редизайн списков/PH-238/PH-238'
+
+  test('names the vault and the note inside it, encoded, never the folder the vault sits in', () => {
+    const href = fileHref({ abs: `/home/fake/mind/${NOTE}.md`, dir: false, vault: vaultNote(`/home/fake/mind/${NOTE}.md`, '/home/fake/mind') })!
+    expect(href).toBe(
+      'obsidian://open?vault=mind&file=01%20projects%2Fproj%2Ftasks%2FPH-161%20%D0%A0%D0%B5%D0%B4%D0%B8%D0%B7%D0%B0%D0%B9%D0%BD%20%D1%81%D0%BF%D0%B8%D1%81%D0%BA%D0%BE%D0%B2%2FPH-238%2FPH-238',
+    )
+    expect(href).not.toMatch(/\/home|fake|%2Fhome|[\s\u0400-\u04FF]/)
+    expect(decodeURIComponent(/[?&]file=([^&]+)/.exec(href)![1]!)).toBe(NOTE)
+  })
+
+  test('is the same address from a session on Windows, macOS or Linux: one note, one link', () => {
+    const from = (vault: string) => fileHref({ abs: `${vault}/${NOTE}.md`, dir: false, vault: vaultNote(`${vault}/${NOTE}.md`, vault) })
+    const linux = from('/home/fake/mind')
+    expect(from('C:/Users/fake/mind')).toBe(linux)
+    expect(from('/Users/fake/mind')).toBe(linux)
+  })
+
+  test('a file outside the vault or a non-note is no vault address', () => {
+    expect(vaultNote('/home/fake/mindful/a.md', '/home/fake/mind')).toBeUndefined()
+    expect(vaultNote('/home/fake/mind/img/a.png', '/home/fake/mind')).toBeUndefined()
+    expect(vaultNote('/home/fake/mind', '/home/fake/mind')).toBeUndefined()
   })
 })
 

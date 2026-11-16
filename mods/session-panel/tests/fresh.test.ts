@@ -275,7 +275,8 @@ describe('the pane', () => {
 describe('the stop point on top', () => {
   test('once stop-point wrote the file the pane shows its path on top, a link to open it; before that nothing', { options: OPTIONS }, async ($, on) => {
     const w = world(on)
-    mock.env(on, { HOME: '/home/fake' })
+    // A Linux desktop: a file of this machine opens where the owner clicks.
+    mock.env(on, { HOME: '/home/fake', DISPLAY: ':0' })
     on('session.root', () => ({ value: '/home/fake/proj' }))
     const written = new Set<string>()
     on('fs.stat', (_$, e) =>

@@ -34,8 +34,8 @@ import { markerRegex, waitingLines } from './waiting'
 import { CHROME, blockerText, blockersOf, chromeSignal, hhmm, iconOf, lift, ownerLift, parseTzOffset, raise, signedInHost, validKey } from './blockers'
 import { plain, runs, withLead } from './markup'
 import type { Run } from './markup'
-import { NO_REFS, blocked, candidates, fileHref, gate, githubRepo, linked, placeByName, repoOfLinks, vaultNote, within } from './refs'
-import type { Refs } from './refs'
+import { NO_REFS, blocked, candidates, fileHref, gate, githubRepo, linked, opensFilesHere, placeByName, repoOfLinks, vaultNote, within } from './refs'
+import type { Host, Refs } from './refs'
 import { basename, isAbsolute, isRoot, joinPath, toSlash } from './paths'
 import { pointCandidates } from './point'
 
@@ -170,7 +170,9 @@ async function refreshPoint($: Engine): Promise<void> {
 
 // Where the places a line names are looked up: the session's folder and repo, the owner's home, the GitHub repo, and
 // the roots a path must lie in to be linked — as spelt (checked before any disk access) and as they really are.
-let where = { cwd: '', top: '', home: '', repo: '', spelt: [] as string[], real: [] as string[], vault: '' }
+// `desktop`: a file of this machine opens where the owner clicks (see `opensFilesHere`); on a headless server only vault
+// notes and web addresses link.
+let where = { cwd: '', top: '', home: '', repo: '', spelt: [] as string[], real: [] as string[], vault: '', desktop: false }
 // What this load already looked up: a sha → a commit or not, a path → its checked target or nothing.
 let seenShas = new Map<string, boolean>()
 let seenPaths = new Map<string, Refs['files'][string] | null>()
@@ -199,6 +201,18 @@ async function locate($: Engine, rawCwd: string): Promise<void> {
   // Windows has no HOME in the engine's environment (Git Bash sets it only for its own children).
   const home = toSlash((await $.env.get('HOME').catch(() => undefined)) ?? (await $.env.get('USERPROFILE').catch(() => undefined)) ?? '')
   const expand = (p: string) => (/^~[\\/]/.test(p) && home !== '' ? joinPath(home, p.slice(2)) : p)
+  // `~/…` spells the cards folder the same on every machine the settings travel to.
+  cfg = { ...cfg, cardsDir: expand(cfg.cardsDir) }
+  // Each name literal: the engine lists the variables a module reads.
+  const host: Host = {
+    OS: await $.env.get('OS').catch(() => undefined),
+    HOME: home,
+    DISPLAY: await $.env.get('DISPLAY').catch(() => undefined),
+    WAYLAND_DISPLAY: await $.env.get('WAYLAND_DISPLAY').catch(() => undefined),
+    SSH_CONNECTION: await $.env.get('SSH_CONNECTION').catch(() => undefined),
+    SSH_CLIENT: await $.env.get('SSH_CLIENT').catch(() => undefined),
+    SSH_TTY: await $.env.get('SSH_TTY').catch(() => undefined),
+  }
   const spelt = [cwd, top, cfg.cardsDir, expand(cfg.vault), ...cfg.linkRoots.map(expand)]
     .map(p => toSlash(p).replace(/\/+$/, ''))
     .filter(p => isAbsolute(p) && !isRoot(p) && !p.split('/').some(s => s === '.' || s === '..'))
@@ -208,7 +222,7 @@ async function locate($: Engine, rawCwd: string): Promise<void> {
     if (r !== undefined && !isRoot(r)) real.push(r)
   }
   const vault = cfg.vault === '' ? undefined : await realDir($, expand(cfg.vault))
-  where = { cwd, top, home, repo: githubRepo(repo?.remote ?? ''), spelt: [...new Set([...spelt, ...real])], real, vault: vault ?? '' }
+  where = { cwd, top, home, repo: githubRepo(repo?.remote ?? ''), spelt: [...new Set([...spelt, ...real])], real, vault: vault ?? '', desktop: opensFilesHere(host) }
   seenShas = new Map()
   seenPaths = new Map()
 }
@@ -225,6 +239,8 @@ async function place($: Engine, path: string): Promise<Refs['files'][string] | n
     const real = toSlash(st.realPath)
     if (!within(real, where.real) || blocked(abs, dir) || blocked(real, dir)) continue
     const note = dir ? undefined : vaultNote(real, where.vault)
+    // Off a desktop only a vault note leads anywhere: an editor or Finder link would name this machine's path.
+    if (note === undefined && !where.desktop) return null
     return { abs: real, dir, ...(note === undefined ? {} : { vault: note }) }
   }
   return null
@@ -649,7 +665,7 @@ export const register: Register = (on, options) => {
     const cards: Readonly<Record<string, Card>> = await read($, cardsAtom)
     const point: string = await read($, pointAtom)
     const storeBroken: string = await read($, storeAtom)
-    const pointHref = point === '' ? undefined : fileHref({ abs: point, dir: false })
+    const pointHref = point === '' || !where.desktop ? undefined : fileHref({ abs: point, dir: false })
     const statuses: Record<string, string> = {}
     for (const [task, c] of Object.entries(cards)) if (c.status !== undefined) statuses[task] = c.status
     const v = view(panel, { statuses, prs, doneStatuses: cfg.doneStatuses })
