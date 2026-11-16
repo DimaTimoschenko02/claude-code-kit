@@ -13,7 +13,7 @@ before touching those files.
   (subagent definitions: routing description, frontmatter, agents that learn),
   `audit.md` (whole-surface sweep built on `/doctor prompt-audit`), `tool-holes.md`
   (fix the *class*, not the instance) and `bash-hooks.md` (nine rules derived from
-  real hook misfires). Its own frontmatter hook, `scripts/frontmatter-check.rb`
+  real hook misfires). Its own frontmatter hook, `scripts/frontmatter-check.mjs`
   (PostToolUse, live once the skill is invoked), checks every edited SKILL.md and
   agent definition the way Claude Code reads it.
 - **Gate:** `skill-gate-guard.sh` (PreToolUse Write|Edit|Bash) — blocks an edit to a
@@ -45,7 +45,8 @@ results are recorded as user turns, so a "last user message" boundary would drif
 
 ## Requirements
 
-- `bash`, `jq` (≥1.6). `ruby` for the frontmatter check (skipped without it).
+- `bash`, `jq` (≥1.6). `node` for the frontmatter check (YAML reader js-yaml vendored in `scripts/vendor/`, MIT, nothing to install); a session that
+  edits a SKILL.md or an agent definition without `node` or without the script is told so, never passed silently.
 - Windows: **Git for Windows** (Git Bash). Clone with `git` (don't download the ZIP).
 
 ## Install

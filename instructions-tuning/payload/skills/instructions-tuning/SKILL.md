@@ -6,7 +6,16 @@ hooks:
     - matcher: "Write|Edit|MultiEdit"
       hooks:
         - type: command
-          command: 'for f in "$CLAUDE_PROJECT_DIR/.claude/skills/instructions-tuning/scripts/frontmatter-check.rb" "$HOME/.claude/skills/instructions-tuning/scripts/frontmatter-check.rb"; do [ -f "$f" ] && command -v ruby >/dev/null && exec ruby "$f"; done; exit 0'
+          command: |
+            i=$(cat)
+            case $i in *SKILL.md*|*agents*.md*) ;; *) exit 0 ;; esac
+            for f in "$CLAUDE_PROJECT_DIR/.claude/skills/instructions-tuning/scripts/frontmatter-check.mjs" "$HOME/.claude/skills/instructions-tuning/scripts/frontmatter-check.mjs"; do
+              [ -f "$f" ] || continue
+              command -v node >/dev/null 2>&1 || { echo "instructions-tuning: frontmatter NOT checked - node is not on PATH" >&2; exit 2; }
+              printf %s "$i" | node "$f"; exit $?
+            done
+            echo "instructions-tuning: frontmatter NOT checked - scripts/frontmatter-check.mjs not found under .claude/skills/instructions-tuning" >&2
+            exit 2
 ---
 
 # Instructions Tuning
@@ -90,7 +99,7 @@ For each line: *would removing it make the agent make a mistake?* If not, cut it
 
 **One place per fact.** Two files that agree are fine; two that disagree are a conflict (step 1).
 
-Limits: CLAUDE.md under 200 lines — every line is resent on every turn. SKILL.md body under 500 lines, and split by situation well before that (`skill-files.md`). The frontmatter of a SKILL.md or an agent definition is checked by this skill's own hook after every edit (`scripts/frontmatter-check.rb`: YAML, `description` present and at most 1024 characters for a skill, `name` shape); read what it reports and fix it.
+Limits: CLAUDE.md under 200 lines — every line is resent on every turn. SKILL.md body under 500 lines, and split by situation well before that (`skill-files.md`). The frontmatter of a SKILL.md or an agent definition is checked by this skill's own hook after every edit (`scripts/frontmatter-check.mjs`: YAML, `description` present and at most 1024 characters for a skill, `name` shape); read what it reports and fix it.
 
 ### 5. Apply and record
 
