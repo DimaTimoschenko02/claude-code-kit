@@ -264,8 +264,8 @@ describe('the pane links in place', () => {
     expect(await href('/home/fake/proj/Calc.app')).toBeUndefined()
     // The owner's kit and vault link from any session: a kit file in the editor, a vault note in the vault.
     expect(await href('~/claude-code-kit/mods/bin/mod-check')).toBe('webstorm://open?file=/home/fake/claude-code-kit/mods/bin/mod-check')
-    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://open?vault=mind&file=notes%2Fplan')
-    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://open?vault=mind&file=tasks%2FPH-95')
+    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://vault/mind/notes/plan')
+    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://vault/mind/tasks/PH-95')
     // A link out of every root stays text; a folder opens in Finder.
     expect(await href('docs/out.md')).toBeUndefined()
     expect(await href('/home/fake/proj/docs')).toBe('file:///home/fake/proj/docs/')
@@ -285,8 +285,8 @@ describe('the pane links in place', () => {
     const href = async (text: string) => (await ui.findAll({ type: 'Link' })).find(l => l.text === `${String(l.props.href)}${text}`)?.props.href
     expect(await href('hooks/refs.ts')).toBe('webstorm://open?file=/home/fake/proj/hooks/refs.ts')
     expect(await href('~/claude-code-kit/mods/bin/mod-check')).toBe('webstorm://open?file=/home/fake/claude-code-kit/mods/bin/mod-check')
-    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://open?vault=mind&file=notes%2Fplan')
-    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://open?vault=mind&file=tasks%2FPH-95')
+    expect(await href('~/mind/notes/plan.md')).toBe('obsidian://vault/mind/notes/plan')
+    expect(await href('brain/tasks/PH-95.md')).toBe('obsidian://vault/mind/tasks/PH-95')
     expect(await href('/home/fake/proj/docs')).toBe('file:///home/fake/proj/docs/')
     expect(await href('docs/out.md')).toBeUndefined()
     await ui.unmount()
@@ -326,12 +326,12 @@ describe('a session on a headless server', () => {
       const href = (text: string) => all.find(l => l.text === `${String(l.props.href)}${text}`)?.props.href
       expect(href('PR #468')).toBe(`${REPO}/pull/468`)
       expect(href('#140')).toBe(`${REPO}/issues/140`)
-      expect(href('~/mind/notes/plan.md')).toBe('obsidian://open?vault=mind&file=notes%2Fplan')
-      expect(href('brain/tasks/PH-95.md')).toBe('obsidian://open?vault=mind&file=tasks%2FPH-95')
+      expect(href('~/mind/notes/plan.md')).toBe('obsidian://vault/mind/notes/plan')
+      expect(href('brain/tasks/PH-95.md')).toBe('obsidian://vault/mind/tasks/PH-95')
       for (const text of ['hooks/refs.ts', '/home/fake/proj/docs', '~/claude-code-kit/mods/bin/mod-check', 'markup']) expect([text, href(text)]).toEqual([text, undefined])
       // Drawn as words, the place names stay readable.
       expect((await ui.findAll({ type: 'Text' })).some(t => t.text.includes('hooks/refs.ts'))).toBe(true)
-      for (const l of all) expect(String(l.props.href)).toMatch(/^(?:https:\/\/github\.com\/|obsidian:\/\/open\?vault=mind&file=)/)
+      for (const l of all) expect(String(l.props.href)).toMatch(/^(?:https:\/\/github\.com\/|obsidian:\/\/vault\/mind\/)/)
       await ui.unmount()
     })
   }
@@ -354,10 +354,10 @@ describe('a vault note’s address', () => {
   test('names the vault and the note inside it, encoded, never the folder the vault sits in', () => {
     const href = fileHref({ abs: `/home/fake/mind/${NOTE}.md`, dir: false, vault: vaultNote(`/home/fake/mind/${NOTE}.md`, '/home/fake/mind') })!
     expect(href).toBe(
-      'obsidian://open?vault=mind&file=01%20projects%2Fproj%2Ftasks%2FPH-161%20%D0%A0%D0%B5%D0%B4%D0%B8%D0%B7%D0%B0%D0%B9%D0%BD%20%D1%81%D0%BF%D0%B8%D1%81%D0%BA%D0%BE%D0%B2%2FPH-238%2FPH-238',
+      'obsidian://vault/mind/01%20projects/proj/tasks/PH-161%20%D0%A0%D0%B5%D0%B4%D0%B8%D0%B7%D0%B0%D0%B9%D0%BD%20%D1%81%D0%BF%D0%B8%D1%81%D0%BA%D0%BE%D0%B2/PH-238/PH-238',
     )
     expect(href).not.toMatch(/\/home|fake|%2Fhome|[\s\u0400-\u04FF]/)
-    expect(decodeURIComponent(/[?&]file=([^&]+)/.exec(href)![1]!)).toBe(NOTE)
+    expect(decodeURIComponent(href.slice('obsidian://vault/mind/'.length))).toBe(NOTE)
   })
 
   test('is the same address from a session on Windows, macOS or Linux: one note, one link', () => {
@@ -398,7 +398,7 @@ describe('Windows paths', () => {
     const at: Places = { ...AT, files }
     expect(links(draw('папка C:\\Users\\me\\proj и план C:\\Users\\me\\mind\\notes\\plan.md', at))).toEqual([
       ['C:\\Users\\me\\proj', 'file:///C:/Users/me/proj/'],
-      ['C:\\Users\\me\\mind\\notes\\plan.md', 'obsidian://open?vault=mind&file=notes%2Fplan'],
+      ['C:\\Users\\me\\mind\\notes\\plan.md', 'obsidian://vault/mind/notes/plan'],
     ])
     expect(blocked('C:\\Users\\me\\Calc.app\\x', false)).toBe(true)
   })

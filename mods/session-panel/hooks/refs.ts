@@ -132,8 +132,10 @@ export function fileHref(file: Target, line?: string): string | undefined {
   if (blocked(file.abs, file.dir)) return undefined
   // `file:///C:/x/` on Windows: the third slash a drive path lacks.
   if (file.dir) return `file://${file.abs.startsWith('/') ? '' : '/'}${encodePath(file.abs)}/`
+  // `obsidian://vault/<vault>/<note>`: the `open?vault=…&file=…` form opens Obsidian without the note from some
+  // terminals (Zed's among them).
   if (file.vault !== undefined) {
-    return `obsidian://open?vault=${encodeURIComponent(file.vault.name)}&file=${encodeURIComponent(file.vault.note)}`
+    return `obsidian://vault/${[file.vault.name, ...file.vault.note.split('/')].map(encodeURIComponent).join('/')}`
   }
   return `webstorm://open?file=${encodePath(file.abs)}${line === undefined ? '' : `&line=${line}`}`
 }
@@ -161,13 +163,13 @@ export function vaultNote(real: string, vault: string): Target['vault'] {
 }
 
 /**
- * The one gate for every address the pane draws: the web, the vault's `open`, and an editor link only when its file
+ * The one gate for every address the pane draws: the web, a vault note (`open?` or `vault/`), and an editor link only when its file
  * is one this mod checked — rebuilt from that check, so no parameter the text chose survives. Anything else: undefined,
  * drawn as plain text.
  */
 export function gate(href: string, files: Refs['files']): string | undefined {
   if (/^https?:\/\/[^\s]+$/i.test(href)) return href
-  if (/^obsidian:\/\/open\?[^\s]*$/.test(href)) return href
+  if (/^obsidian:\/\/(?:open\?|vault\/)[^\s]*$/.test(href)) return href
   const ide = ideTarget(href)
   if (ide === undefined) return undefined
   const file = files[ide.path]

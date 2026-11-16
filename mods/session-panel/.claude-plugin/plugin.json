@@ -9,15 +9,16 @@
   "userConfig": {
     "cardsDir": {
       "type": "string",
-      "title": "Task cards folder",
-      "description": "Absolute (or ~/, so one value serves every machine) path of the folder with task cards named <TASK-ID>.md, at any depth (an epic may be a folder of its tasks): every task id a reply names whose card is here gets a row with the card's frontmatter status and title, the id opening the card; a done status closes the task.",
-      "default": ""
+      "title": "Task cards folders",
+      "description": "Absolute (or ~/, so one value serves every machine) folders with task cards named <TASK-ID>.md, at any depth (an epic may be a folder of its tasks), one per board — a project's own and the vault's boards of the other projects; an id found in two folders takes the first; a single string is one folder. Every task id a reply names whose card is in one of them gets a row with the card's frontmatter status and title, the id opening the card (a vault note as obsidian://vault/…); a done status closes the task.",
+      "default": [],
+      "multiple": true
     },
     "doneStatuses": {
       "type": "string",
       "multiple": true,
       "title": "Done statuses",
-      "description": "Card frontmatter statuses that count as done.",
+      "description": "Card frontmatter statuses that count as done, any case: a closed task sinks below the open ones (list both boards' words, e.g. Done and dropped).",
       "default": [
         "Done"
       ]

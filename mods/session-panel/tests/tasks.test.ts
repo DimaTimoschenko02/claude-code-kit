@@ -103,8 +103,8 @@ describe('a task named in a reply', () => {
     expect(await taskLines($)).toEqual([PH197, PH199])
     const ui = await $.ui.mount(PANE)
     const links = await ui.findAll({ type: 'Link' })
-    const note = encodeURIComponent('proj/tasks/PH-161 Редизайн списков/PH-197')
-    expect(links.some(l => l.props.href === `obsidian://open?vault=mind&file=${note}` && /PH-197$/.test(l.text))).toBe(true)
+    const note = ['proj', 'tasks', 'PH-161 Редизайн списков', 'PH-197'].map(encodeURIComponent).join('/')
+    expect(links.some(l => l.props.href === `obsidian://vault/mind/${note}` && /PH-197$/.test(l.text))).toBe(true)
     await ui.unmount()
   })
 
@@ -116,8 +116,8 @@ describe('a task named in a reply', () => {
     await reply($, 'Закрыл ревью по PH-197')
     expect(await taskLines($)).toEqual([PH197])
     const ui = await $.ui.mount(PANE)
-    const note = encodeURIComponent('proj/tasks/PH-161 Редизайн списков/PH-197')
-    expect((await ui.findAll({ type: 'Link' })).some(l => l.props.href === `obsidian://open?vault=mind&file=${note}`)).toBe(true)
+    const note = ['proj', 'tasks', 'PH-161 Редизайн списков', 'PH-197'].map(encodeURIComponent).join('/')
+    expect((await ui.findAll({ type: 'Link' })).some(l => l.props.href === `obsidian://vault/mind/${note}`)).toBe(true)
     await ui.unmount()
   })
 

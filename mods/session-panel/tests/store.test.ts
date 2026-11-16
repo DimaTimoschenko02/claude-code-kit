@@ -68,7 +68,7 @@ function world(on: On): World {
 const start = ($: Engine) => $.session.start({ cwd: '/home/fake/proj', surface: 'terminal', isInteractive: true })
 const reply = ($: Engine, answer: string) => $.turn.complete({ answer, durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' })
 const PANE = { plugin: 'session-panel', component: 'Pane', requestId: 'session-panel', surface: 'terminal', props: { title: 'Сессия', isFocused: true, bodyColumns: 48, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} } } as const
-const NOTE = `obsidian://open?vault=mind&file=${encodeURIComponent('proj/tasks/PH-133 Заказ поставщику/PH-187')}`
+const NOTE = `obsidian://vault/mind/proj/tasks/${encodeURIComponent('PH-133 Заказ поставщику')}/PH-187`
 
 async function drawn($: Engine): Promise<{ links: string[]; texts: string[] }> {
   const ui = await $.ui.mount(PANE)
