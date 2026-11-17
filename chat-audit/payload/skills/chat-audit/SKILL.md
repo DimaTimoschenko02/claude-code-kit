@@ -52,7 +52,7 @@ the global install (`~/.claude/skills/chat-audit/`) the project has no copy: run
 ```bash
 node .claude/skills/chat-audit/lib/discover.mjs config    --project <dir>       # config dirs, memory, infra inventory
 node .claude/skills/chat-audit/lib/discover.mjs sessions  --project <dir> [--days N] [--grep RE] [--exclude ID] [--scope exact|subtree|all] [--include-auto] [--by user|agent] [--no-codex]
-node .claude/skills/chat-audit/lib/extract.mjs   --sessions a.jsonl,b.jsonl --out slice.json   # per-session slice, with user turns
+node .claude/skills/chat-audit/lib/extract.mjs   --sessions a.jsonl,b.jsonl --out slice.json   # per-session slice (Claude or Codex), user turns apart from agent briefs
 node .claude/skills/chat-audit/lib/analyze.mjs   --project <dir> [--days N] [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
 node .claude/skills/chat-audit/lib/agents.mjs    --project <dir> [--days N] | --sessions a.jsonl,b.jsonl [--json]  # subagent transcripts: duration, tool errors by class, gaps, stalls
 node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir> [--roots <dir,dir>] [--memory <dir>] [--fail-on high|medium] [--all]  # anchors in memory that no longer resolve

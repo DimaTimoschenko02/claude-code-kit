@@ -44,6 +44,7 @@ import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { projectFolders } from './discover.mjs';
+import { claudeFactsCollector, claudeLaunch } from './origin.mjs';
 
 const DAY = 86400e3;
 const WINDOW = 7 * DAY;
@@ -150,12 +151,17 @@ export function scanTranscripts(project, emit, { scope = 'subtree', since = 0 } 
   for (const { file, session, main } of transcriptFiles(project, scope, since)) {
     let raw;
     try { raw = fs.readFileSync(file, 'utf8'); } catch { continue; }
+    // The user's words only: an agent-launched session opens with the agent's brief, a headless run is all the
+    // agent's (lib/origin.mjs) — counted as the user, they move every `user` signal without the user saying a word.
+    const launchFacts = claudeFactsCollector();
+    let opened = false;
     for (const line of raw.split('\n')) {
       if (!line) continue;
       const isResult = line.includes('"tool_result"');
       if (isResult && !line.includes('hook error')) continue;   // the bulk of the bytes, nothing to count
       let o;
       try { o = JSON.parse(line); } catch { continue; }
+      launchFacts.take(o);
       const t = Date.parse(o.timestamp);
       if (Number.isNaN(t)) continue;
       const s = session;
@@ -197,7 +203,11 @@ export function scanTranscripts(project, emit, { scope = 'subtree', since = 0 } 
         const slash = SLASH.exec(text);
         if (slash) emit({ type: 'skill', t, s, name: slash[1] });
         emit({ type: 'session', t, s });
-        if (!text.startsWith('<') && !text.startsWith('Caveat:')) emit({ type: 'user', t, s, text });
+        if (text.startsWith('<') || text.startsWith('Caveat:')) continue;
+        const launch = claudeLaunch(launchFacts.facts);
+        const own = launch.by === 'user' || (launch.how !== 'headless' && opened);
+        opened = true;
+        if (own) emit({ type: 'user', t, s, text });
       } else if (o.type === 'attachment' && o.attachment?.type === 'hook_blocking_error') {
         const a = o.attachment;
         const k = `${s}|${o.timestamp}|${a.blockingError?.command || ''}`;

@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { scrub, scrubHead } from './scrub.mjs';
+import { claudeFactsCollector, claudeLaunch } from './origin.mjs';
 
 // Not the user speaking: harness notices, compaction summaries, slash-command echoes, interrupts.
 const NOISE = /^(?:This session is being continued|Caveat: The messages below|<local-command|<command-name|<command-message|<system-reminder>|<task-notification>|<cross-session-message|<agent-message|\[SYSTEM NOTIFICATION|Another Claude session sent a message|Stop hook feedback|\[Request interrupted)/;
@@ -79,8 +80,12 @@ function briefInput(name, inp = {}) {
 }
 
 /** Walk one transcript (main or subagent) into chronological items. */
+// The main thread of an agent-launched session opens with the agent's brief in the user role, and a headless run
+// is all the agent's: those prompts become `brief` / `agent-prompt` items, never `user` (lib/origin.mjs).
 function walk(records, { resultCap, afterUuid, sidechainOk }) {
   const items = [];
+  const launchFacts = claudeFactsCollector();
+  let opened = false;
   const uses = new Map();
   let started = !afterUuid;
   let lastUuid = null;
@@ -88,7 +93,12 @@ function walk(records, { resultCap, afterUuid, sidechainOk }) {
   for (const o of records) {
     if (o.uuid) lastUuid = o.uuid;
     if (o.timestamp) lastTs = o.timestamp;
-    if (!started) { if (o.uuid === afterUuid) started = true; continue; }
+    launchFacts.take(o);
+    if (!started) {
+      if (isRealPrompt(o)) opened = true;
+      if (o.uuid === afterUuid) started = true;
+      continue;
+    }
     if (o.isSidechain && !sidechainOk) continue;
     if (o.type === 'assistant' && Array.isArray(o.message?.content)) {
       const t = textOf(o.message).trim();
@@ -131,7 +141,10 @@ function walk(records, { resultCap, afterUuid, sidechainOk }) {
     if (o.isSidechain && !sidechainOk) continue;
     const t = textOf(o.message).trim();
     if (!t || NOISE.test(t)) continue;
-    items.push({ k: 'user', ts: o.timestamp, uuid: o.uuid, text: capScrub(t, 8000) });
+    const launch = sidechainOk ? null : claudeLaunch(launchFacts.facts);
+    const k = !launch || launch.by === 'user' ? 'user' : launch.how === 'headless' ? 'agent-prompt' : opened ? 'user' : 'brief';
+    opened = true;
+    items.push({ k, ts: o.timestamp, uuid: o.uuid, text: capScrub(t, 8000) });
   }
   return { items, lastUuid, lastTs, started };
 }
@@ -152,7 +165,11 @@ function meta(records, file) {
     if (ct?.customTitle) customTitle = ct.customTitle;
   } catch { /* none */ }
   // The title is model/user text that ends up in section headers — scrubbed like everything else.
+  const launchFacts = claudeFactsCollector();
+  for (const o of records) launchFacts.take(o);
+  const launch = claudeLaunch(launchFacts.facts);
   return { session: path.basename(file, '.jsonl'), file, title: scrub(customTitle || title), cwd, entrypoint,
+           launchedBy: launch.by, launch: launch.how,
            started: first, ended: last };
 }
 

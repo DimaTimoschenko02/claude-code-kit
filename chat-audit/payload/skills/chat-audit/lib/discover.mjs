@@ -270,7 +270,7 @@ function* codexRollouts(dir) {
   }
 }
 
-function codexTitles() {
+export function codexTitles() {
   const out = {};
   try {
     for (const line of fs.readFileSync(path.join(CODEX_HOME, 'session_index.jsonl'), 'utf8').split('\n')) {

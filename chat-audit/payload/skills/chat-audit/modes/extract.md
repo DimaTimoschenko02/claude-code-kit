@@ -20,6 +20,9 @@ They see different things and you need all three:
 - **`extract.mjs`** — per session: user turns with timestamps and uuids (the anchors), turns flagged as
   corrections, interruptions, compactions, tool errors, agent spawns, skill invocations, hook firings,
   long turns, files touched, repeated commands.
+  Codex rollouts slice into the same shape (`source: "codex"`). Each slice says who started it (`launchedBy`,
+  `launch`); in an agent-launched session the opening brief — and every prompt of a headless run — sits in
+  `agentPrompts`, not `userTurns`, so it never reads as the user's words or corrections.
 - **`analyze.mjs`** — across all sessions: tool and binary frequencies, commands repeated 3+ times, retries
   (same command within 3 steps), code written inline from scratch, failures, files re-read across sessions,
   guardrail blocks and classifier denials.

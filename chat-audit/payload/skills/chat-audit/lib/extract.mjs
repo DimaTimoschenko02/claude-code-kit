@@ -27,7 +27,8 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { scrub, scrubHead, scrubTail } from './scrub.mjs';
-import { listSessions } from './discover.mjs';
+import { codexTitles, listSessions } from './discover.mjs';
+import { claudeFactsCollector, claudeLaunch, codexLaunch } from './origin.mjs';
 import { extractFacts } from './facts.mjs';
 
 // A user turn that LOOKS like the user pushing back on what the agent just did.
@@ -88,8 +89,12 @@ export function extractSession(file, opts = {}) {
     toolCounts: new Map(), bashShapes: new Map(), bashHeads: new Map(),
     errors: [], skills: new Map(), skillCalls: [], agents: [], agentTypes: new Map(),
     hooks: new Map(), hookErrors: [], filesTouched: new Map(),
-    longTurns: [], turnCount: 0, sidechainTurns: 0,
+    longTurns: [], turnCount: 0, sidechainTurns: 0, agentPrompts: [],
   };
+  // An agent-launched session opens with the agent's brief in the user role; a headless run is all the agent's.
+  // Those prompts go to agentPrompts, never to userTurns or correctionHints (lib/origin.mjs).
+  const launchFacts = claudeFactsCollector();
+  let opened = false;
 
   const toolUseById = new Map(); // tool_use_id -> {name, brief}
   // Text the agent wrote since the last real user turn (main thread only).
@@ -113,6 +118,7 @@ export function extractSession(file, opts = {}) {
     if (!line || line.length < 20) continue;
     let o;
     try { o = JSON.parse(line); } catch { continue; }
+    launchFacts.take(o);
 
     if (o.timestamp) { if (!out.started) out.started = o.timestamp; out.ended = o.timestamp; }
     if (o.cwd && !out.cwd) out.cwd = o.cwd;
@@ -197,22 +203,28 @@ export function extractSession(file, opts = {}) {
     if (NOISE_PREFIX.test(t)) continue;
     if (t.includes('<system-reminder>') && t.length > 4000) continue;
 
-    out.turnCount++;
     const entry = { ts: o.timestamp, uuid: o.uuid, text: scrubHead(t, maxTurnChars),
                     truncated: t.length > maxTurnChars, chars: t.length };
     const prev = takeReply();
     if (prev) entry.prevReply = prev;
+    const launch = claudeLaunch(launchFacts.facts);
+    const speaker = launch.by === 'user' ? 'user' : launch.how === 'headless' ? 'agent' : opened ? 'user' : 'brief';
+    opened = true;
+    if (speaker !== 'user') { out.agentPrompts.push({ ...entry, speaker }); continue; }
+    out.turnCount++;
     out.userTurns.push(entry);
     if (CORRECTION.test(t.slice(0, 800))) out.correctionHints.push(entry);
   }
 
   const top = opts.top || 40;
+  const launch = claudeLaunch(launchFacts.facts);
   return {
-    session: out.session, file: out.file, title: out.title, branch: out.branch,
+    session: out.session, file: out.file, source: 'claude', launchedBy: launch.by, launch: launch.how,
+    title: out.title, branch: out.branch,
     cwd: out.cwd, cliVersion: out.version, models: [...out.models],
     started: out.started, ended: out.ended,
     metrics: {
-      userTurns: out.turnCount, sidechainTurns: out.sidechainTurns,
+      userTurns: out.turnCount, agentPrompts: out.agentPrompts.length, sidechainTurns: out.sidechainTurns,
       correctionHints: out.correctionHints.length, interruptions: out.interruptions,
       compactions: out.compactions, errors: out.errors.length,
       toolCalls: [...out.toolCounts.values()].reduce((a, b) => a + b, 0),
@@ -233,7 +245,98 @@ export function extractSession(file, opts = {}) {
     errors: out.errors.slice(0, 60),
     correctionHints: out.correctionHints,
     userTurns: out.userTurns,
+    agentPrompts: out.agentPrompts,
   };
+}
+
+// What Codex writes in the user role itself: project instructions, environment, skills.
+const CODEX_SYSTEMISH = /^\s*(# AGENTS\.md instructions|<(environment_context|user_instructions|INSTRUCTIONS|skill|turn_aborted)\b)/;
+
+/** The same slice from a Codex rollout (~/.codex/sessions/**\/rollout-*.jsonl): finished items, not raw responses. */
+export function extractCodexSession(file, opts = {}) {
+  const { maxTurnChars = 1200, pairChars = 0 } = opts;
+  let meta = {};
+  const out = { started: null, ended: null, models: new Set(), userTurns: [], agentPrompts: [], correctionHints: [],
+    interruptions: 0, compactions: 0, toolCounts: new Map(), bashShapes: new Map(), bashHeads: new Map(),
+    errors: [], filesTouched: new Map(), agents: [] };
+  let reply = [], replyTs = null, opened = false;
+  const takeReply = () => {
+    if (!pairChars || !reply.length) { reply = []; return null; }
+    const full = reply.join('\n').trim(); reply = [];
+    const half = Math.floor(pairChars / 2);
+    const whole = full.length > pairChars ? null : scrub(full);
+    return { ts: replyTs, chars: full.length, head: whole === null ? scrubHead(full, half) : whole.slice(0, half),
+             tail: whole === null ? scrubTail(full, half) : whole.slice(half), truncated: full.length > pairChars };
+  };
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (o.timestamp) { out.started ??= o.timestamp; out.ended = o.timestamp; }
+    const p = o.payload || {};
+    if (o.type === 'session_meta') { meta = p; continue; }
+    if (o.type === 'turn_context' && p.model) out.models.add(p.model);
+    if (o.type !== 'event_msg') continue;
+    if (p.type === 'turn_aborted') { out.interruptions++; continue; }
+    if (p.type === 'context_compacted') { out.compactions++; continue; }
+    if (p.type !== 'item_completed' || !p.item) continue;
+    const item = p.item;
+    const text = (item.content || []).map((c) => c.text || '').join('\n').trim();
+    if (item.type === 'UserMessage') {
+      if (!text || CODEX_SYSTEMISH.test(text)) continue;
+      const entry = { ts: o.timestamp, uuid: item.id, text: scrubHead(text, maxTurnChars), truncated: text.length > maxTurnChars, chars: text.length };
+      const prev = takeReply();
+      if (prev) entry.prevReply = prev;
+      // a create_thread brief arrives as a tool result, so a spawned thread's first message is the user's
+      const launch = codexLaunch(meta);
+      const speaker = launch.by === 'user' || opened || launch.how === 'codex-thread' ? 'user' : 'brief';
+      opened = true;
+      if (speaker !== 'user') { out.agentPrompts.push({ ...entry, speaker }); continue; }
+      out.userTurns.push(entry);
+      if (CORRECTION.test(text.slice(0, 800))) out.correctionHints.push(entry);
+    } else if (item.type === 'AgentMessage') {
+      if (pairChars && text) { reply.push(text); replyTs = o.timestamp; }
+    } else if (item.type === 'CommandExecution') {
+      bump(out.toolCounts, 'Bash');
+      const cmd = Array.isArray(item.command) ? item.command.at(-1) : String(item.command || '');
+      bump(out.bashShapes, normalizeCmd(cmd));
+      bump(out.bashHeads, cmd.trim().split(/\s+/)[0].replace(/^.*\//, ''));
+      if (item.exit_code) out.errors.push({ ts: o.timestamp, tool: 'Bash', call: scrubHead(cmd, 200), error: scrubHead(String(item.aggregated_output || '').trim(), 300) });
+    } else if (item.type === 'FileChange') {
+      bump(out.toolCounts, 'Edit');
+      for (const f of Object.keys(item.changes || {})) bump(out.filesTouched, f);
+    } else if (item.type && item.type !== 'Reasoning' && item.type !== 'FunctionCallOutput') {
+      bump(out.toolCounts, item.type === 'DynamicToolCall' ? (item.tool || item.name || 'DynamicToolCall') : item.type);
+    }
+  }
+  const top = opts.top || 40;
+  const launch = codexLaunch(meta);
+  const session = meta.id || path.basename(file, '.jsonl');
+  const title = codexTitles()[session];
+  return {
+    session, file, source: 'codex', launchedBy: launch.by, launch: launch.how,
+    title: title ? scrub(title) : null, branch: meta.git?.branch || null,
+    cwd: meta.cwd || null, cliVersion: meta.cli_version || null, models: [...out.models], started: out.started, ended: out.ended,
+    metrics: {
+      userTurns: out.userTurns.length, agentPrompts: out.agentPrompts.length, sidechainTurns: 0,
+      correctionHints: out.correctionHints.length, interruptions: out.interruptions, compactions: out.compactions,
+      errors: out.errors.length, toolCalls: [...out.toolCounts.values()].reduce((a, b) => a + b, 0),
+      agentCalls: 0, skillCalls: 0, longTurns: 0, bytes: fs.statSync(file).size,
+    },
+    tools: topN(out.toolCounts, top), bashHeads: topN(out.bashHeads, top),
+    bashRepeats: topN(out.bashShapes, top).filter((r) => r.count >= 3), filesTouched: topN(out.filesTouched, top),
+    skillsActive: [], skillCalls: [], agentTypes: [], agents: [], hooks: [], hookErrors: [], longTurns: [],
+    errors: out.errors.slice(0, 60), correctionHints: out.correctionHints, userTurns: out.userTurns, agentPrompts: out.agentPrompts,
+  };
+}
+
+/** Claude transcript or Codex rollout, told apart by the first record. */
+export function extractAny(file, opts = {}) {
+  const fd = fs.openSync(file, 'r');
+  const head = Buffer.alloc(512);
+  const n = fs.readSync(fd, head, 0, 512, 0);
+  fs.closeSync(fd);
+  return /"type":"session_meta"/.test(head.subarray(0, n).toString('utf8')) ? extractCodexSession(file, opts) : extractSession(file, opts);
 }
 
 // ---------------------------------------------------------------------- CLI
@@ -257,6 +360,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
       scope: arg('scope', 'subtree'),
       days: arg('days') ? Number(arg('days')) : null,
       limit: arg('limit') ? Number(arg('limit')) : null,
+      codex: !process.argv.includes('--no-codex'),
     }).map((m) => m.file);
   }
   if (!files.length) { console.error('no sessions matched'); process.exit(1); }
@@ -266,6 +370,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
                     maxKb: Number(arg('max-kb', 160)) };
     const slices = [];
     for (const f of files) {
+      if (/[\\/]rollout-[^\\/]*\.jsonl$/.test(f)) { console.error(`skip ${f}: --facts reads Claude transcripts only`); continue; }
       try { slices.push(extractFacts(f, fopts)); } catch (e) { console.error(`skip ${f}: ${e.message}`); }
     }
     const payload = JSON.stringify({ generated: new Date().toISOString(), mode: 'facts', sessions: slices.length, slices }, null, 1);
@@ -279,7 +384,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
                  pairChars: Number(arg('pairs', 0)) };
   const slices = [];
   for (const f of files) {
-    try { slices.push(extractSession(f, opts)); }
+    try { slices.push(extractAny(f, opts)); }
     catch (e) { console.error(`skip ${f}: ${e.message}`); }
   }
 
@@ -293,9 +398,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
   if (process.argv.includes('--summary') || !out) {
     for (const s of slices) {
       const m = s.metrics;
-      console.log(`\n=== ${s.session.slice(0, 8)} ${s.title || '(no title)'}`);
+      const who = s.launchedBy === 'agent' ? `  [agent·${s.launch}]` : '';
+      console.log(`\n=== ${s.source === 'codex' ? 'codex ' : ''}${s.session.slice(0, 8)} ${s.title || '(no title)'}${who}`);
       console.log(`    ${(s.started || '').slice(0, 16)} → ${(s.ended || '').slice(0, 16)}  ${(m.bytes / 1048576).toFixed(1)}M  ${s.branch || ''}`);
-      console.log(`    turns=${m.userTurns} hints(regex)=${m.correctionHints} interrupts=${m.interruptions} ` +
+      console.log(`    turns=${m.userTurns}${m.agentPrompts ? ` agent-prompts=${m.agentPrompts}` : ''} hints(regex)=${m.correctionHints} interrupts=${m.interruptions} ` +
                   `errors=${m.errors} tools=${m.toolCalls} agents=${m.agentCalls} skills=${m.skillCalls} compacts=${m.compactions}`);
       if (s.bashRepeats.length) console.log(`    repeated bash: ${s.bashRepeats.slice(0, 5).map((r) => `${r.count}× ${r.key.slice(0, 60)}`).join(' | ')}`);
     }

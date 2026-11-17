@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { claudeLaunch, codexLaunch } from './origin.mjs';
 import { pairsFromClaude } from './forks.mjs';
+import { extractAny } from './extract.mjs';
+import { extractFacts } from './facts.mjs';
 
 test('claudeLaunch tells the user\'s sessions from agent-launched ones', () => {
   const by = (f) => claudeLaunch(f).by;
@@ -41,4 +43,32 @@ test('the opening brief of an agent-launched session is not the user\'s turn; la
   assert.equal(stats.launchedBy, 'agent');
   assert.equal(stats.humanTurns, 1);
   assert.deepEqual(pairs.map((p) => p.kind), ['brief', 'turn']);
+  const slice = extractAny(file);
+  assert.equal(slice.launchedBy, 'agent');
+  assert.deepEqual(slice.userTurns.map((t) => t.text), ['давай второй, не трогай прод']);
+  assert.deepEqual(slice.agentPrompts.map((t) => t.speaker), ['brief']);
+  assert.deepEqual(extractFacts(file).items.filter((i) => /user|brief/.test(i.k)).map((i) => i.k), ['brief', 'user']);
+});
+
+test('a Codex rollout slices like a Claude session, delegated briefs apart', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'origin-'));
+  const write = (name, meta, items) => {
+    const file = path.join(dir, name);
+    const lines = [{ timestamp: '2026-11-17T10:00:00Z', ordinal: 0, type: 'session_meta', payload: { id: name, cwd: '/w', ...meta } },
+      ...items.map(([ts, item]) => ({ timestamp: ts, type: 'event_msg', payload: { type: 'item_completed', item } }))];
+    fs.writeFileSync(file, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
+    return file;
+  };
+  const items = [
+    ['2026-11-17T10:00:00Z', { type: 'UserMessage', id: 'u1', content: [{ type: 'text', text: 'почини сборку' }] }],
+    ['2026-11-17T10:01:00Z', { type: 'CommandExecution', id: 'c1', command: ['/bin/bash', '-c', 'npm run build'], exit_code: 1, aggregated_output: 'error: x' }],
+    ['2026-11-17T10:02:00Z', { type: 'FileChange', id: 'f1', changes: { '/w/a.ts': {} } }],
+    ['2026-11-17T10:03:00Z', { type: 'UserMessage', id: 'u2', content: [{ type: 'text', text: 'нет, не так' }] }],
+  ];
+  const own = extractAny(write('rollout-own.jsonl', { originator: 'codex_cli_rs' }, items));
+  assert.equal(own.source, 'codex'); assert.equal(own.launchedBy, 'user');
+  assert.equal(own.metrics.userTurns, 2); assert.equal(own.metrics.errors, 1);
+  assert.deepEqual(own.filesTouched.map((f) => f.key), ['/w/a.ts']);
+  const exec = extractAny(write('rollout-exec.jsonl', { originator: 'codex_exec' }, items));
+  assert.deepEqual([exec.metrics.userTurns, exec.agentPrompts[0].speaker], [1, 'brief']);
 });
