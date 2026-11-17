@@ -34,6 +34,7 @@ import { pathToFileURL } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { scrub } from './scrub.mjs';
 import { projectFolders } from './discover.mjs';
+import { claudeLaunchOfFile, codexLaunch } from './origin.mjs';
 
 const HOME = os.homedir();
 const expandHome = (p) => (p && p.startsWith('~') ? path.join(HOME, p.slice(1)) : p);
@@ -181,8 +182,11 @@ function pickedRecommended(ask, answer) {
 /** Streams one Claude transcript; returns {pairs, stats}. `seen` dedups resumed-session copies by the user's turn uuid. */
 export async function pairsFromClaude(file, { seen = new Set(), project = null, keepOrphans = false } = {}) {
   const session = path.basename(file, '.jsonl');
-  const stats = { session, file, bytes: fs.statSync(file).size, started: null, cwd: null,
-    humanTurns: 0, queuedTurns: 0, pairsNoAgent: 0, dupTurns: 0, convChars: 0, asks: 0 };
+  const launch = claudeLaunchOfFile(file);
+  const stats = { session, file, bytes: fs.statSync(file).size, started: null, cwd: null, launchedBy: launch.by, launch: launch.how,
+    humanTurns: 0, queuedTurns: 0, pairsNoAgent: 0, dupTurns: 0, convChars: 0, asks: 0, briefs: 0 };
+  // An agent-launched session opens with the agent's brief in the user role (lib/origin.mjs): it is not the user's turn.
+  let briefPending = launch.by === 'agent';
   const pairs = [];
   let segTexts = [];            // text blocks of the agent's current uninterrupted run
   let prevSeg = '';             // last non-empty finished run in this turn
@@ -247,6 +251,12 @@ export async function pairsFromClaude(file, { seen = new Set(), project = null, 
     const agentLast = segTexts.length ? segTexts.join('\n') : '';
     segTexts = [];
     if (!isHuman || !userText || NOISE_PREFIX.test(userText)) continue;
+    if (briefPending) {
+      briefPending = false; stats.briefs++;
+      if (keepOrphans) pairs.push(buildPair({ stats, project, o, kind: 'brief', agentText: '', agentTs: null, userText, tags: ['agent_brief'], acted: false, toolCalls, edits, uuid: o.uuid }));
+      toolCalls = 0; edits = 0; prevSeg = ''; lastAgentTs = null;
+      continue;
+    }
 
     stats.humanTurns++;
     stats.convChars += userText.length;
@@ -277,7 +287,7 @@ function buildPair({ stats, project, o, kind, agentText, agentTs, userText, tags
   const ts = o.timestamp;
   const wait = agentTs && ts ? Math.max(0, Math.round((Date.parse(ts) - Date.parse(agentTs)) / 1000)) : null;
   return {
-    source: 'claude', project, session: stats.session, ts, uuid: uuid || null, cwd: stats.cwd, kind,
+    source: 'claude', project, session: stats.session, launchedBy: stats.launchedBy, ts, uuid: uuid || null, cwd: stats.cwd, kind,
     agentTs, waitSec: wait, toolCalls, edits, acted,
     agentChars: agentText.length, userChars: userText.length,
     agent: cut(agentText), user: cut(userText),
@@ -402,12 +412,13 @@ function firstTimestamp(file) {
 export function codexFiles(scopeName, sinceMs) {
   const out = [];
   const scope = scopeOf(scopeName);
-  const root = path.join(HOME, '.codex', 'sessions');
-  for (const file of walkJsonl(root)) {
+  const codexHome = process.env.CODEX_HOME || path.join(HOME, '.codex');
+  // archived threads leave sessions/ for archived_sessions/ — still the user's chats
+  for (const file of [...walkJsonl(path.join(codexHome, 'sessions')), ...walkJsonl(path.join(codexHome, 'archived_sessions'))]) {
     const m = codexMeta(file);
     if (!m || !scope.codexCwd.test(m.cwd || '')) continue;
     if (Date.parse(m.timestamp || 0) < sinceMs) continue;
-    out.push({ file, meta: m });
+    out.push({ file, meta: m, launch: codexLaunch(m) });
   }
   return out;
 }
@@ -417,7 +428,7 @@ const bump = (m, k, by = 1) => { m[k] = (m[k] || 0) + by; };
 
 export async function runScope({ scope, since, out = null, examples = 0 }) {
   const sinceMs = Date.parse(since);
-  const sum = { scope, since, claude: { sessions: 0, bytes: 0, humanTurns: 0, queuedTurns: 0, dupTurns: 0, pairs: 0, pairsNoAgent: 0, convChars: 0 },
+  const sum = { scope, since, claude: { sessions: 0, agentLaunched: 0, briefs: 0, bytes: 0, humanTurns: 0, queuedTurns: 0, dupTurns: 0, pairs: 0, pairsNoAgent: 0, convChars: 0 },
     codex: { interactiveSessions: 0, execSessions: 0, execBytes: 0, bytes: 0, humanTurns: 0, pairs: 0, convChars: 0 },
     byClass: {}, byTag: {}, wait: { all: [], fork: [] }, pairChars: 0, perSession: [], sampleByClass: {}, bySource: {} };
   if (out) fs.writeFileSync(out, '');
@@ -445,15 +456,15 @@ export async function runScope({ scope, since, out = null, examples = 0 }) {
   for (const file of cf) {
     const { pairs, stats } = await pairsFromClaude(file, { seen, project: scope });
     const c = sum.claude;
-    c.sessions++; c.bytes += stats.bytes; c.humanTurns += stats.humanTurns; c.queuedTurns += stats.queuedTurns;
+    c.sessions++; if (stats.launchedBy === 'agent') c.agentLaunched++; c.briefs += stats.briefs; c.bytes += stats.bytes; c.humanTurns += stats.humanTurns; c.queuedTurns += stats.queuedTurns;
     c.dupTurns += stats.dupTurns; c.pairs += pairs.length; c.pairsNoAgent += stats.pairsNoAgent; c.convChars += stats.convChars;
-    sum.perSession.push({ id: stats.session.slice(0, 8), convTokens: Math.round(stats.convChars / CHARS_PER_TOKEN), humanTurns: stats.humanTurns, pairs: pairs.length });
+    sum.perSession.push({ id: stats.session.slice(0, 8), by: stats.launchedBy, convTokens: Math.round(stats.convChars / CHARS_PER_TOKEN), humanTurns: stats.humanTurns, pairs: pairs.length });
     take(pairs);
   }
-  for (const { file, meta } of codexFiles(scope, sinceMs)) {
+  for (const { file, launch } of codexFiles(scope, sinceMs)) {
     const bytes = fs.statSync(file).size;
     const c = sum.codex;
-    if (meta.originator === 'codex_exec') { c.execSessions++; c.execBytes += bytes; continue; }   // delegated prompt, not the user
+    if (launch.by === 'agent') { c.execSessions++; c.execBytes += bytes; continue; }   // delegated prompt, not the user
     const { pairs, stats } = await pairsFromCodex(file, { project: scope });
     c.interactiveSessions++; c.bytes += bytes; c.humanTurns += stats.humanTurns; c.pairs += pairs.length; c.convChars += stats.convChars;
     sum.perSession.push({ id: stats.session.slice(0, 8) + '(codex)', convTokens: Math.round(stats.convChars / CHARS_PER_TOKEN), humanTurns: stats.humanTurns, pairs: pairs.length });
@@ -491,8 +502,8 @@ function printSummary(s) {
   const c = s.claude, x = s.codex;
   const lines = [];
   lines.push(`scope=${s.scope} since=${s.since}`);
-  lines.push(`Claude: sessions=${c.sessions} bytes=${(c.bytes / 1048576).toFixed(0)}MB humanTurns=${c.humanTurns} (queued ${c.queuedTurns}, dup ${c.dupTurns}) pairs=${c.pairs} noAgentText=${c.pairsNoAgent}`);
-  lines.push(`Codex:  interactive=${x.interactiveSessions} humanTurns=${x.humanTurns} pairs=${x.pairs}; codex_exec delegated sessions skipped=${x.execSessions} (${(x.execBytes / 1048576).toFixed(0)}MB)`);
+  lines.push(`Claude: sessions=${c.sessions} bytes=${(c.bytes / 1048576).toFixed(0)}MB humanTurns=${c.humanTurns} (queued ${c.queuedTurns}, dup ${c.dupTurns}) pairs=${c.pairs} noAgentText=${c.pairsNoAgent}; agent-launched sessions=${c.agentLaunched} (their ${c.briefs} opening briefs not counted as the user)`);
+  lines.push(`Codex:  interactive=${x.interactiveSessions} humanTurns=${x.humanTurns} pairs=${x.pairs}; agent-launched (codex exec, sub-agents) skipped=${x.execSessions} (${(x.execBytes / 1048576).toFixed(0)}MB)`);
   lines.push(`byClass: ${JSON.stringify(s.byClass)}`);
   lines.push(`byTag:   ${JSON.stringify(s.byTag)}`);
   const m1 = median(s.wait.all), m2 = median(s.wait.fork);

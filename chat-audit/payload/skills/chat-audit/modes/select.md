@@ -5,7 +5,7 @@ Choose which sessions get read, and agree the cost before spending it.
 ## Run
 
 ```bash
-node .claude/skills/chat-audit/lib/discover.mjs sessions --project <dir> [--days N] [--grep <regex>] [--scope exact|subtree|all] [--include-auto]
+node .claude/skills/chat-audit/lib/discover.mjs sessions --project <dir> [--days N] [--grep <regex>] [--scope exact|subtree|all] [--include-auto] [--by user|agent] [--no-codex]
 ```
 
 One line per session: start time, size, user-turn count, short id, auto-title, branch. Sorted newest first.
@@ -13,6 +13,12 @@ Sessions under 2 KB are dropped as aborted. Automatic security-review sessions (
 prompt as the first user turn — on a project with that hook, most of its sessions) are dropped too, with the
 excluded count printed; they are not chats a human had, so pull them back with `--include-auto` only when one
 is actually the subject.
+
+Each line says who started the session: `user`, or `agent·<how>` — a background task, a timer-run agent, a headless
+`claude -p`, `codex exec`. An agent's session opens with its brief in the user role, so its first "user" turn is
+the agent's words, not the user's; the user can still join later. Pick agent sessions to audit how agents work,
+never to quote the user. Codex chats in the project are listed too (`codex`), because the user chats there as
+well; `--no-codex` hides them. The rules behind the label are in `lib/origin.mjs`.
 
 Scope matters when a project has worktrees or sub-repos: `exact` is the directory itself, `subtree` (default)
 includes everything under it, `all` is every session on the machine.

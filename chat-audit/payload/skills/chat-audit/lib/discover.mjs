@@ -15,6 +15,7 @@
 //   node discover.mjs sessions [--project <dir>] [--scope exact|subtree|all]
 //                              [--days N] [--limit N] [--grep <regex>]
 //                              [--exclude <sessionId,...>] [--json]
+//                              [--by user|agent] [--no-codex]   # who started it; Codex chats are listed too
 import fs from 'node:fs';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
@@ -22,6 +23,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { scrub } from './scrub.mjs';
+import { claudeFactsCollector, claudeLaunch, codexLaunch } from './origin.mjs';
 
 const HOME = os.homedir();
 const isInside = (dir, p) => { const rel = path.relative(dir, p); return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel)); };
@@ -149,7 +151,7 @@ export function projectFolders(projectDir, scope = 'subtree') {
 
 // ------------------------------------------------------------------ sessions
 
-const META_MARKERS = ['"ai-title"', '"type":"user"', '"gitBranch"', '"agent-name"'];
+const META_MARKERS = ['"ai-title"', '"type":"user"', '"gitBranch"', '"agent-name"', '"agent-setting"'];
 
 function isHumanTurn(o) {
   const c = o.message && o.message.content;
@@ -176,6 +178,7 @@ export function sessionMeta(file) {
   const st = fs.statSync(file);
   let title = null, agentName = null, branch = null, cwd = null, version = null;
   let first = null, last = null, userTurns = 0, sidechains = 0, firstPrompt = null;
+  const launchFacts = claudeFactsCollector();
   const raw = fs.readFileSync(file, 'utf8');
   for (const line of raw.split('\n')) {
     if (!line || line.length < 20) continue;
@@ -186,6 +189,7 @@ export function sessionMeta(file) {
     let o;
     try { o = JSON.parse(line); } catch { continue; }
     if (o.timestamp) { if (!first) first = o.timestamp; last = o.timestamp; }
+    launchFacts.take(o);
     if (o.type === 'ai-title' && o.aiTitle) title = scrub(o.aiTitle);
     if (o.type === 'agent-name' && o.agentName) agentName = o.agentName;
     if (o.gitBranch && !branch) branch = o.gitBranch;
@@ -198,9 +202,13 @@ export function sessionMeta(file) {
       else { userTurns++; if (firstPrompt === null) firstPrompt = humanText(o); }
     }
   }
+  const launch = claudeLaunch(launchFacts.facts);
   return {
+    source: 'claude',
     session: path.basename(file, '.jsonl'),
     file,
+    // who started it: an agent's session opens with its brief in the user role — not the user's words (lib/origin.mjs)
+    launchedBy: launch.by, launch: launch.how,
     title, agentName, branch, cwd, version,
     started: first, ended: last,
     bytes: st.size, mtime: st.mtime.toISOString(),
@@ -210,7 +218,8 @@ export function sessionMeta(file) {
 }
 
 export function listSessions(projectDir, opts = {}) {
-  const { scope = 'subtree', days = null, limit = null, grep = null, exclude = [], includeAuto = false } = opts;
+  const { scope = 'subtree', days = null, limit = null, grep = null, exclude = [], includeAuto = false,
+    codex = false, by = null } = opts;
   const excluded = exclude.filter(Boolean);   // full ids or prefixes (a short id must exclude too)
   const cutoff = days ? Date.now() - days * 86400000 : null;
   const rows = [];
@@ -228,11 +237,15 @@ export function listSessions(projectDir, opts = {}) {
     }
   }
   let metas = rows.map((f) => { try { return sessionMeta(f); } catch { return null; } }).filter(Boolean);
+  // The user also chats in Codex, not only delegates to it: its sessions are part of "the last chats".
+  // Opt-in for callers that parse the files as Claude transcripts (extract, agents, agent-cost).
+  if (codex) metas.push(...codexSessions(projectDir, { scope, cutoff }).filter((m) => !excluded.some((x) => m.session.startsWith(x))));
   // mtime above is only a cheap pre-filter: a session resumed today but STARTED months ago is not
   // "the last N days" (two such sessions slipped into a 14-day audit, 2026-09-06).
   if (cutoff) metas = metas.filter((m) => !m.started || Date.parse(m.started) >= cutoff);
   const autoExcluded = metas.filter((m) => m.auto).length;
   if (!includeAuto) metas = metas.filter((m) => !m.auto);
+  if (by) metas = metas.filter((m) => m.launchedBy === by);
   if (grep) {
     const re = new RegExp(grep, 'i');
     metas = metas.filter((m) => re.test(`${m.title || ''} ${m.branch || ''} ${m.agentName || ''}`));
@@ -240,6 +253,63 @@ export function listSessions(projectDir, opts = {}) {
   metas.sort((a, b) => ((a.started || a.mtime) < (b.started || b.mtime) ? 1 : -1));   // same metric as the filter
   const out = limit ? metas.slice(0, limit) : metas;
   out.autoExcluded = autoExcluded;   // automatic security-review sessions dropped by default; see --include-auto
+  return out;
+}
+
+// ------------------------------------------------------------------ Codex sessions
+
+const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
+
+function* codexRollouts(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) yield* codexRollouts(p);
+    else if (e.name.startsWith('rollout-') && e.name.endsWith('.jsonl')) yield p;
+  }
+}
+
+function codexTitles() {
+  const out = {};
+  try {
+    for (const line of fs.readFileSync(path.join(CODEX_HOME, 'session_index.jsonl'), 'utf8').split('\n')) {
+      try { const o = JSON.parse(line); if (o.id && o.thread_name) out[o.id] = o.thread_name; } catch { /* partial line */ }
+    }
+  } catch { /* no index */ }
+  return out;
+}
+
+/** Codex rollouts (live and archived) whose cwd belongs to the project, in the same shape as sessionMeta. */
+export function codexSessions(projectDir, { scope = 'subtree', cutoff = null } = {}) {
+  const titles = codexTitles();
+  const out = [];
+  for (const root of [path.join(CODEX_HOME, 'sessions'), path.join(CODEX_HOME, 'archived_sessions')]) {
+    for (const file of codexRollouts(root)) {
+      const st = fs.statSync(file);
+      if (cutoff && st.mtime.getTime() < cutoff) continue;
+      const lines = fs.readFileSync(file, 'utf8').split('\n');
+      let meta;
+      try { meta = JSON.parse(lines[0]).payload; } catch { continue; }
+      const cwd = meta?.cwd || '';
+      if (scope !== 'all' && !(scope === 'exact' ? path.resolve(cwd) === projectDir : isInside(projectDir, cwd))) continue;
+      let last = null, userTurns = 0;
+      for (const line of lines) {
+        if (line.includes('"type":"UserMessage"')) userTurns++;   // event_msg item_completed, as forks.mjs counts them
+        const m = /^\{"timestamp":"([^"]+)"/.exec(line);
+        if (m) last = m[1];
+      }
+      const launch = codexLaunch(meta);
+      out.push({
+        source: 'codex', session: meta.id || path.basename(file, '.jsonl'), file,
+        launchedBy: launch.by, launch: launch.how,
+        title: titles[meta.id] ? scrub(titles[meta.id]) : null, agentName: null, branch: meta.git?.branch || null, cwd,
+        version: meta.cli_version || null, started: meta.timestamp || null, ended: last,
+        bytes: st.size, mtime: st.mtime.toISOString(), userTurns, sidechainTurns: 0, auto: false,
+        archived: file.includes(`${path.sep}archived_sessions${path.sep}`),
+      });
+    }
+  }
   return out;
 }
 
@@ -360,6 +430,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
       // The security-review hook opens a session per diff; it is not a chat a human had
       // (166 of 202 in one project, 2026-09-23) — excluded by default, not a session to audit.
       includeAuto: process.argv.includes('--include-auto'),
+      codex: !process.argv.includes('--no-codex'),
+      by: arg('by'),   // user | agent — who started the session (lib/origin.mjs)
     });
     if (process.argv.includes('--json')) { console.log(JSON.stringify(metas, null, 2)); }
     else {
@@ -368,13 +440,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.ar
         ? `  (+${metas.autoExcluded} automatic security-review sessions excluded — pass --include-auto)` : '';
       console.log(`sessions: ${metas.length}  total: ${mb(metas.reduce((a, m) => a + m.bytes, 0))}${autoNote}\n`);
       for (const m of metas) {
+        const who = `${m.source === 'codex' ? 'codex ' : ''}${m.launchedBy === 'agent' ? `agent·${m.launch}` : 'user'}`;
         console.log(`${(m.started || '').slice(0, 16).replace('T', ' ')}  ${mb(m.bytes).padStart(6)}  ` +
-          `turns=${String(m.userTurns).padStart(3)}  ${m.session.slice(0, 8)}  ${m.title || '(no title)'}` +
+          `turns=${String(m.userTurns).padStart(3)}  ${m.session.slice(0, 8)}  ${who.padEnd(18)}  ${m.title || m.agentName || '(no title)'}` +
           `${m.branch && m.branch !== 'main' ? '  [' + m.branch + ']' : ''}`);
       }
     }
   } else {
-    console.error('sessions [--exclude <sessionId>] [--include-auto] · usage: discover.mjs config|sessions [--project dir] [--scope exact|subtree|all] [--days N] [--limit N] [--grep re] [--json]');
+    console.error('sessions [--exclude <sessionId>] [--include-auto] [--by user|agent] [--no-codex] · usage: discover.mjs config|sessions [--project dir] [--scope exact|subtree|all] [--days N] [--limit N] [--grep re] [--json]');
     process.exit(1);
   }
 }

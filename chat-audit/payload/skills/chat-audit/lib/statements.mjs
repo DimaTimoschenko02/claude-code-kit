@@ -30,10 +30,10 @@ async function chatStatements(scopeDef, sinceMs, emit) {
   let n = 0;
   for (const file of claudeFiles(scopeDef, sinceMs).sort()) {
     const { pairs } = await pairsFromClaude(file, { seen, project: scope, keepOrphans: true });
-    for (const p of pairs) { emit(fromPair(p)); n++; }
+    for (const p of pairs) { if (p.kind === 'brief') continue; emit(fromPair(p)); n++; }   // an agent's brief, not the user
   }
-  for (const { file, meta } of codexFiles(scopeDef, sinceMs)) {
-    if (meta.originator === 'codex_exec') continue;   // a prompt delegated by another session, not the user
+  for (const { file, launch } of codexFiles(scopeDef, sinceMs)) {
+    if (launch.by === 'agent') continue;   // a prompt delegated by another session, not the user
     const { pairs } = await pairsFromCodex(file, { project: scope, keepOrphans: true });
     for (const p of pairs) { emit(fromPair(p)); n++; }
   }
