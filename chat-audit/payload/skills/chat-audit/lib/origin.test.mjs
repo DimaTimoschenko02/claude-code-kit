@@ -20,6 +20,8 @@ test('codexLaunch drops delegated and spawned threads', () => {
   assert.equal(codexLaunch({ originator: 'codex_exec' }).by, 'agent');
   assert.equal(codexLaunch({ originator: 'codex_cli_rs', source: { subagent: { thread_spawn: {} } } }).by, 'agent');
   assert.equal(codexLaunch({ originator: 'codex_chatgpt_android_remote' }).by, 'user');
+  assert.equal(codexLaunch({ originator: 'codex_chatgpt_android_remote', thread_source: 'agent_created_thread' }).by, 'agent');
+  assert.equal(codexLaunch({ originator: 'codex_cli_rs', thread_source: 'subagent' }).how, 'codex-subagent');
   assert.equal(codexLaunch({ originator: 'codex_cli_rs', source: 'cli' }).by, 'user');
 });
 

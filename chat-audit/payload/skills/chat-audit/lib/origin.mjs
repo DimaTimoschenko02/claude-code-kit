@@ -13,7 +13,9 @@
 // Known miss: a user who types `claude --bg -n x "..."` in a terminal reads as agent.
 //
 // Codex — session_meta.payload: originator "codex_exec" is a prompt delegated by another session; a thread spawned
-// by another thread (source.subagent) is a sub-agent. Phone, terminal and app threads are the user's.
+// by another thread (thread_source "subagent" / source.subagent) is a sub-agent; a thread an app thread opened with
+// create_thread (thread_source "agent_created_thread") starts from that thread's brief, whatever its originator says.
+// Phone, terminal and app threads the user opened are theirs.
 
 import fs from 'node:fs';
 
@@ -32,23 +34,23 @@ export function claudeLaunch({ entrypoint = null, humanOrigin = false, agentSett
 export function codexLaunch(meta = {}) {
   const originator = meta?.originator || 'unknown';
   if (originator === 'codex_exec') return { by: 'agent', how: 'codex-exec' };
-  if (meta?.source && typeof meta.source === 'object' && meta.source.subagent) return { by: 'agent', how: 'codex-subagent' };
+  if (meta?.thread_source === 'subagent' || (meta?.source && typeof meta.source === 'object' && meta.source.subagent)) return { by: 'agent', how: 'codex-subagent' };
+  if (meta?.thread_source === 'agent_created_thread') return { by: 'agent', how: 'codex-thread' };
   return { by: 'user', how: originator };
 }
 
-/** Feed parsed Claude records in order; `facts` is ready for claudeLaunch once the first user record is seen. */
+/** Feed parsed Claude records in order (the head is enough); `facts` is then ready for claudeLaunch. */
 export function claudeFactsCollector() {
   const facts = { entrypoint: null, humanOrigin: false, agentSetting: null, agentName: null };
-  let sawUser = false;
   return {
     facts,
     take(o) {
       if (o.type === 'agent-setting' && o.agentSetting) facts.agentSetting = o.agentSetting;
       else if (o.type === 'agent-name' && o.agentName) facts.agentName ??= o.agentName;
-      else if (o.type === 'user' && !sawUser) {
-        sawUser = true;
-        facts.entrypoint = o.entrypoint || null;
-        facts.humanOrigin = o.origin?.kind === 'human';
+      else if (o.type === 'user') {
+        facts.entrypoint ??= o.entrypoint || null;
+        // any human-labelled turn: a meta record can come first and carries no origin
+        if (o.origin?.kind === 'human') facts.humanOrigin = true;
       }
     },
   };
