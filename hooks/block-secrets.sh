@@ -147,6 +147,24 @@ except ValueError:
 ' <<<"$cmd") || deny "could not classify public registry arguments"
     fi
 
+    # A variable name that looks like a credential: a known prefix, a PASSWORD/SECRET/TOKEN word, or a
+    # _PASS/_TOKEN/_KEY/... segment after any number of segments (MY_APP_TOKEN, not only APP_TOKEN).
+    CRED_NAME='(PG_|PGPASS|MYSQL_|MONGO|REDIS|DATABASE|CONNECTION|[A-Z0-9]*PASSWORD\b|[A-Z0-9]*SECRET\b|[A-Z0-9]*TOKEN\b|APIKEY\b|ACCESSKEY\b|SECRETKEY\b|[A-Z0-9_]+_(PASS|PASSWORD|SECRET|TOKEN|KEY|CRED|DSN))'
+
+    # A named variable read in code (process.env.NODE_ENV, import.meta.env.VITE_URL) is not a path to an
+    # env file, so hide it from the path rules below; the env-dump rules still see the original command.
+    # Left visible on purpose: credential-looking names, anything continued by a dot or a path separator
+    # (process.env.LOCAL.bak, dir/process.env.X are file names) and a bare process.env.
+    # Residual: a credentials file named exactly process.env.<UPPERCASE> in the current directory.
+    if [[ "$scan_cmd" == *'.env.'* ]]; then
+      scan_cmd=$(CRED_NAME="$CRED_NAME" python3 -c '
+import os, re, sys
+cred = re.compile(os.environ["CRED_NAME"])
+ref = re.compile(r"(?<![A-Za-z0-9_$./\\~-])(?:process|import\.meta)\.env\.([A-Z_][A-Z0-9_]*)(?![A-Za-z0-9_./\\-])")
+sys.stdout.write(ref.sub(lambda m: m.group(0) if cred.match(m.group(1)) else "ENV_VAR_REF", sys.stdin.read()))
+' <<<"$scan_cmd") || deny "could not classify environment variable references"
+    fi
+
     # Known credential-file suffixes / path literals. Kept WITHOUT bare "secret"/"password"
     # words on purpose (see DESIGN CONSTRAINT above).
     SENS='(\.env\b|\.env\.|\.mcp\.json\b|\.claude\.json\b|\.credentials\.json\b|\.git-credentials\b|\.pgpass\b|\.netrc\b|\.npmrc\b|\.aws/credentials\b|/\.config/glab-cli/|/glab-cli/config|/\.config/gh/|/gh/hosts\.yml)'
@@ -205,7 +223,7 @@ except ValueError:
     # TOKEN/SECRET/PASSWORD allow an uppercase prefix (catches $ACCESSTOKEN, $MYSECRET, $DBPASSWORD);
     # bare KEY does NOT (would re-introduce $MONKEY/$DONKEY/$CACHEKEY false positives) — KEY only via
     # underscore (_KEY) or explicit APIKEY/ACCESSKEY/SECRETKEY.
-    if grep -qE '(echo|printf|print)[[:space:]]+[^|;]*\$\{?(PG_|PGPASS|MYSQL_|MONGO|REDIS|DATABASE|CONNECTION|[A-Z0-9]*PASSWORD\b|[A-Z0-9]*SECRET\b|[A-Z0-9]*TOKEN\b|APIKEY\b|ACCESSKEY\b|SECRETKEY\b|[A-Z0-9]+_(PASS|PASSWORD|SECRET|TOKEN|KEY|CRED|DSN))' <<<"$cmd"; then
+    if grep -qE '(echo|printf|print)[[:space:]]+[^|;]*\$\{?'"$CRED_NAME" <<<"$cmd"; then
       deny "command echoes a secret-like variable"
     fi
 
