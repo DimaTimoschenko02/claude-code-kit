@@ -26,6 +26,12 @@ ALLOWED = [
     'rg -n "import.meta.env.VITE_API_URL" src',
     "node - <<'JS'\nconst root = process.env.VAULT_ROOT || '.';\nconsole.log(root.length);\nJS",
     'rg "process.env.PORT, process.env.HOST" src',
+    # A config field read on any object (ctx.env.adminLogins) is code, not a file: env files are named in
+    # lower case (.env.local, prod.env.bak), a camelCase field is not.
+    "rg -n 'ctx.env.adminLogins' server",
+    "python3 - <<'PY'\nsrc = 'const shadow = this.ctx.env.movementShadow;'\nPY",
+    'rg "app.env.botDebug|AppContext.env.telemetrySeries" server',
+    "rg 'opts.env?.movementShadow' server",
     # Names that only resemble a credential word stay printable.
     'echo $HOME',
     'echo $MONKEY',
@@ -43,6 +49,9 @@ BLOCKED = [
     'cat my.process.env.NODE_ENV',
     'cat x-process.env.PROD',
     'cat .env; rg process.env.NODE_ENV src',
+    'cat ctx.env.local',
+    'cat dir/ctx.env.adminLogins',
+    'cat ctx.env.ADMIN',
     # A credential-looking name stays blocked in code references too.
     'rg -n "process.env.API_TOKEN" src',
     'rg "process.env.GITHUB_PERSONAL_ACCESS_TOKEN" .',

@@ -156,12 +156,17 @@ except ValueError:
     # Left visible on purpose: credential-looking names, anything continued by a dot or a path separator
     # (process.env.LOCAL.bak, dir/process.env.X are file names) and a bare process.env.
     # Residual: a credentials file named exactly process.env.<UPPERCASE> in the current directory.
-    if [[ "$scan_cmd" == *'.env.'* ]]; then
+    # A config field on any object (ctx.env.adminLogins, opts.env?.movementShadow) is hidden the same way:
+    # env files are named in lower case (.env.local, prod.env.bak), a camelCase field is not.
+    # Residual: a file named exactly <identifier>.env.<camelCase> in the current directory.
+    if [[ "$scan_cmd" == *'.env.'* || "$scan_cmd" == *'.env?.'* ]]; then
       scan_cmd=$(CRED_NAME="$CRED_NAME" python3 -c '
 import os, re, sys
 cred = re.compile(os.environ["CRED_NAME"])
 ref = re.compile(r"(?<![A-Za-z0-9_$./\\~-])(?:process|import\.meta)\.env\.([A-Z_][A-Z0-9_]*)(?![A-Za-z0-9_./\\-])")
-sys.stdout.write(ref.sub(lambda m: m.group(0) if cred.match(m.group(1)) else "ENV_VAR_REF", sys.stdin.read()))
+field = re.compile(r"(?<![A-Za-z0-9_$./\\~-])[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*\.env\??\.[a-z][a-z0-9]*[A-Z][A-Za-z0-9_$]*(?![A-Za-z0-9_./\\-])")
+text = ref.sub(lambda m: m.group(0) if cred.match(m.group(1)) else "ENV_VAR_REF", sys.stdin.read())
+sys.stdout.write(field.sub("ENV_FIELD_REF", text))
 ' <<<"$scan_cmd") || deny "could not classify environment variable references"
     fi
 
