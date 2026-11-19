@@ -36,6 +36,9 @@ export function codexLaunch(meta = {}) {
   if (originator === 'codex_exec') return { by: 'agent', how: 'codex-exec' };
   if (meta?.thread_source === 'subagent' || (meta?.source && typeof meta.source === 'object' && meta.source.subagent)) return { by: 'agent', how: 'codex-subagent' };
   if (meta?.thread_source === 'agent_created_thread') return { by: 'agent', how: 'codex-thread' };
+  // the desktop app runs exec prompts and scheduled automations under originator "Codex Desktop"
+  if (meta?.source === 'exec') return { by: 'agent', how: 'codex-exec' };
+  if (meta?.thread_source === 'automation') return { by: 'agent', how: 'codex-automation' };
   return { by: 'user', how: originator };
 }
 
