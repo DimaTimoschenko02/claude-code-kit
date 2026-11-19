@@ -62,6 +62,63 @@ input_text() {
   printf '%s' "$out"
 }
 
+# The command without the data it carries, for rules that misfire on text (heredocs, quoted args).
+#   line:  blank heredoc bodies no shell runs, then quoted strings that expand nothing — unless the
+#          command hands a quoted string to a shell (ssh, sh -c, su -c, eval, xargs), where quotes are code.
+#   paths: blank heredoc bodies written into a file by cat/tee, and existence tests (test -f, [ -s ).
+data_view() {
+  python3 -c '
+import re, sys
+mode, text = sys.argv[1], sys.stdin.read()
+HEREDOC = re.compile(r"^([^\n]*?)<<-?[ \t]*([\x27\"]?)(\w+)\2([^\n]*)\n.*?^[ \t]*\3[ \t]*$", re.M | re.S)
+SHELL = re.compile(r"(?:^|[\s;&|(])(?:ba|z|da|k)?sh(?:\s+-\w+)*$|\bssh\b")
+WRITER = re.compile(r"(?:^|[\s;&|(])(?:cat\s*>>?\s*\S+|tee(?:\s+-a)?\s+\S+)$")
+SEARCH = re.compile(r"(\b(?:rg|grep|egrep|fgrep|ag|git\s+grep)\b(?:\s+-[-\w=]+(?:\s+\d+)?)*\s+(?:-e\s+|--regexp[= ])?)(\x27[^\x27]*\x27|\"[^\"$`]*\")")
+QUOTED_CODE = re.compile(r"\bssh\b|\b(?:ba|z|da|k)?sh\s+-\w*c|\bsu\s+-c|\beval\b|\bxargs\b")
+
+def strip_bodies(keep):
+    return HEREDOC.sub(lambda m: m.group(0) if keep(m.group(1).rstrip(), m.group(4)) else
+                       m.group(1) + "<<" + m.group(3) + m.group(4) + "\n" + m.group(3), text)
+
+def blank_quotes(s):
+    out, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\":
+            out.append(s[i:i + 2]); i += 2
+        elif c == "\x27":
+            j = s.find("\x27", i + 1)
+            if j < 0:
+                out.append(s[i:]); break
+            out.append("\x27\x27"); i = j + 1
+        elif c == "\"":
+            j = i + 1
+            while j < len(s) and s[j] != "\"":
+                j += 2 if s[j] == "\\" else 1
+            seg = s[i:j + 1]
+            out.append("\"\"" if j < len(s) and "$" not in seg and "`" not in seg else seg); i = j + 1
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+
+if mode == "paths":
+    text = strip_bodies(lambda head, rest: not (WRITER.search(head) or
+                        (re.search(r"(?:^|[\s;&|(])cat$", head) and rest.lstrip().startswith(">"))))
+    text = re.sub(r"(?:\btest|\[\[?)\s+(?:!\s+)?-[efsdr]\s+\S+", "EXISTS_CHECK", text)
+    # A quoted search pattern is what the tool looks for, not a file it reads; its file arguments are still checked.
+    # The value of a file option (-f pattern file, -g/--glob, --include) picks files, so it stays, and so
+    # does a pattern naming an env variable the reference rules above left visible (a credential name,
+    # a bare process.env).
+    text = SEARCH.sub(lambda m: m.group(0) if re.search(r"(?:^|\s)(?:-[fgtT]|--(?:file|glob|iglob|type|type-not|type-add|pre|ignore-file|include|exclude|exclude-from|exclude-dir|include-dir))\s+$", m.group(1)) or
+                      re.search(r"(?:process|import\.meta)\.env", m.group(2)) else m.group(1) + "\x27\x27", text)
+else:
+    text = strip_bodies(lambda head, rest: bool(SHELL.search(head)))
+    if not QUOTED_CODE.search(text):
+        text = blank_quotes(text)
+sys.stdout.write(text)
+' "$1" <<<"$2"
+}
+
 # A relative patch path ("id_rsa", ".git-credentials") must also hit the "*/name" patterns.
 is_sensitive_rel() {
   is_sensitive_path "$1" || is_sensitive_path "/$1"
@@ -177,6 +234,12 @@ sys.stdout.write(field.sub("ENV_FIELD_REF", text))
     # Direct file reads of secret files via a known reader command (redundant with the
     # literal-mention rule below, kept as cheap defense-in-depth).
     READERS='\bcat\b|\bhead\b|\btail\b|\bless\b|\bmore\b|\bbat\b|\bxxd\b|\bhexdump\b|\bod\b|\bstrings\b|\bnl\b|\bcut\b|\bpaste\b|\brev\b|\bfold\b|\bfmt\b|\bcolumn\b|\bbase64\b|\bbase32\b|\baw[k]\b|\bs[e]d\b|\btee\b|\bcp\b|\bmv\b|\bdd\b|\bjq\b|\byq\b|\bgrep\b|\begrep\b|\bfgrep\b|\brg\b|\bvi\b|\bvim\b|\bview\b|\bnano\b|\bemacs\b|\bpython3?\b|\bperl\b|\bruby\b|\bnode\b|\bphp\b|\bsource\b|\bmapfile\b|\breadarray\b|\bopenssl\b|\bscp\b|\brsync\b|\bsftp\b|\bcurl\b|\bwget\b|\btar\b'
+    # A path literal the command only carries as data reads nothing: text a heredoc writes into a
+    # file (the target in the heredoc's head is still checked) and an existence test. Computed only
+    # when a path rule would fire, so the common path spawns nothing.
+    if grep -qE "$SENS" <<<"$scan_cmd"; then
+      scan_cmd=$(data_view paths "$scan_cmd") || deny "could not separate data from the command"
+    fi
     if grep -qE "($READERS)[[:space:]]+[^|;]*$SENS" <<<"$scan_cmd"; then
       deny "command reads a credentials file"
     fi
@@ -198,9 +261,14 @@ sys.stdout.write(field.sub("ENV_FIELD_REF", text))
       deny "eval can construct credential-reading commands that bypass static checks"
     fi
 
-    # Env dumps (builtins)
-    if grep -qE '(^|[[:space:];|&])(printenv|env|set|declare|export|typeset|readonly)([[:space:]]*$|[[:space:]]*\|)' <<<"$cmd"; then
-      deny "command would dump environment variables"
+    # Env dumps (builtins). A word in a quoted argument (`rg 'const|readonly|export'`) or in a heredoc
+    # body that no shell runs is text, not a builtin: the rule is rechecked on the command without them.
+    ENV_DUMP='(^|[[:space:];|&])(printenv|env|set|declare|export|typeset|readonly)([[:space:]]*$|[[:space:]]*\|)'
+    if grep -qE "$ENV_DUMP" <<<"$cmd"; then
+      line_cmd=$(data_view line "$cmd") || deny "could not separate data from the command"
+      if grep -qE "$ENV_DUMP" <<<"$line_cmd"; then
+        deny "command would dump environment variables"
+      fi
     fi
     if grep -qE '(^|[[:space:];|&])compgen[[:space:]]+(-v\b|-e\b|-A[[:space:]]+variable|-A[[:space:]]+export)' <<<"$cmd"; then
       deny "compgen lists shell/env variable names (env-dump vector)"
