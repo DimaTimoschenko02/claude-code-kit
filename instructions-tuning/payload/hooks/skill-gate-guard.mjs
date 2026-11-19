@@ -79,12 +79,17 @@ function bashTargets(command, cwd, env) {
 /** A gate path written from `~/` means the same file on every machine: it resolves against the home directory. */
 const fromHome = (value, home) => (typeof value === 'string' && value.startsWith('~/') ? `${winPath(home)}${value.slice(1)}` : value);
 
-/** Which skill owns a project-relative path: first matching gate wins. */
-function owner(gates, rel, home) {
+/**
+ * Which skill owns a project-relative path: first matching gate wins. An agent the gate names in `except_agents` writes
+ * there ungated: its own definition already says what it may write (a coder's deviation lines in a spec), and making it
+ * load the owner's skill would hand it another role's whole procedure.
+ */
+function owner(gates, rel, home, atype) {
   for (const g of gates) {
     const p = fromHome(g?.path_prefix ?? null, home);
     const e = fromHome(g?.path_exact ?? null, home);
-    if ((p !== null && rel.startsWith(p)) || (e !== null && rel === e)) return g.skill ?? '';
+    if (!((p !== null && rel.startsWith(p)) || (e !== null && rel === e))) continue;
+    return atype && Array.isArray(g.except_agents) && g.except_agents.includes(atype) ? '' : g.skill ?? '';
   }
   return '';
 }
@@ -261,7 +266,7 @@ export function skillGate(payload, { env = process.env, home = env.HOME || homed
     let rel = fp.startsWith(`${root}/`) ? fp.slice(root.length + 1) : fp;
     // A worktree (`.claude/worktrees/<name>/`) is another checkout of the same repo: its files are governed alike.
     rel = rel.replace(/^.*?\.claude\/worktrees\/[^]*?\//, '');
-    const s = owner(gates, rel, home);
+    const s = owner(gates, rel, home, String(payload.agent_type ?? ''));
     if (s) gated.push([s, rel]);
   }
   if (!gated.length) return null;

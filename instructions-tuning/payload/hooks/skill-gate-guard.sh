@@ -81,15 +81,17 @@ fi
 # Bind fields to vars BEFORE the `$rel | ...` pipe — inside startswith(), `.`
 # is $rel (a string), so `.path_prefix` there would index the string and error.
 # A gate path written from `~/` means the same file on every machine: it resolves against $HOME.
+# An agent the first matching gate names in `except_agents` writes there ungated (an empty owner line).
 home_w="${HOME:-}"; win_var home_w
 owner() {
-  jq -r --arg rel "$1" --arg home "$home_w" '
+  jq -r --arg rel "$1" --arg home "$home_w" --arg atype "${atype:-}" '
     def fromhome: if . != null and startswith("~/") then $home + ltrimstr("~") else . end;
     .gates[]?
     | (.path_prefix // null | fromhome) as $p
     | (.path_exact // null | fromhome) as $e
     | select( ($p != null and ($rel | startswith($p))) or ($e != null and ($rel == $e)) )
-    | .skill' "$CONFIG" 2>/dev/null | head -1
+    | if $atype != "" and ((.except_agents // []) | index($atype)) != null then "" else (.skill // "") end' \
+    "$CONFIG" 2>/dev/null | head -1
 }
 gated=""   # "skill<TAB>path" per governed target
 while IFS= read -r fp; do

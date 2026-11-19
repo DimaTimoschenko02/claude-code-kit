@@ -120,7 +120,9 @@ merge); appends a `# >>> instructions-tuning >>>` block to `.gitignore` for `.cl
 
 `.claude/skill-gate.config.json` — a `gates` array. Each entry maps a path to the
 skill that must be invoked before editing it. `path_prefix` matches a directory
-(string prefix of the project-relative path); `path_exact` matches one file.
+(string prefix of the project-relative path); `path_exact` matches one file. The first matching entry decides.
+`except_agents` (optional, a list of subagent names) lets those agents write the path without the skill — for an
+agent whose own definition says what it may write there, e.g. a coder adding its deviation lines to a spec.
 
 ```json
 {

@@ -141,6 +141,14 @@ class Gate(unittest.TestCase):
         self.assertEqual(self.run_gate([], ["2026-10-11T11:00:00.000Z"], agent_id="a-1",
                                        agent_type="coder", agents=agents, codex=True), 2)
 
+    # A gate's `except_agents` lets that agent write the path without the owner skill (a coder's «Отклонения» lines
+    # in a spec, MIND-76); the main session and any other agent stay gated.
+    def test_agent_named_in_except_agents_passes_others_are_gated(self):
+        gates = [{"path_prefix": "brain/", "skill": "vault-write", "except_agents": ["coder"]}]
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", gates=gates), 0)
+        self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="reviewer", gates=gates), 2)
+        self.assertEqual(self.run_gate([], [], gates=gates), 2)
+
     def test_subagent_preloading_another_skill_is_denied(self):
         agents = {"coder.md": "name: coder\nskills:\n  - code-style"}
         self.assertEqual(self.run_gate([], [], agent_id="a-1", agent_type="coder", agents=agents), 2)
