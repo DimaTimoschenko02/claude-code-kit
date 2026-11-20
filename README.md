@@ -13,7 +13,7 @@ that were originally coupled to a particular setup have been decoupled before pu
 | Skill | What it does |
 |---|---|
 | **research** | A cost-aware web-research dispatcher. Triages trivial lookups to a single `WebSearch`, routes real research through a tiered workflow engine (lite/normal/deep) with per-phase model routing (Haiku/Sonnet/Opus). Ships its engine as `research.js` (a Workflow script). |
-| [**call-notes**](skills/call-notes/README.md) | Turns a call or meeting transcript into a short brief for someone who was on the call: what matters most, my tasks, what we wait for from others, decisions, open questions — each task and decision backed by an exact quote. Fixed template plus one illustrative example; a `memory.md` the skill keeps itself (who the owner is, people, how the transcript mangles names). Written in Russian for non-programmers; works with a recorder connector (e.g. Wispr Flow), a file, or pasted text. |
+| [**call-notes**](skills/call-notes/README.md) | Turns a call or meeting transcript into a short brief for someone who was on the call: what matters most, my tasks, what we wait for from others, decisions, open questions — each task and decision backed by an exact quote. Fixed template plus one illustrative example; a `memory/` folder the skill keeps and grows itself (owner, people, words the transcript mangles, a log of past calls, corrections). Written in Russian for non-programmers; works with a recorder connector (e.g. Wispr Flow), a file, or pasted text. |
 
 ### Infrastructure
 
