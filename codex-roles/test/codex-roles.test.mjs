@@ -435,3 +435,53 @@ await test('session-start sync rebuilds the project found from the hook cwd, nev
   assert.equal(modelOf(readRole(root)), 'gpt-6.2-sol');
   assert.equal(sync(join(temp, 'nowhere'), temp).status, 0);
 });
+
+const runConfig = (file, home, ...args) => spawnSync(process.execPath, [SCRIPT, '--config', file, ...args], {
+  encoding: 'utf8', env: { ...process.env, CODEX_HOME: home },
+});
+
+await test('--config moves every model line of a Codex config within its family, never back', (t) => {
+  const home = codexHome(t, ['gpt-6.2-sol', 'gpt-6.3-sol', 'gpt-6.2-astra', 'gpt-6.1-terra']);
+  const file = join(home, 'config.toml');
+  const before = [
+    'model = "gpt-6.1-sol"', 'model_reasoning_effort = "high"', '',
+    '[profiles.deep]', 'model = "gpt-6-astra"', '',
+    '[profiles.local]', 'model = "o3"', '',
+    '[profiles.ahead]', 'model = "gpt-7-sol"', '',
+    '[tui.model_availability_nux]', '"gpt-6.1-sol" = 4', '',
+  ].join('\r\n');
+  writeFileSync(file, before);
+  const stale = runConfig(file, home, '--check');
+  assert.equal(stale.status, 1);
+  assert.equal(readFileSync(file, 'utf8'), before, '--check writes nothing');
+  const result = runConfig(file, home);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /gpt-6\.1-sol → gpt-6\.3-sol, gpt-6-astra → gpt-6\.2-astra/);
+  assert.equal(readFileSync(file, 'utf8'), before
+    .replace('model = "gpt-6.1-sol"', 'model = "gpt-6.3-sol"')
+    .replace('model = "gpt-6-astra"', 'model = "gpt-6.2-astra"'), 'only model lines move; CRLF, o3, a newer pin and the nux table stay');
+  assert.equal(runConfig(file, home, '--check').status, 0);
+  assert.equal(runConfig(file, home).stdout, '', 'a current config is not rewritten');
+});
+
+await test('--config without a config or a catalog changes nothing and never fails', (t) => {
+  const home = codexHome(t, ['gpt-6.2-sol']);
+  assert.equal(runConfig(join(home, 'missing.toml'), home).status, 0);
+  const file = join(home, 'config.toml');
+  writeFileSync(file, 'model = "gpt-6.1-sol"\n');
+  assert.equal(runConfig(file, EMPTY_CODEX_HOME).status, 0);
+  assert.equal(readFileSync(file, 'utf8'), 'model = "gpt-6.1-sol"\n');
+});
+
+await test('the session-start hook also moves the Codex config default', (t) => {
+  const home = codexHome(t, ['gpt-6.1-sol', 'gpt-6.2-sol']);
+  writeFileSync(join(home, 'config.toml'), 'model = "gpt-6.1-sol"\n');
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'codex-roles-nowhere-')));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const result = spawnSync(process.execPath, [SYNC], {
+    cwd: outside, input: JSON.stringify({ cwd: outside }), encoding: 'utf8',
+    env: { ...process.env, CODEX_HOME: home, CLAUDE_PROJECT_DIR: '' },
+  });
+  assert.equal(result.status, 0);
+  assert.equal(readFileSync(join(home, 'config.toml'), 'utf8'), 'model = "gpt-6.2-sol"\n');
+});

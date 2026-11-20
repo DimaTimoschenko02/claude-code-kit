@@ -6,6 +6,8 @@
 // the role runs the newest Codex model of its family, see pickModel).
 //
 //   codex-roles [--root <dir>] [--check] — root defaults to cwd; --check reports without writing
+//   codex-roles --config <config.toml> [--check] — only moves every `model = "…"` line of a Codex config to the newest
+//                                                 model of the family it already names (the app's default and profiles)
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -15,30 +17,14 @@ import { join, dirname, resolve, basename } from 'node:path';
 const args = process.argv.slice(2);
 let given = process.cwd();
 let check = false;
+let config = null;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--check') { check = true; continue; }
   if (args[i] === '--root' && args[i + 1] && !args[i + 1].startsWith('--')) { given = args[++i]; continue; }
-  console.error('Usage: codex-roles [--root <dir>] [--check]');
+  if (args[i] === '--config' && args[i + 1] && !args[i + 1].startsWith('--')) { config = args[++i]; continue; }
+  console.error('Usage: codex-roles [--root <dir>] [--check] | --config <config.toml> [--check]');
   process.exit(2);
 }
-let ROOT;
-try {
-  ROOT = dirname(realpathSync(join(resolve(given), '.claude'))).replaceAll('\\', '/');
-  if (!statSync(join(ROOT, '.claude', 'agents')).isDirectory()) throw new Error('Missing agents');
-} catch {
-  console.error(`codex-roles: no .claude/agents under ${resolve(given).replaceAll('\\', '/')}`);
-  process.exit(2);
-}
-const MAIN = (() => {
-  try {
-    const common = execFileSync('git', ['-C', ROOT, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    return dirname(common).replaceAll('\\', '/');
-  } catch { return ROOT; }
-})();
-const SRC = join(ROOT, '.claude', 'agents');
-const OUT = join(ROOT, '.codex', 'agents');
 // The family is the routing rule (every role runs Sol); the version is not ours to pin. It follows the catalog Codex
 // keeps in $CODEX_HOME/models_cache.json, so a new release reaches every role on the next run — a session-start hook
 // runs this converter. A pinned `gpt-6.1-sol` here kept every role on 6.1 after 6.2 shipped.
@@ -81,6 +67,46 @@ function bumpModel(text) {
   const next = family ? pickModel(family, current) : null;
   return next && next !== current ? text.replace(MODEL_LINE, `model = "${next}"`) : text;
 }
+
+// The Codex app writes its default as a plain `model = "…"` line and never moves it, so the app and the TUI stayed on
+// the version picked once. Every such line (top level and profiles) follows the catalog within its own family, never
+// back; the file is touched only when a line moves. Missing or unreadable → nothing to do.
+if (config) {
+  let text;
+  try { text = readFileSync(config, 'utf8'); } catch { process.exit(0); }
+  const moved = [];
+  const next = text.replace(new RegExp(MODEL_LINE.source, 'gm'), (line, current) => {
+    const family = current.match(SLUG)?.[2];
+    const newest = family ? pickModel(family, current) : null;
+    if (!newest || newest === current) return line;
+    moved.push(`${current} → ${newest}`);
+    return `model = "${newest}"`;
+  });
+  if (moved.length) {
+    if (!check) writeFileSync(config, next);
+    console.log(`${check ? 'stale' : 'written'}: ${config.replaceAll('\\', '/')} (${moved.join(', ')})`);
+  }
+  process.exit(check && moved.length ? 1 : 0);
+}
+
+let ROOT;
+try {
+  ROOT = dirname(realpathSync(join(resolve(given), '.claude'))).replaceAll('\\', '/');
+  if (!statSync(join(ROOT, '.claude', 'agents')).isDirectory()) throw new Error('Missing agents');
+} catch {
+  console.error(`codex-roles: no .claude/agents under ${resolve(given).replaceAll('\\', '/')}`);
+  process.exit(2);
+}
+const MAIN = (() => {
+  try {
+    const common = execFileSync('git', ['-C', ROOT, 'rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return dirname(common).replaceAll('\\', '/');
+  } catch { return ROOT; }
+})();
+const SRC = join(ROOT, '.claude', 'agents');
+const OUT = join(ROOT, '.codex', 'agents');
 
 // The shared preamble: how Claude's role text maps onto Codex (tools, skills, delegation, hooks as claims to verify).
 const hasMemory = existsSync(join(MAIN, '.claude', 'memory', 'MEMORY.md'));

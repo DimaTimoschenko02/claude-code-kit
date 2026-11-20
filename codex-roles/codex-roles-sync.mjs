@@ -4,13 +4,16 @@
 // roles at the next session start in that project, without anyone editing a version.
 // The project is $CLAUDE_PROJECT_DIR (Claude Code) or the hook input's `cwd` (Codex), walked up to the folder holding
 // both .claude/agents and .codex/agents. The home folder never counts: ~/.codex/agents holds links to project roles,
-// which the converter would take for orphans and delete. Silent and fail-open: it must never block a session start.
+// which the converter would take for orphans and delete. Then the Codex config's own `model` lines (the app's default)
+// get the same move. Silent and fail-open: it must never block a session start.
 import { existsSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+const converter = join(dirname(fileURLToPath(import.meta.url)), 'codex-roles');
+const convert = (...args) => spawnSync(process.execPath, [converter, ...args], { stdio: 'ignore', timeout: 30000, windowsHide: true });
 try {
   let start = process.env.CLAUDE_PROJECT_DIR;
   if (!start && !process.stdin.isTTY) {
@@ -21,9 +24,9 @@ try {
   const home = key(resolve(homedir()));
   for (let dir = resolve(start || process.cwd()); key(dir) !== home && dirname(dir) !== dir; dir = dirname(dir)) {
     if (!existsSync(join(dir, '.codex', 'agents')) || !existsSync(join(dir, '.claude', 'agents'))) continue;
-    const converter = join(dirname(fileURLToPath(import.meta.url)), 'codex-roles');
-    spawnSync(process.execPath, [converter, '--root', dir], { stdio: 'ignore', timeout: 30000, windowsHide: true });
+    convert('--root', dir);
     break;
   }
 } catch { /* fail-open */ }
+try { convert('--config', join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml')); } catch { /* fail-open */ }
 process.exit(0);

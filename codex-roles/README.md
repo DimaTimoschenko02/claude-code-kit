@@ -37,7 +37,9 @@ Exit 0 when clean or nothing to do; 1 on stale, skipped, bad path or orphan; 2 o
 
 `codex-roles-sync.mjs` is a SessionStart hook for both Claude Code and Codex: it finds the session's project
 (`$CLAUDE_PROJECT_DIR`, else the hook input's `cwd`, walked up to the folder holding `.claude/agents` and
-`.codex/agents`; the home folder never counts) and runs the converter there. Silent, fail-open, always exit 0.
+`.codex/agents`; the home folder never counts) and runs the converter there. Then it runs
+`codex-roles --config $CODEX_HOME/config.toml`: every `model = "…"` line of the Codex config (the app's default and
+profiles) moves to the newest model of the family it names, never back. Silent, fail-open, always exit 0.
 
 ```jsonc
 // ~/.claude/settings.json → hooks.SessionStart, and ~/.codex/hooks.json → hooks.SessionStart
