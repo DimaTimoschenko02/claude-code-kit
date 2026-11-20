@@ -5,15 +5,17 @@
 // The project is $CLAUDE_PROJECT_DIR (Claude Code) or the hook input's `cwd` (Codex), walked up to the folder holding
 // both .claude/agents and .codex/agents. The home folder never counts: ~/.codex/agents holds links to project roles,
 // which the converter would take for orphans and delete. Then the Codex config's own `model` lines (the app's default)
-// get the same move. Silent and fail-open: it must never block a session start.
+// get the same move, and codex-hooks-trust.mjs runs detached to trust the owner's own changed Codex hooks.
+// Silent and fail-open: it must never block a session start.
 import { existsSync, readFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const converter = join(dirname(fileURLToPath(import.meta.url)), 'codex-roles');
 const convert = (...args) => spawnSync(process.execPath, [converter, ...args], { stdio: 'ignore', timeout: 30000, windowsHide: true });
+let project = null;
 try {
   let start = process.env.CLAUDE_PROJECT_DIR;
   if (!start && !process.stdin.isTTY) {
@@ -24,8 +26,16 @@ try {
   const home = key(resolve(homedir()));
   for (let dir = resolve(start || process.cwd()); key(dir) !== home && dirname(dir) !== dir; dir = dirname(dir)) {
     if (!existsSync(join(dir, '.codex', 'agents')) || !existsSync(join(dir, '.claude', 'agents'))) continue;
+    project = dir;
     convert('--root', dir);
     break;
+  }
+} catch { /* fail-open */ }
+try {
+  if (process.env.CODEX_HOOKS_TRUST !== 'off') {
+    const trust = join(dirname(converter), 'codex-hooks-trust.mjs');
+    const where = project ? ['--cwd', project] : [];
+    spawn(process.execPath, [trust, ...where], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   }
 } catch { /* fail-open */ }
 try { convert('--config', join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'config.toml')); } catch { /* fail-open */ }

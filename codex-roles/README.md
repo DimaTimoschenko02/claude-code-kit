@@ -41,9 +41,19 @@ Exit 0 when clean or nothing to do; 1 on stale, skipped, bad path or orphan; 2 o
 `codex-roles --config $CODEX_HOME/config.toml`: every `model = "…"` line of the Codex config (the app's default and
 profiles) moves to the newest model of the family it names, never back. Silent, fail-open, always exit 0.
 
+It also starts `codex-hooks-trust.mjs` detached. Codex runs a changed hook only after someone approves it in `/hooks`,
+per folder and per machine; the script approves the owner's own hooks instead. It asks a `codex app-server` for
+`hooks/list` and writes `currentHash` back with `config/batchWrite`, the same calls `/hooks` makes, so Codex computes
+the hash. Approved: `$CODEX_HOME/hooks.json`; a project `.codex/hooks.json` that git tracks clean with its last commit
+by this machine's `user.email`; outside git, a folder marked `trust_level = "trusted"` in Codex. Foreign clones,
+plugins and managed hooks are left alone. Projects come from Codex's `[projects.*]`, `~/.claude.json` and `--cwd`;
+a stamp of the hooks files skips the app-server (about 1.5 s) when nothing changed that day. By hand:
+`node codex-roles/codex-hooks-trust.mjs [--cwd <dir>]... [--dry-run] [--force]`; `CODEX_HOOKS_TRUST=off` keeps the
+sync hook from starting it.
+
 ```jsonc
 // ~/.claude/settings.json → hooks.SessionStart, and ~/.codex/hooks.json → hooks.SessionStart
 { "type": "command", "command": "node ~/claude-code-kit/codex-roles/codex-roles-sync.mjs", "timeout": 30 }
 ```
 
-Tests: `node --test codex-roles/test/codex-roles.test.mjs` (temp git repos, no network).
+Tests: `node --test codex-roles/test/codex-roles.test.mjs codex-roles/test/codex-hooks-trust.test.mjs` (temp git repos, a stand-in app-server, no network).

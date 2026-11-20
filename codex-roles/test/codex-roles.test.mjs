@@ -14,6 +14,7 @@ const ROLE = 'fixture-reader';
 // Every run sees an empty Codex home unless a test writes a catalog: the machine's live catalog must not leak in.
 const EMPTY_CODEX_HOME = realpathSync(mkdtempSync(join(tmpdir(), 'codex-roles-home-')));
 process.env.CODEX_HOME = EMPTY_CODEX_HOME;
+process.env.CODEX_HOOKS_TRUST = 'off'; // the sync hook would start a real codex app-server
 process.on('exit', () => rmSync(EMPTY_CODEX_HOME, { recursive: true, force: true }));
 const forward = (path) => path.replaceAll('\\', '/');
 const git = (root, ...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' });
