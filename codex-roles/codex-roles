@@ -2,13 +2,14 @@
 // codex-roles — builds Codex roles (.codex/agents/<name>.toml) from our Claude agents (.claude/agents/*.md), so a Codex
 // session (the coder, Codex TUI reviews) runs the same role text. The toml is generated, never edited: change the .md
 // and re-run. The preamble adapts the role to Codex and is derived from the agent's frontmatter — `tools` (capability
-// line; no Write/Edit and no `memory` → read-only), `skills` (read each SKILL.md first), `model`/`effort` (recorded,
-// Codex runs its own default).
+// line; no Write/Edit and no `memory` → read-only), `skills` (read each SKILL.md first), `model`/`effort` (recorded;
+// the role runs the newest Codex model of its family, see pickModel).
 //
 //   codex-roles [--root <dir>] [--check] — root defaults to cwd; --check reports without writing
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { homedir } from 'node:os';
 import { join, dirname, resolve, basename } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -38,9 +39,48 @@ const MAIN = (() => {
 })();
 const SRC = join(ROOT, '.claude', 'agents');
 const OUT = join(ROOT, '.codex', 'agents');
-const CODEX_MODEL = 'gpt-6.1-sol';
+// The family is the routing rule (every role runs Sol); the version is not ours to pin. It follows the catalog Codex
+// keeps in $CODEX_HOME/models_cache.json, so a new release reaches every role on the next run — a session-start hook
+// runs this converter. A pinned `gpt-6.1-sol` here kept every role on 6.1 after 6.2 shipped.
+const CODEX_FAMILY = 'sol';
 const CODEX_EFFORT = 'high';
 const TQ = "'".repeat(3);
+const SLUG = /^gpt-(\d+(?:\.\d+)*)-([a-z]+)$/;
+const CATALOG = (() => {
+  try {
+    const { models } = JSON.parse(readFileSync(join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'models_cache.json'), 'utf8'));
+    return Array.isArray(models) ? models.filter((m) => m?.visibility === 'list').map((m) => m.slug) : [];
+  } catch { return []; }
+})();
+const versionOf = (slug, family) => {
+  const m = typeof slug === 'string' ? slug.match(SLUG) : null;
+  return m && m[2] === family ? m[1].split('.').map(Number) : null;
+};
+const newer = (a, b) => {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) if ((a[i] ?? 0) !== (b[i] ?? 0)) return (a[i] ?? 0) > (b[i] ?? 0);
+  return false;
+};
+// The newest visible model of the family, never older than the one the role already runs: a machine whose catalog
+// lags (or has none) keeps the newer slug another machine wrote instead of flapping it back. Nothing known → null, and
+// the role carries no model line (Codex then runs the parent's model).
+function pickModel(family, current) {
+  let best = null;
+  let bestVersion = null;
+  for (const slug of [...CATALOG, current]) {
+    const version = versionOf(slug, family);
+    if (version && (!best || newer(version, bestVersion))) { best = slug; bestVersion = version; }
+  }
+  return best;
+}
+const MODEL_LINE = /^model = "([^"]+)"(?=\r?$)/m;
+// A hand-kept role of ours (tables the converter never writes) is not rebuilt, but its model line still follows the
+// catalog — within the family the file already names, so a hand role on Astra stays on Astra.
+function bumpModel(text) {
+  const current = text.match(MODEL_LINE)?.[1];
+  const family = current?.match(SLUG)?.[2];
+  const next = family ? pickModel(family, current) : null;
+  return next && next !== current ? text.replace(MODEL_LINE, `model = "${next}"`) : text;
+}
 
 // The shared preamble: how Claude's role text maps onto Codex (tools, skills, delegation, hooks as claims to verify).
 const hasMemory = existsSync(join(MAIN, '.claude', 'memory', 'MEMORY.md'));
@@ -107,13 +147,15 @@ function build(path) {
   const post = extra(fm.name, 'post');
   if (post) pre.push(post);
   const sha = createHash('sha256').update(bytes).digest('hex');
+  const existing = join(OUT, `${fm.name}.toml`);
+  const model = pickModel(CODEX_FAMILY, existsSync(existing) ? readFileSync(existing, 'utf8').match(MODEL_LINE)?.[1] : null);
   return { name: fm.name, toml: [
     `# Converted from .claude/agents/${basename(path)}`,
     `# Source SHA-256: ${sha}`,
-    `# Source model/effort: ${fm.model ?? 'inherit'}/${fm.effort ?? 'default'}; Codex default: Sol 6.1/high.`,
+    `# Source model/effort: ${fm.model ?? 'inherit'}/${fm.effort ?? 'default'}; Codex: newest ${CODEX_FAMILY} in the Codex catalog/${CODEX_EFFORT}.`,
     `name = ${JSON.stringify(fm.name)}`,
     `description = ${JSON.stringify(fm.description ?? '')}`,
-    `model = "${CODEX_MODEL}"`,
+    ...(model ? [`model = "${model}"`] : []),
     `model_reasoning_effort = "${CODEX_EFFORT}"`,
     `developer_instructions = ${TQ}`,
     pre.join('\n\n'),
@@ -174,6 +216,11 @@ for (const f of readdirSync(SRC).filter((f) => f.endsWith('.md')).sort()) {
   }
   const tables = cur === null ? [] : handTables(cur);
   if (tables.length) {
+    const bumped = bumpModel(cur);
+    if (bumped !== cur) {
+      changed.push(`${role.name} (model only)`);
+      if (!check) writeFileSync(out, bumped);
+    }
     console.error(`skipped: ${f} — ${role.name}.toml has hand-added ${tables.join(' ')}; keep it by hand (drop the header) or delete it to regenerate`);
     process.exitCode = 1;
     continue;

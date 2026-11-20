@@ -9,7 +9,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT = fileURLToPath(new URL('../codex-roles', import.meta.url));
+const SYNC = fileURLToPath(new URL('../codex-roles-sync.mjs', import.meta.url));
 const ROLE = 'fixture-reader';
+// Every run sees an empty Codex home unless a test writes a catalog: the machine's live catalog must not leak in.
+const EMPTY_CODEX_HOME = realpathSync(mkdtempSync(join(tmpdir(), 'codex-roles-home-')));
+process.env.CODEX_HOME = EMPTY_CODEX_HOME;
+process.on('exit', () => rmSync(EMPTY_CODEX_HOME, { recursive: true, force: true }));
 const forward = (path) => path.replaceAll('\\', '/');
 const git = (root, ...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' });
 const run = (root, ...args) => spawnSync(process.execPath, [SCRIPT, '--root', root, ...args], {
@@ -339,4 +344,94 @@ await test('a bracketed line inside the instruction string is not a hand-added t
   const result = run(root);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(readRole(root).includes('changed\n'));
+});
+
+// A Codex home holding a catalog of the given slugs (`slug` or [slug, visibility]).
+function codexHome(t, entries) {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'codex-roles-catalog-')));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const models = entries.map((e) => (Array.isArray(e) ? { slug: e[0], visibility: e[1] } : { slug: e, visibility: 'list' }));
+  writeFileSync(join(home, 'models_cache.json'), JSON.stringify({ fetched_at: '2026-11-20T00:00:00Z', models }));
+  return home;
+}
+const runWith = (root, home, ...args) => spawnSync(process.execPath, [SCRIPT, '--root', root, ...args], {
+  cwd: root, encoding: 'utf8', env: { ...process.env, CODEX_HOME: home },
+});
+const modelOf = (text) => text.match(/^model = "([^"]+)"$/m)?.[1];
+
+await test('a role runs the newest visible model of its family from the Codex catalog', (t) => {
+  const { root } = fixture(t);
+  const home = codexHome(t, ['gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.10-sol', 'gpt-6.3-astra', ['gpt-7-sol', 'hide'], 'gpt-7-sol-preview']);
+  const result = runWith(root, home);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(modelOf(readRole(root)), 'gpt-6.10-sol');
+  assert.match(readRole(root), /^# Source model\/effort: sonnet\/low; Codex: newest sol in the Codex catalog\/high\.$/m);
+  assert.equal(runWith(root, home, '--check').status, 0);
+});
+
+await test('a new release in the catalog makes the role stale and the next run moves it', (t) => {
+  const { root } = fixture(t);
+  assert.equal(runWith(root, codexHome(t, ['gpt-6.2-sol'])).status, 0);
+  const next = codexHome(t, ['gpt-6.2-sol', 'gpt-6.3-sol']);
+  const check = runWith(root, next, '--check');
+  assert.equal(check.status, 1);
+  assert.equal(check.stdout.trim(), `stale: ${ROLE}`);
+  assert.equal(runWith(root, next).status, 0);
+  assert.equal(modelOf(readRole(root)), 'gpt-6.3-sol');
+});
+
+await test('a lagging or missing catalog never moves a role back', (t) => {
+  const { root } = fixture(t);
+  assert.equal(runWith(root, codexHome(t, ['gpt-6.3-sol'])).status, 0);
+  for (const home of [codexHome(t, ['gpt-6.1-sol', 'gpt-6.2-sol']), EMPTY_CODEX_HOME]) {
+    const result = runWith(root, home);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, '');
+    assert.equal(modelOf(readRole(root)), 'gpt-6.3-sol');
+  }
+});
+
+await test('with no catalog and no earlier model the role carries no model line', (t) => {
+  const { root } = fixture(t);
+  assert.equal(run(root).status, 0);
+  const text = readRole(root);
+  assert.equal(modelOf(text), undefined);
+  assert.match(text, /^model_reasoning_effort = "high"$/m);
+});
+
+await test('a hand-kept role follows the catalog in its own family, its tables untouched', (t) => {
+  const { root } = fixture(t);
+  assert.equal(runWith(root, codexHome(t, ['gpt-6.1-sol'])).status, 0);
+  const path = join(root, '.codex/agents', `${ROLE}.toml`);
+  const text = `${readFileSync(path, 'utf8').replace('model = "gpt-6.1-sol"', 'model = "gpt-6-astra"')}\n[features]\nshell_tool = false\n`;
+  writeFileSync(path, text);
+  const home = codexHome(t, ['gpt-6.2-sol', 'gpt-6-astra', 'gpt-6.2-astra']);
+  const check = runWith(root, home, '--check');
+  assert.equal(check.status, 1);
+  assert.equal(check.stdout.trim(), `stale: ${ROLE} (model only)`);
+  assert.equal(readFileSync(path, 'utf8'), text);
+  const result = runWith(root, home);
+  assert.equal(result.status, 1);
+  assert.ok(result.stderr.includes('has hand-added [features]'), result.stderr);
+  assert.equal(readFileSync(path, 'utf8'), text.replace('model = "gpt-6-astra"', 'model = "gpt-6.2-astra"'));
+});
+
+await test('session-start sync rebuilds the project found from the hook cwd, never the home folder', (t) => {
+  const { root, temp } = fixture(t);
+  assert.equal(runWith(root, codexHome(t, ['gpt-6.1-sol'])).status, 0);
+  const home = codexHome(t, ['gpt-6.1-sol', 'gpt-6.2-sol']);
+  const sub = join(root, 'src', 'deep');
+  mkdirSync(sub, { recursive: true });
+  const sync = (cwd, profile) => spawnSync(process.execPath, [SYNC], {
+    input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }), encoding: 'utf8',
+    env: { ...process.env, CODEX_HOME: home, CLAUDE_PROJECT_DIR: '', HOME: profile, USERPROFILE: profile },
+  });
+  let result = sync(sub, root);
+  assert.equal(result.status, 0);
+  assert.equal(modelOf(readRole(root)), 'gpt-6.1-sol', 'the home folder is never a project');
+  result = sync(sub, temp);
+  assert.equal(result.status, 0);
+  assert.equal(result.stdout + result.stderr, '');
+  assert.equal(modelOf(readRole(root)), 'gpt-6.2-sol');
+  assert.equal(sync(join(temp, 'nowhere'), temp).status, 0);
 });
