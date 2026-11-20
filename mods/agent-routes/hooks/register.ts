@@ -1,6 +1,6 @@
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import { codexReason, codexSandboxFix, launcherReason, launchesCodexExec } from './codex'
+import { codexFix, codexReason, launcherReason, launchesCodexExec, parseCatalog } from './codex'
 import {
   ancestors,
   appendBounded,
@@ -91,6 +91,24 @@ async function currentSection($: Engine): Promise<{ text: string; found: RoutesF
   const root = await $.session.root()
   const found = await loadRoutes($, root)
   return { text: promptSection(found.routes), found, root }
+}
+
+/**
+ * The visible slugs of Codex's model catalog, `$CODEX_HOME/models_cache.json` (default `~/.codex`, as codex-roles
+ * reads it); null when it is missing or unreadable, and the model is then not checked at all.
+ */
+async function readCatalog($: Engine): Promise<string[] | null> {
+  try {
+    const codexHome = (await $.env.get('CODEX_HOME').catch(() => undefined))?.replace(/\\/g, '/').replace(/\/+$/, '')
+    const home = codexHome ? undefined : await homeDir($)
+    const base = codexHome || (home ? `${home}/.codex` : undefined)
+    if (!base) return null
+    const text = await $.fs.read(`${base}/models_cache.json`).catch(() => undefined)
+    return typeof text === 'string' ? parseCatalog(text) : null
+  } catch (err) {
+    debug($, `codex catalog skipped: ${String(err)}`)
+    return null
+  }
 }
 
 const journalPath = (home: string) => `${home}/.claude/state/agent-routes/decisions.jsonl`
@@ -216,18 +234,20 @@ export const register: Register = on => {
     return { deny: d.reason }
   }).catch(($, e, next) => next(e))
 
-  // Hot path: every Bash call. `codexSandboxFix` returns at once when the text has no `codex`.
+  // Hot path: every Bash call. `launchesCodexExec` returns at once when the text has no `codex`; only a real launch
+  // reads the routes file and the Codex catalog.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
-    let fix: ReturnType<typeof codexSandboxFix> = null
+    let launches = false
     try {
-      fix = codexSandboxFix(e.command)
+      launches = launchesCodexExec(e.command)
     } catch (err) {
       debug($, `codex check skipped: ${String(err)}`)
     }
+    if (!launches) return next(e)
     // A project that names its own Codex launcher gets it instead of any raw `codex exec`, sandbox right or not.
     let launcher: string | undefined
     try {
-      if (launchesCodexExec(e.command)) launcher = (await loadRoutes($, await $.session.root())).routes?.codexLauncher
+      launcher = (await loadRoutes($, await $.session.root())).routes?.codexLauncher
     } catch (err) {
       debug($, `codex launcher check skipped: ${String(err)}`)
     }
@@ -235,8 +255,15 @@ export const register: Register = on => {
       await record($, 'codex-launcher', null, 'deny', e.command)
       return { deny: launcherReason(launcher) }
     }
+    let fix: ReturnType<typeof codexFix> = null
+    try {
+      fix = codexFix(e.command, await readCatalog($))
+    } catch (err) {
+      debug($, `codex check skipped: ${String(err)}`)
+    }
     if (!fix) return next(e)
-    await record($, 'codex-sandbox', null, 'deny', e.command)
-    return { deny: codexReason(fix.problems, fix.fixed) }
+    const check = [fix.problems.length > 0 ? 'codex-sandbox' : '', fix.models.length > 0 ? 'codex-model' : ''].filter(Boolean).join('+')
+    await record($, check, null, 'deny', e.command)
+    return { deny: codexReason(fix) }
   }).catch(($, e, next) => next(e))
 }

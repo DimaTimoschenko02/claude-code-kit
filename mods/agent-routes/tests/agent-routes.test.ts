@@ -56,14 +56,18 @@ const BASE_FILES: Record<string, string> = {
 }
 
 type Call = Record<string, unknown>
-type World = { files: Map<string, string>; calls: Call[] }
+type World = { files: Map<string, string>; calls: Call[]; reads: string[] }
 
 // The engine rewrites `/home/x` to `C:\home\x` on Windows: files are kept by the path without drive and backslashes.
 const key = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 
-function world(on: On, files: Record<string, string> = BASE_FILES, opts: { rootFails?: boolean; writeFails?: boolean } = {}): World {
-  const w: World = { files: new Map(Object.entries(files)), calls: [] }
-  mock.env(on, { HOME })
+function world(
+  on: On,
+  files: Record<string, string> = BASE_FILES,
+  opts: { rootFails?: boolean; writeFails?: boolean; env?: Record<string, string> } = {},
+): World {
+  const w: World = { files: new Map(Object.entries(files)), calls: [], reads: [] }
+  mock.env(on, { HOME, ...opts.env })
   mock.clock(on, { now: Date.UTC(2026, 10, 7, 10, 0, 0) })
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.cwd', () => ({ value: ROOT }))
@@ -77,6 +81,7 @@ function world(on: On, files: Record<string, string> = BASE_FILES, opts: { rootF
     return { value: names.map(p => ({ name: p.slice(dir.length + 1), kind: 'file' as const, size: 1, mtimeMs: 0, isLink: false })) }
   })
   on('fs.read', (_$, e) => {
+    w.reads.push(key(e.path))
     const text = w.files.get(key(e.path))
     return text === undefined ? { deny: 'ENOENT' } : { value: text }
   })
@@ -328,4 +333,86 @@ test('a codex exec launch without full access is denied with the fixed command; 
   expect((await bash($, 'bash .claude/bin/sol-coder.sh docs/specs/07.md coder out/07')).deny).toBe(undefined)
   expect((await bash($, "cat > job.sh <<'EOF'\ncodex exec --full-auto \"p\"\nEOF")).deny).toBe(undefined)
   expect(w.calls.length).toBe(3)
+})
+
+// ---- Bash: codex model, the newest of its family in the Codex catalog ----
+
+const CATALOG = JSON.stringify({
+  models: [
+    { slug: 'gpt-6.2-sol', visibility: 'list' },
+    { slug: 'gpt-6.2-astra', visibility: 'list' },
+    { slug: 'gpt-6.1-sol', visibility: 'list' },
+    { slug: 'gpt-6-astra', visibility: 'list' },
+    { slug: 'gpt-7-sol-preview', visibility: 'list' },
+    { slug: 'gpt-reserve', visibility: 'hide' },
+  ],
+})
+const CATALOG_PATH = `${HOME}/.codex/models_cache.json`
+const withCatalog = { ...BASE_FILES, [CATALOG_PATH]: CATALOG }
+
+test('a hand-typed codex exec without -m gets the newest sol from ~/.codex/models_cache.json', async ($, on) => {
+  const w = world(on, withCatalog)
+  const r = await bash($, 'cd /home/fake/game && codex exec -s danger-full-access "fix the drift"')
+  expect(r.deny).toContain('```bash\ncd /home/fake/game && codex exec -m gpt-6.2-sol -s danger-full-access "fix the drift"\n```')
+  expect(r.deny).toContain('новейшей модели своего семейства из каталога Codex')
+  expect(r.deny).toContain('новейшая sol в каталоге Codex')
+  expect(r.deny).not.toContain('полным доступом')
+  expect(w.calls.length).toBe(0)
+  expect(journal(w).map(l => l.check)).toEqual(['codex-model'])
+})
+
+test('an old pinned sol or astra goes to the newest of its own family; the current one runs', async ($, on) => {
+  const w = world(on, withCatalog)
+  expect((await bash($, 'codex exec -s danger-full-access -m gpt-6.1-sol "p"')).deny).toContain('codex exec -s danger-full-access -m gpt-6.2-sol "p"')
+  const astra = await bash($, 'codex exec -s danger-full-access -m gpt-6-astra "p"')
+  expect(astra.deny).toContain('codex exec -s danger-full-access -m gpt-6.2-astra "p"')
+  expect(astra.deny).not.toContain('gpt-6.2-sol')
+  expect((await bash($, 'codex exec -s danger-full-access -m gpt-6.2-sol "p"')).deny).toBe(undefined)
+  expect((await bash($, 'codex exec -s danger-full-access -m gpt-6.2-astra "p"')).deny).toBe(undefined)
+  expect((await bash($, 'codex exec -s danger-full-access -m gpt-7-sol-preview "p"')).deny).toBe(undefined)
+  expect((await bash($, 'codex exec -s danger-full-access -m my-own-model "p"')).deny).toBe(undefined)
+  expect((await bash($, 'codex exec -s danger-full-access -m gpt-6-luna "p"')).deny).toBe(undefined)
+  expect((await bash($, 'codex exec -s danger-full-access -p fast "p"')).deny).toBe(undefined)
+  expect((await bash($, 'codex exec -s danger-full-access -c model=gpt-6.1-sol "p"')).deny).toBe(undefined)
+  expect(w.calls.length).toBe(7)
+})
+
+test('sandbox and model wrong at once: one deny, one fully fixed command, one journal line', async ($, on) => {
+  const w = world(on, withCatalog)
+  const r = await bash($, 'codex exec --full-auto -m gpt-6.1-sol "p" 2>&1 | tail -5')
+  expect(r.deny).toContain('```bash\ncodex exec -s danger-full-access -m gpt-6.2-sol "p" 2>&1 | tail -5\n```')
+  expect(r.deny).toContain('всегда с полным доступом `-s danger-full-access` и на новейшей модели')
+  expect(r.deny).toContain('`--full-auto` (это workspace-write); `gpt-6.1-sol` устарела → `gpt-6.2-sol`')
+  expect(journal(w).map(l => l.check)).toEqual(['codex-sandbox+codex-model'])
+  const resume = await bash($, 'codex exec resume --last "go on"')
+  expect(resume.deny).toContain('codex exec -s danger-full-access -m gpt-6.2-sol resume --last "go on"')
+})
+
+test('CODEX_HOME, a Windows path included, is where the catalog is read', async ($, on) => {
+  const w = world(on, { ...BASE_FILES, '/codex-home/models_cache.json': CATALOG }, { env: { CODEX_HOME: 'D:\\codex-home\\' } })
+  const r = await bash($, 'codex exec -s danger-full-access -m gpt-6-astra "p"')
+  expect(r.deny).toContain('-m gpt-6.2-astra')
+  expect(w.reads).toContain('/codex-home/models_cache.json')
+  expect(w.reads).not.toContain(CATALOG_PATH)
+})
+
+test('no catalog or a broken one: only the sandbox is checked, never a block on the model', async ($, on) => {
+  const w = world(on, { ...BASE_FILES, '/codex-home/models_cache.json': '{"models": [' }, { env: { CODEX_HOME: '/codex-home' } })
+  expect((await bash($, 'codex exec -s danger-full-access -m gpt-6.1-sol "p"')).deny).toBe(undefined)
+  expect((await bash($, 'codex exec -s danger-full-access "p"')).deny).toBe(undefined)
+  const r = await bash($, 'codex exec -m gpt-6.1-sol "p"')
+  expect(r.deny).toContain('codex exec -s danger-full-access -m gpt-6.1-sol "p"')
+  expect(r.deny).not.toContain('новейшей модели')
+  expect(w.calls.length).toBe(2)
+  expect(journal(w).map(l => l.check)).toEqual(['codex-sandbox'])
+})
+
+test('the catalog is read only for a real codex exec launch, not for other Bash or text about codex', async ($, on) => {
+  const w = world(on, withCatalog)
+  for (const c of ['ls -la', 'grep -rn "codex exec -m gpt-6.1-sol" .claude', 'codex --version', "cat > run.sh <<'EOF'\ncodex exec \"p\"\nEOF"]) {
+    expect((await bash($, c)).deny).toBe(undefined)
+  }
+  expect(w.reads).toEqual([])
+  await bash($, 'codex exec -s danger-full-access -m gpt-6.2-sol "p"')
+  expect(w.reads).toContain(CATALOG_PATH)
 })

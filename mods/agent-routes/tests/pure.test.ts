@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { codexReason, codexSandboxFix, launcherReason, launchesCodexExec } from '../hooks/codex'
+import { codexFix, codexReason, launcherReason, launchesCodexExec, newestOf, parseCatalog } from '../hooks/codex'
 import { countByCheck, decideAgent, parseAgent, parseRoutes, promptSection, shortLine, type AgentDef, type Routes } from '../hooks/routes'
 
 const KARTS = JSON.stringify({
@@ -119,7 +119,7 @@ test('the journal count keeps the window and skips torn lines', () => {
 
 // ---- codex sandbox ----
 
-const fix = (c: string) => codexSandboxFix(c)
+const fix = (c: string) => codexFix(c)
 
 test('codex exec launches without full access are caught and fixed', () => {
   const cases: [string, string][] = [
@@ -172,11 +172,147 @@ test('every fixed command passes the check itself', () => {
 })
 
 test('the deny gives the rule, the problem and the fixed command; a huge command is cut', () => {
-  const r = codexReason(['без флага sandbox'], 'codex exec -s danger-full-access "p"')
+  const r = codexReason({ problems: ['без флага sandbox'], models: [], fixed: 'codex exec -s danger-full-access "p"' })
   expect(r).toContain('всегда с полным доступом')
+  expect(r).not.toContain('новейшей модели')
   expect(r).toContain('без флага sandbox')
   expect(r).toContain('```bash\ncodex exec -s danger-full-access "p"\n```')
-  expect(codexReason(['x'], 'y'.repeat(9000)).length).toBeLessThan(4500)
+  expect(codexReason({ problems: ['x'], models: [], fixed: 'y'.repeat(9000) }).length).toBeLessThan(4500)
+})
+
+// ---- codex model: the newest of its family in the Codex catalog ----
+
+// The catalog as Codex keeps it: hidden slugs, a preview and an unparseable name never count.
+const CATALOG_JSON = JSON.stringify({
+  fetched_at: '2026-11-20T08:00:00Z',
+  models: [
+    { slug: 'gpt-6.2-sol', visibility: 'list' },
+    { slug: 'gpt-6.2-astra', visibility: 'list' },
+    { slug: 'gpt-6.1-terra', visibility: 'list' },
+    { slug: 'gpt-reserve', visibility: 'hide' },
+    { slug: 'gpt-6.1-sol', visibility: 'list' },
+    { slug: 'gpt-6-astra', visibility: 'list' },
+    { slug: 'gpt-6-luna', visibility: 'list' },
+    { slug: 'gpt-5.6-luna', visibility: 'list' },
+    { slug: 'gpt-7-sol-preview', visibility: 'list' },
+    { slug: 'gpt-9-sol', visibility: 'hide' },
+    { slug: 'codex-auto-review', visibility: 'hide' },
+  ],
+})
+const CAT = parseCatalog(CATALOG_JSON)!
+const FULL = '-s danger-full-access'
+const mfix = (c: string) => codexFix(c, CAT)
+
+test('the catalog: visible slugs only; the newest of a family is numeric, previews and hidden ones never win', () => {
+  expect(CAT).not.toContain('gpt-reserve')
+  expect(CAT).not.toContain('gpt-9-sol')
+  expect(newestOf(CAT, 'sol')).toBe('gpt-6.2-sol')
+  expect(newestOf(CAT, 'astra')).toBe('gpt-6.2-astra')
+  expect(newestOf(CAT, 'luna')).toBe('gpt-6-luna')
+  expect(newestOf(CAT, 'nova')).toBe(null)
+  expect(newestOf(['gpt-6.2-sol', 'gpt-6.10-sol', 'gpt-6-sol'], 'sol')).toBe('gpt-6.10-sol')
+  for (const bad of ['', 'nope', '{"models":{}}', '[]']) expect([bad, parseCatalog(bad)]).toEqual([bad, null])
+  expect(parseCatalog('﻿{"models":[{"slug":"gpt-6-sol","visibility":"list"},null,{"visibility":"list"}]}')).toEqual(['gpt-6-sol'])
+})
+
+test('no model: the newest sol is added after exec', () => {
+  const f = mfix(`codex exec ${FULL} "fix the drift"`)!
+  expect(f.fixed).toBe(`codex exec -m gpt-6.2-sol ${FULL} "fix the drift"`)
+  expect(f.problems).toEqual([])
+  expect(f.models[0]).toContain('модель не задана')
+  expect(f.models[0]).toContain('`-m gpt-6.2-sol`')
+})
+
+test('an old pinned model goes to the newest of the SAME family, whatever flag spelling names it', () => {
+  const cases: [string, string][] = [
+    [`codex exec ${FULL} -m gpt-6.1-sol "p"`, `codex exec ${FULL} -m gpt-6.2-sol "p"`],
+    [`codex exec ${FULL} -m gpt-6-astra "p"`, `codex exec ${FULL} -m gpt-6.2-astra "p"`],
+    [`codex exec ${FULL} --model gpt-5.6-luna "p"`, `codex exec ${FULL} --model gpt-6-luna "p"`],
+    [`codex exec ${FULL} --model=gpt-6-astra "p"`, `codex exec ${FULL} --model=gpt-6.2-astra "p"`],
+    [`codex exec ${FULL} -m=gpt-6.1-sol "p"`, `codex exec ${FULL} -m=gpt-6.2-sol "p"`],
+    [`codex exec ${FULL} -mgpt-6.1-sol "p"`, `codex exec ${FULL} -mgpt-6.2-sol "p"`],
+    [`codex exec ${FULL} -m "gpt-6.1-sol" "p"`, `codex exec ${FULL} -m gpt-6.2-sol "p"`],
+    [`codex -m gpt-6.1-sol exec ${FULL} "p"`, `codex -m gpt-6.2-sol exec ${FULL} "p"`],
+    [`codex exec ${FULL} "p" -m gpt-6-sol`, `codex exec ${FULL} "p" -m gpt-6.2-sol`],
+  ]
+  for (const [command, fixed] of cases) expect([command, mfix(command)?.fixed]).toEqual([command, fixed])
+  expect(mfix(`codex exec ${FULL} -m gpt-6-astra "p"`)!.models[0]).toBe('`gpt-6-astra` устарела → `gpt-6.2-astra`, новейшая astra в каталоге Codex')
+})
+
+test('left alone: the current model, a newer one, an unknown slug or family, a model chosen by profile, -c model= or a local provider', () => {
+  const ok = [
+    `codex exec ${FULL} -m gpt-6.2-sol "p"`,
+    `codex exec ${FULL} -m gpt-6.2-astra "p"`,
+    `codex exec ${FULL} -m gpt-6.1-terra "p"`,
+    `codex exec ${FULL} -m gpt-6.3-sol "p"`,
+    `codex exec ${FULL} -m gpt-7-sol-preview "p"`,
+    `codex exec ${FULL} -m gpt-5 "p"`,
+    `codex exec ${FULL} -m o3 "p"`,
+    `codex exec ${FULL} -m gpt-6-nova "p"`,
+    `codex exec ${FULL} -m "$MODEL" "p"`,
+    `codex exec ${FULL} -p fast "p"`,
+    `codex exec ${FULL} --profile=fast "p"`,
+    `codex -p fast exec ${FULL} "p"`,
+    `codex exec ${FULL} -c model=gpt-6.1-sol "p"`,
+    `codex exec ${FULL} -c 'model="gpt-6-astra"' "p"`,
+    `codex exec ${FULL} --config=model=gpt-6-sol "p"`,
+    `codex exec ${FULL} --oss "p"`,
+    `codex exec ${FULL} --local-provider ollama "p"`,
+  ]
+  for (const command of ok) expect([command, mfix(command)]).toEqual([command, null])
+  // After `--` a `-m` is prompt text, and `-c model_reasoning_effort=` is not the model: the model is still missing.
+  expect(mfix(`codex exec ${FULL} -- -m gpt-6-sol`)?.fixed).toBe(`codex exec -m gpt-6.2-sol ${FULL} -- -m gpt-6-sol`)
+  expect(mfix(`codex exec ${FULL} -c model_reasoning_effort=high "p"`)?.fixed).toBe(`codex exec -m gpt-6.2-sol ${FULL} -c model_reasoning_effort=high "p"`)
+})
+
+test('no catalog, or one without the family: the model is not checked, only the sandbox', () => {
+  expect(codexFix(`codex exec ${FULL} -m gpt-6.1-sol "p"`, null)).toBe(null)
+  expect(codexFix(`codex exec ${FULL} "p"`, null)).toBe(null)
+  expect(codexFix('codex exec -m gpt-6.1-sol "p"', null)).toEqual({
+    problems: ['без флага sandbox'],
+    models: [],
+    fixed: `codex exec ${FULL} -m gpt-6.1-sol "p"`,
+  })
+  expect(codexFix(`codex exec ${FULL} "p"`, ['gpt-6.2-astra'])).toBe(null)
+  expect(codexFix(`codex exec ${FULL} "p"`, [])).toBe(null)
+})
+
+test('sandbox and model wrong together: one fixed command carries both fixes', () => {
+  const cases: [string, string][] = [
+    ['codex exec "p"', `codex exec ${FULL} -m gpt-6.2-sol "p"`],
+    ['codex exec --full-auto -m gpt-6.1-sol "p"', `codex exec ${FULL} -m gpt-6.2-sol "p"`],
+    ['codex exec -s workspace-write -m gpt-6-astra "p"', `codex exec ${FULL} -m gpt-6.2-astra "p"`],
+    [
+      'cd /home/fake/game && codex exec -s read-only "a" && codex e -m gpt-6-sol "b" | tail -3',
+      `cd /home/fake/game && codex exec ${FULL} -m gpt-6.2-sol "a" && codex e ${FULL} -m gpt-6.2-sol "b" | tail -3`,
+    ],
+  ]
+  for (const [command, fixed] of cases) expect([command, mfix(command)?.fixed]).toEqual([command, fixed])
+  const f = mfix('codex exec "p"')!
+  expect(f.problems).toEqual(['без флага sandbox'])
+  expect(f.models.length).toBe(1)
+  const r = codexReason(f)
+  expect(r).toContain(`всегда с полным доступом \`${FULL}\` и на новейшей модели своего семейства из каталога Codex`)
+  expect(r).toContain('без флага sandbox; модель не задана')
+  expect(r).toContain(`\`\`\`bash\ncodex exec ${FULL} -m gpt-6.2-sol "p"\n\`\`\``)
+  expect(codexReason({ problems: [], models: ['m'], fixed: 'x' })).not.toContain('полным доступом')
+})
+
+test('codex exec resume: the model goes in after exec like the sandbox; an old one is replaced', () => {
+  expect(mfix('codex exec resume --last "go on"')?.fixed).toBe(`codex exec ${FULL} -m gpt-6.2-sol resume --last "go on"`)
+  expect(mfix(`codex exec ${FULL} resume --last -m gpt-6.1-sol "go on"`)?.fixed).toBe(`codex exec ${FULL} resume --last -m gpt-6.2-sol "go on"`)
+  expect(mfix(`codex exec ${FULL} -m gpt-6.2-sol resume --last "go on"`)).toBe(null)
+})
+
+test('every model-fixed command passes the check itself, and text about codex stays untouched', () => {
+  for (const c of ['codex exec "p"', 'codex exec -m gpt-6-astra --full-auto "p"', 'a && codex e "p" && codex -m gpt-6.1-sol exec -s read-only "q"', 'codex exec resume --last']) {
+    const f = mfix(c)
+    expect(f).not.toBe(null)
+    expect([c, mfix(f!.fixed)]).toEqual([c, null])
+  }
+  for (const c of ['grep -rn "codex exec -m gpt-6.1-sol" .claude', "cat > run.sh <<'EOF'\ncodex exec -m gpt-6-sol \"p\"\nEOF", 'codex --version', 'codex -m gpt-6.1-sol']) {
+    expect([c, mfix(c)]).toEqual([c, null])
+  }
 })
 
 // ---- the project's own Codex launcher ----
