@@ -59,7 +59,8 @@ type Call = Record<string, unknown>
 type World = { files: Map<string, string>; calls: Call[]; reads: string[] }
 
 // The engine rewrites `/home/x` to `C:\home\x` on Windows: files are kept by the path without drive and backslashes.
-const key = (p: string) => p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
+// A Linux engine resolves a simulated Windows drive relative to its test cwd.
+const key = (p: string) => p.replace(/\\/g, '/').replace(/^(?:.*\/)?[A-Za-z]:(?=\/)/, '')
 
 function world(
   on: On,
