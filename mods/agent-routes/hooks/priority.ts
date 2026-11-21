@@ -26,15 +26,18 @@ export async function readPriority($: Engine, home: string | undefined): Promise
       ])
       if (!response.ok) throw Error('Priority authority unavailable')
       state = decode(response.text)
+      const saved = JSON.stringify(state)
+      const cached = await $.fs.read(source.file).catch(() => undefined)
+      if (cached?.trim() !== saved) await $.fs.write(source.file, saved + '\n').catch(() => undefined)
     } catch {
-      // While disconnected we cannot verify that the owner permits spending Codex.
-      state = { mode: 'claude-only', until: null, offline: true }
+      const cached = await $.fs.read(source.file).catch(() => undefined)
+      state = { ...(cached ? decode(cached) : { mode: 'default' as const, until: null }), offline: true }
     }
   } else {
     const text = await $.fs.read(source.file).catch(() => undefined)
     state = text ? decode(text) : { mode: 'default', until: null }
   }
-  if (state.until && Date.parse(state.until) <= await $.clock.now()) return { mode: 'default', until: null }
+  if (state.until && Date.parse(state.until) <= await $.clock.now()) return { mode: 'default', until: null, offline: state.offline }
   return state
 }
 
