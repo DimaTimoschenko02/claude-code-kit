@@ -175,7 +175,7 @@ export const hasEscalate = (description: string | undefined) => ESCALATE.test(de
 /** The part of an Agent call the checks read. */
 export type AgentCall = { subagent_type?: string; description?: string; prompt?: string; model?: string }
 
-export type Check = 'sol-route' | 'catch-all' | 'model-typed' | 'model-builtin'
+export type Check = 'sol-route' | 'catch-all' | 'model-typed' | 'model-builtin' | 'subscription'
 
 export type Decision =
   | { kind: 'pass' }
@@ -210,12 +210,12 @@ function catchAllReason(type: string, agents: AgentDef[]): string {
  * The checks on one Agent call, in order: Sol route, catch-all, model. `claim(key)` answers true the first time a
  * catch-all call (type + description) is seen in the session; it is asked only when a deny would follow.
  */
-export function decideAgent(call: AgentCall, routes: Routes | null, agents: AgentDef[], claim: (key: string) => boolean): Decision {
+export function decideAgent(call: AgentCall, routes: Routes | null, agents: AgentDef[], claim: (key: string) => boolean, preferSol = true): Decision {
   if (hasEscalate(call.description)) return { kind: 'pass' }
   const type = typeOf(call.subagent_type)
 
   const sol = routes?.routes.find(r => r.sol === true && r.agent === type && type !== '')
-  if (sol && !(sol.marker && (call.prompt ?? '').includes(sol.marker))) {
+  if (preferSol && sol && !(sol.marker && (call.prompt ?? '').includes(sol.marker))) {
     return { kind: 'deny', check: 'sol-route', reason: solReason(sol) }
   }
 

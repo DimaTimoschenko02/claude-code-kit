@@ -363,6 +363,22 @@ export function launchesCodexExec(command: string): boolean {
   return segments(text).some(words => execOf(words) !== null)
 }
 
+/** Project launchers, including when called via a shell or Node. A mention in grep/echo is data. */
+export function launchesCodexWork(command: string): boolean {
+  if (!/codex|sol-|\bcx\b/i.test(command)) return false
+  return segments(command).some(words => {
+    const i = headIndex(words)
+    let name = commandName(words[i]?.value ?? '')
+    if (['bash', 'sh', 'node', 'pwsh', 'powershell'].includes(name)) {
+      const arg = words[i + 1]?.value ?? ''
+      if (['-c', '-lc', '-Command'].includes(arg)) return launchesCodexExec(words[i+2]?.value ?? '') || launchesCodexWork(words[i+2]?.value ?? '')
+      name = commandName(arg)
+    }
+    return /^(codex-run|codex-delegate|cx|sol-(coder|physicist|run)\.sh)$/.test(name) ||
+      (name === 'codex.js' && words.slice(i + 1).some(w => w.value === 'exec' || w.value === 'e'))
+  })
+}
+
 /** The deny for a raw launch in a project that starts Codex through its own launcher. */
 export function launcherReason(launcher: string): string {
   return [

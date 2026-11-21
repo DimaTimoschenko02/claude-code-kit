@@ -1,6 +1,7 @@
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
-import { codexFix, codexReason, launcherReason, launchesCodexExec, parseCatalog } from './codex'
+import { codexFix, codexReason, launcherReason, launchesCodexExec, launchesCodexWork, parseCatalog } from './codex'
+import { preferenceText, readPriority } from './priority'
 import {
   ancestors,
   appendBounded,
@@ -90,7 +91,9 @@ async function loadAgents($: Engine, root: string, home: string | undefined): Pr
 async function currentSection($: Engine): Promise<{ text: string; found: RoutesFound; root: string }> {
   const root = await $.session.root()
   const found = await loadRoutes($, root)
-  return { text: promptSection(found.routes), found, root }
+  const priority = await readPriority($, await homeDir($))
+  const section = promptSection(found.routes)
+  return { text: priority ? section + '\n\n' + preferenceText(priority) : section, found, root }
 }
 
 /**
@@ -150,18 +153,24 @@ async function agentDecision($: Engine, call: { subagent_type?: string; descript
     if (hasEscalate(call.description)) return { kind: 'pass' }
     const root = await $.session.root()
     const home = await homeDir($)
-    const [found, agents, session] = await Promise.all([
+    const [found, agents, session, priority] = await Promise.all([
       loadRoutes($, root),
       loadAgents($, root, home),
       $.session.id().catch(() => '?'),
+      readPriority($, home),
     ])
     // Synchronous from here: parallel calls of one batch cannot both claim the same catch-all key.
+    if (priority?.mode === 'codex-first') {
+      return { kind: 'deny', check: 'subscription', reason: preferenceText(priority) +
+        (found.routes?.codexLauncher ? ' Лаунчер: ' + found.routes.codexLauncher : '') +
+        ' Для работы, требующей Claude, укажи escalate: <причина> в description.' }
+    }
     return decideAgent(call, found.routes, agents, key => {
       const k = `${session}\u0000${key}`
       if (seenCatchAll.has(k)) return false
       seenCatchAll.add(k)
       return true
-    })
+    }, priority?.mode !== 'claude-only')
   } catch (err) {
     debug($, `Agent check skipped: ${String(err)}`)
     return { kind: 'pass' }
@@ -242,6 +251,12 @@ export const register: Register = on => {
       launches = launchesCodexExec(e.command)
     } catch (err) {
       debug($, `codex check skipped: ${String(err)}`)
+    }
+    if (!launches && !launchesCodexWork(e.command)) return next(e)
+    const priority = await readPriority($, await homeDir($))
+    if (priority?.mode === 'claude-only') {
+      await record($, 'subscription', null, 'deny', 'Codex launch under claude-only')
+      return { deny: preferenceText(priority) }
     }
     if (!launches) return next(e)
     // A project that names its own Codex launcher gets it instead of any raw `codex exec`, sandbox right or not.
