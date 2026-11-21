@@ -114,6 +114,29 @@ const notes = (r: { context?: readonly string[] }) => (r.context ?? []).filter(c
 
 // ---- the prompt section ----
 
+test('one live session follows priority changes for project agents and background launchers', async ($, on) => {
+  const w = world(on, { ...BASE_FILES, [`${PROJ}/.claude/agent-routes.json`]: KARTS_ROUTES })
+  const file = HOME + '/priority.json'
+  w.files.set(HOME + '/.claude/state/agent-routes/authority.json', JSON.stringify({ file }))
+  const set = (mode: string, until: string | null = null) => w.files.set(file, JSON.stringify({ mode, until }))
+  const text = async () => (await $.prompt.compose(COMPOSE)).sections.map(s => s.text).join('\n')
+  set('codex-first')
+  expect(await text()).toContain('приоритет агентов: codex-first')
+  expect((await agent($, { subagent_type: 'checker', description: 'review the diff' })).deny).toContain('Codex')
+  expect((await agent($, { subagent_type: 'checker', description: 'escalate: Chrome is required' })).deny).toBeUndefined()
+  set('claude-only')
+  for (const cmd of ['nohup codex exec --help &', 'node bin/codex-run --cd .', 'bash .claude/bin/sol-run.sh task out']) {
+    expect((await bash($, cmd)).deny).toContain('claude-only')
+  }
+  expect((await bash($, "echo 'bash .claude/bin/sol-run.sh'")).deny).toBeUndefined()
+  expect((await agent($, { subagent_type: 'karts-coder', description: 'implement a spec' })).deny).toBeUndefined()
+  set('claude-only', '2000-01-01T00:00:00Z')
+  expect(await text()).toContain('приоритет агентов: default')
+  expect((await bash($, 'node bin/codex-run --cd .')).deny).toBeUndefined()
+  set('default')
+  expect((await agent($, { subagent_type: 'karts-coder', description: 'implement a spec' })).deny).toContain('Sol')
+})
+
 test('the prompt gets the general rules only when no routes file is above the root', async ($, on) => {
   world(on)
   const { sections } = await $.prompt.compose(COMPOSE)
