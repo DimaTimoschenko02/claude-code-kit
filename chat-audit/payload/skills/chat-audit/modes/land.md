@@ -72,6 +72,11 @@ the next audit cheerfully proposes the same thing again and the user loses trust
 Check the ledger at the start of `analyze.md`, write it at the end of this mode. Never rewrite past lines; a
 finding that comes back after being rejected is new information, appended, not an edit of the old verdict.
 
+Then record which items and lenses this run covered:
+`node "$HOME/.claude/skills/chat-audit/lib/runs.mjs" record --project "<project id>" --audit "<audit id>" --items "<ids>" --lenses "<names>" --report "<report path>"`
+(`--all-mandatory` when every mandatory item ran; omit empty flags). The project ledger stays on its machine, while
+this run log syncs everywhere — it is what lets the reminder say which item has not been checked for months.
+
 **A change line when the change should move a behaviour you can name.** The commit already records the change:
 `effect.mjs` reads config commits from git and checks the artifact is alive. A `type:"change"` line — the same line
 `instructions-tuning` writes on its own edits — adds what liveness cannot see, whether the behaviour moved:
