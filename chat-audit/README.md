@@ -34,6 +34,15 @@ platform-specific and no path is hardcoded.
 Then just ask, in your own words: *"пройдись по последним чатам, где я тебя дёргал по одному и тому же"*, or
 *"what did I have to repeat this week"*. The hook routes it into the skill.
 
+## Shared coverage log
+
+For a shared Mind vault, `node lib/runs.mjs record --project <id> --audit <name> --items <ids> --lenses <names>`
+adds one completed run to `.claude/state/chat-audit/runs.jsonl` in `MIND_VAULT` (default `~/mind`).
+Pass comma-separated coverage, omitting empty lists, and optionally `--report <path>`. Use
+`--all-mandatory` if the run covered every mandatory item in the catalogue. The machine ID comes from
+the vault's `.claude/machines.json`. The command also generates `01 projects/chat-audit/runs.md`.
+Run `node lib/runs.mjs refresh` to regenerate it from the log and catalogue, including after a manual merge.
+
 ## What it looks at
 
 | Signal | Reads as |
