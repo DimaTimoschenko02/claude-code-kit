@@ -33,6 +33,7 @@ a skill that stops firing wrongly, faster ramp on a recurring task type.
 | `knowledge` | things learned and never written down | files re-read across sessions, repeated questions |
 | `rules` | guardrails that misfire or never fire | hook blocks, gates hit on legitimate work |
 | `requirements` | what the user asked for, including what got refused | user turns, corrections |
+| `memory` | knowledge about a module or topic that is missing, not read when work touches the topic, or not written back | `memory-recall.mjs` — per module: sessions that worked on it vs sessions that opened its knowledge, modules with no knowledge page |
 | `agents` | subagents that stalled, errored or ran unwatched | `agents.mjs` output — tool errors by class, silent gaps, watchdog stalls, inherited model |
 
 Default when the user has no preference: `friction` + `repetition`. They pay off fastest and need no

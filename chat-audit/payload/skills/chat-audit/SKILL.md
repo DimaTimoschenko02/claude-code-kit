@@ -56,6 +56,7 @@ node .claude/skills/chat-audit/lib/extract.mjs   --sessions a.jsonl,b.jsonl --ou
 node .claude/skills/chat-audit/lib/analyze.mjs   --project <dir> [--days N] [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
 node .claude/skills/chat-audit/lib/agents.mjs    --project <dir> [--days N] | --sessions a.jsonl,b.jsonl [--json]  # subagent transcripts: duration, tool errors by class, gaps, stalls
 node .claude/skills/chat-audit/lib/memory-drift.mjs --project <dir> [--roots <dir,dir>] [--memory <dir>] [--fail-on high|medium] [--all]  # anchors in memory that no longer resolve
+node .claude/skills/chat-audit/lib/memory-recall.mjs --project <dir> [--days N] [--knowledge <dir,dir>] [--by user|agent] [--json]  # per module: worked on vs opened its knowledge
 node .claude/skills/chat-audit/lib/tokens.mjs    [--project <dir>|--all] [--since YYYY-MM-DD] [--top N]  # what the tokens are spent ON
 node .claude/skills/chat-audit/lib/effect.mjs    [--project <dir>] [--id C-n,..] [--now <iso>] [--json]  # did each recorded .claude change work
 node .claude/skills/chat-audit/lib/effect.mjs    record (--id C-n | --all) [--project <dir>]   # freeze a change line's 7-day baseline

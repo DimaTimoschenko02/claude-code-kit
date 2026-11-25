@@ -46,6 +46,7 @@ orchestrator supplies it before sending the agent — never after, as a follow-u
 | what a spawned agent actually did (not just its description + duration) | `agents.mjs` → `agents.json` |
 | the full reply a user turn reacted to, not just the turn | `extract.mjs --pairs` |
 | what shipped, not just what was discussed | `git log` in the project repo(s) |
+| whether a session working on a module opened what is written about it | `memory-recall.mjs --json` → `recall.json` |
 | what the day was supposed to be | `memory/plans/YYYY-MM-DD.md` (or this project's equivalent) |
 
 `agents` lens: source is `agents.json`, not the slice — the main thread's transcript never shows what happened
@@ -53,6 +54,13 @@ inside a `Task` call, only its description and duration. Looks for agents that s
 events), hit one tool-error class repeatedly, or ran `inherited: true` — no explicit model, burning whatever
 the main session happened to be running on. Anchor is `parent session (8 chars) + agentId`, plus `gapAt` or an
 event timestamp where relevant — not a user-turn uuid; say so, or `land.md` will look for one and find none.
+
+`memory` lens: the numbers come from `memory-recall.mjs`, so the agent does not count — it prices them. A low read
+rate is a finding only when it cost something: a session re-investigated, re-measured or contradicted what a page it
+did not open already held (anchor the session moment and the page line together). Then the other direction: what a
+session learned about the module and where it landed — a topic page, a task card or spec (dated, so the next task on
+the module will not find it), or nowhere. When the spec or card carried the knowledge well enough, say so: an unread
+page that nobody needed is a candidate for deletion, not for a read gate.
 
 Agents return **text**, in the shape below, and nothing else — the harness tells subagents to return
 reports as text rather than files, and a report an agent writes anyway has to be re-read into the

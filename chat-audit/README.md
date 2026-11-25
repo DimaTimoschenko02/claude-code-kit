@@ -84,6 +84,7 @@ lib/discover.mjs sessions --project <dir> --days 14 [--grep RE] [--exclude ID-or
 lib/extract.mjs  --sessions a.jsonl,b.jsonl --out slice.json --summary [--pairs 1600]
 lib/analyze.mjs  --project <dir> --days 21 [--section tools,bash,inline,fails,retries,reads,skills,agents,friction]
 lib/memory-drift.mjs --project <dir> [--all]        # anchors: file.ts#symbol (preferred), file.ts:NN, `sha`
+lib/memory-recall.mjs --project <dir> [--days N] [--knowledge d1,d2] [--json]  # module worked on vs its knowledge opened
 lib/agent-cost.mjs   --sessions a.jsonl,b.jsonl [--per-session] [--json]
 lib/tokens.mjs       [--project <dir>|--all|--dirs d1,d2] [--since YYYY-MM-DD] [--until ...] [--top N] [--json out.json]
 ```
@@ -128,8 +129,13 @@ you commit.
   "exclude_current_session": true, // it's still being written, and it contains the skill's own instructions
   "default_lenses": ["friction", "repetition"],
   "report_dir": null,             // null -> the memory location discovery found
-  "nudge": false                  // the UserPromptSubmit nudge; off by default since 1.1.0 — it fired on any
+  "nudge": false,                 // the UserPromptSubmit nudge; off by default since 1.1.0 — it fired on any
                                   // mention of the word "chat-audit"; set true if you want the reminder
+  "memory_recall": {              // the `memory` lens; all optional
+    "knowledge": ["docs/modules"], // knowledge roots besides the discovered memory
+    "skip_dirs": ["tasks"],        // dated folders that are not topic knowledge
+    "topics": { "billing": ["memory/payments.md"] } // module -> page, when names do not match
+  }
 }
 ```
 
@@ -146,6 +152,9 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.11.0** (2026-11-25) — `memory` lens: `memory-recall.mjs` measures, per code module, how many sessions
+  that worked on it (with their agents and Codex rollouts) opened its knowledge, which modules have none, which pages
+  nobody opened. `memory-audit.md` check 3 runs it instead of guessing; `analyze.md` prices the rate with anchors.
 - **1.9.0** (2026-10-03) — `effect.mjs` reads changes from git by itself: every commit touching agent config (the
   project's `.claude/` and `CLAUDE.md`, `~/.claude` as a local repo, the repos behind symlinked skills) is a row,
   one per artifact, checked for liveness — a hook decides (a recorder hook: passes), a skill, agent or tool is used;

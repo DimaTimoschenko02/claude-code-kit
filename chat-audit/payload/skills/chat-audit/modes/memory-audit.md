@@ -35,9 +35,22 @@ Reports memory anchors that no longer resolve, by severity:
 Report `high` findings with the surrounding claim, not just the anchor — the anchor is the symptom, the claim
 is what the user has to judge.
 
-**3. Written and never used.** Memory files whose subject never appears in the audited sessions, while adjacent
-work happened. Either the knowledge is stale, or it is not reachable — the index entry does not say what would
-make someone open it. Both are worth one line each; neither is worth deleting on your own initiative.
+**3. Written and never used.** Measure it rather than guess:
+
+```bash
+node .claude/skills/chat-audit/lib/memory-recall.mjs --project <dir> [--days N] [--knowledge <dir,dir>] [--json]
+```
+
+It lists, per code module, the sessions that worked on it and how many of them (or their agents, or Codex) opened
+its knowledge; the modules that get work and have no knowledge at all; and the knowledge files nobody opened.
+Knowledge roots default to the discovered memory; a project with people docs or another layout sets
+`memory_recall` in its config. A dated dump (an audit report, a day log) counted as module knowledge inflates
+every number — check the knowledge list it prints before trusting a rate.
+
+A module with work and no page is `missing`. A page that exists and was not opened by the sessions on its module
+is `exists-but-did-not-fire`: the fix is delivery (whatever starts the session names the page), not more text in
+it. A page opened and still not enough — re-investigation right after reading — is `exists-but-too-broad`, usually
+a page too long to find the answer in. Neither is worth deleting on your own initiative.
 
 **4. Rules that keep failing.** If the project keeps a log of past corrections (a learning log, a resolutions
 registry, a decisions file — recon found it or it does not exist), cross it against this run's findings. A
