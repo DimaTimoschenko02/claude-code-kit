@@ -40,11 +40,13 @@
 //                        main-context-p50          median context (input + cache read + cache write) of a call
 //                        cache-read-share          cache read / all input tokens
 //                        main-compactions-per-day  compaction boundaries / days with a call
+//                        session-start-tokens      median context of a main session's first call — what CLAUDE.md,
+//                                                  memory, skills and tool lists cost before any work
 //                      (`context-median`, `compactions-per-day` are the same). `signals_extra: [signal, …]` on the
 //                      line are measured on the same calls. Baseline: `baseline["<name>"]` when the number was
 //                      taken by hand (a token audit's table), else the 7 days before. works: moved `by` the right
 //                      way · harmful: moved 2×`by` the wrong way · else no-effect; fewer than 20 calls (3 days for
-//                      per-day) after → unclear-window.
+//                      per-day, 10 sessions for starts) after → unclear-window.
 // A line written after the fact carries `applied_at`: every window counts from it, not from `ts`.
 //                      Why (2026-11-26): four token audits found the same ~190–200k context per call and none of
 //                      their fixes could be checked — a regex count cannot say «the median context fell by 30%».
@@ -132,6 +134,14 @@ export const METRICS = {
       return { value: total ? calls.reduce((x, e) => x + e.cr, 0) / total : null, n: calls.length };
     },
     show: (v) => `${(100 * v).toFixed(1)}%`,
+  },
+  'session-start-tokens': {
+    min: 10,
+    of: (calls) => {
+      const starts = calls.filter((e) => e.start);
+      return { value: median(starts.map((e) => e.ctx)), n: starts.length };
+    },
+    show: (v) => `${(v / 1000).toFixed(1)}k`,
   },
   'main-compactions-per-day': {
     min: 3,
@@ -240,7 +250,7 @@ export function scanTranscripts(project, emit, { scope = 'subtree', since = 0 } 
     // The user's words only: an agent-launched session opens with the agent's brief, a headless run is all the
     // agent's (lib/origin.mjs) — counted as the user, they move every `user` signal without the user saying a word.
     const launchFacts = claudeFactsCollector();
-    let opened = false;
+    let opened = false, hadCall = false;
     for (const line of raw.split('\n')) {
       if (!line) continue;
       const isResult = line.includes('"tool_result"');
@@ -260,11 +270,16 @@ export function scanTranscripts(project, emit, { scope = 'subtree', since = 0 } 
       if (o.type === 'assistant' && Array.isArray(c)) {
         const u = o.message?.usage;
         // One response is written as one line per content block, each with the same usage: one call per message id.
-        if (u && main && !o.isSidechain && o.message.model !== '<synthetic>' && o.message.id && !seenCall.has(o.message.id)) {
-          seenCall.add(o.message.id);
-          const cr = u.cache_read_input_tokens || 0;
-          const total = (u.input_tokens || 0) + cr + (u.cache_creation_input_tokens || 0);
-          if (total) emit({ type: 'call', t, s, ctx: total, cr });
+        if (u && main && !o.isSidechain && o.message.model !== '<synthetic>' && o.message.id) {
+          // The file's first call is the session's start; a resumed file opens with a copied call, so it has none.
+          const start = !hadCall;
+          hadCall = true;
+          if (!seenCall.has(o.message.id)) {
+            seenCall.add(o.message.id);
+            const cr = u.cache_read_input_tokens || 0;
+            const total = (u.input_tokens || 0) + cr + (u.cache_creation_input_tokens || 0);
+            if (total) emit({ type: 'call', t, s, ctx: total, cr, start });
+          }
         }
         c.forEach((b, i) => {
           if (b?.type === 'text' && main && !o.isSidechain) {

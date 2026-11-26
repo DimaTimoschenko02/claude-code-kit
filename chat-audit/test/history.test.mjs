@@ -104,6 +104,25 @@ test('metric verdict: a small move is no effect, too few calls after is unclear,
   assert.equal(metricVerdict(sig, ts, { value: 200, n: 50 }, fading, NOW), 'decaying');
 });
 
+test('session-start-tokens is the first call of each main session; a resumed session has no start', () => {
+  const p2 = path.join(T, 'proj2');
+  fs.mkdirSync(p2, { recursive: true });
+  const at = (t, id, ctx) => JSON.stringify({ type: 'assistant', cwd: p2, timestamp: iso(t),
+    message: { id, model: 'claude-opus-5-5', usage: { input_tokens: ctx }, content: [{ type: 'text', text: 'ok' }] } });
+  const dir = path.join(process.env.HOME, '.claude/projects/proj2');
+  for (let i = 0; i < 12; i++) {
+    const b = NOW - 11 * DAY + i * 3 * 3600e3, a = NOW - 4.5 * DAY + i * 3 * 3600e3;
+    put(path.join(dir, `b${i}.jsonl`), [at(b, `b${i}-1`, 76_000), at(b + 60e3, `b${i}-2`, 150_000)].join('\n') + '\n');
+    put(path.join(dir, `a${i}.jsonl`), [at(a, `a${i}-1`, 50_000), at(a + 60e3, `a${i}-2`, 150_000)].join('\n') + '\n');
+  }
+  // Resumed after the change: opens with a copy of an earlier call, then calls deep into a 150k context.
+  put(path.join(dir, 'r.jsonl'), [at(NOW - 11 * DAY, 'b0-2', 150_000), at(NOW - DAY, 'r-1', 150_000)].join('\n') + '\n');
+  const led = path.join(p2, '.claude/state/chat-audit/ledger.jsonl');
+  put(led, JSON.stringify(change('C-16', 'metric:session-start-tokens', 'down', { baseline: { 'session-start-tokens': null } })) + '\n');
+  const [r] = measure({ project: p2, ledger: led, now: NOW, git: false });
+  assert.deepEqual([r.before.value, r.before.n, r.after.value, r.after.n, r.verdict], [76_000, 12, 50_000, 12, 'works']);
+});
+
 test('an unknown metric is an error, not a silent count', () => {
   const bad = path.join(T, 'bad.jsonl');
   put(bad, JSON.stringify(change('C-9', 'metric:nope', 'down')) + '\n');

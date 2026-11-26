@@ -164,7 +164,7 @@ The frequency and drift analysis is a generalized port of three tools built for 
   and lens into the vault (found → changed → effect → came back) and marks a change rotted when its class returns,
   with the change's lifetime (`class:"fix-rotted"` lines name it). `effect.mjs` measures numbers, not only regex
   counts: `metric:main-context-p50`, `metric:main-compactions-per-day`, `metric:cache-read-share` over main-session
-  calls, with `signals_extra`, hand baselines keyed by metric and `applied_at` for lines logged after the fact.
+  calls and `metric:session-start-tokens` over each session's first call, with `signals_extra`, hand baselines keyed by metric and `applied_at` for lines logged after the fact.
   `land.md` makes every accepted fix a change line with a signal; `analyze.md` reads the lens note before dispatch.
   Why: four token audits found the same ~200k context per call, and no fix could be checked.
 - **1.11.0** (2026-11-25) — `memory` lens: `memory-recall.mjs` measures, per code module, how many sessions

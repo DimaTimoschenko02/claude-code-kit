@@ -111,13 +111,15 @@ worked: four token audits advised the same thing because no fix carried a number
 `signal` names a line, a tool parameter, a skill load, a hook decision or a number the change should move; sources
 and their default occasions are in the header of `lib/effect.mjs`. A number is `metric:<name>`: `want` down|up, `by`
 the relative move that counts (default 0.1), more numbers in `signals_extra`, and a number taken by hand (a token
-audit's table) as `baseline["<name>"]`. A tokens-lens fix always carries all three:
+audit's table) as `baseline["<name>"]`. A tokens-lens fix always carries the first three; one aimed at what a
+session costs before any work (CLAUDE.md, memory, plugins, tool lists) carries the fourth as its `signal`:
 
 | what | `src` | `want` |
 |---|---|---|
 | median context of a main-session call | `metric:main-context-p50` | down |
 | compactions per day | `metric:main-compactions-per-day` | down |
 | cache-read share of input tokens | `metric:cache-read-share` | up |
+| median context of a main session's first call | `metric:session-start-tokens` | down |
 
 No signal to name → `"signal":null` and the report says so: such a fix can be seen to come back, never to work. A fix
 never measured keeps `"verdict":"unmeasured"`. Then freeze the baseline — transcripts older than ~30 days are deleted:
