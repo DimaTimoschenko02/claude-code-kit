@@ -121,6 +121,10 @@ session costs before any work (CLAUDE.md, memory, plugins, tool lists) carries t
 | cache-read share of input tokens | `metric:cache-read-share` | up |
 | median context of a main session's first call | `metric:session-start-tokens` | down |
 
+A hand baseline is the same quantity the metric measures, or `null`: `cache-read-share` is cache-read tokens over all
+input tokens (~0.95 in a cached session), not cache read's share of the spend (~0.5) that a token audit's money table
+shows. A number from another table makes the verdict a comparison of two different things.
+
 No signal to name → `"signal":null` and the report says so: such a fix can be seen to come back, never to work. A fix
 never measured keeps `"verdict":"unmeasured"`. Then freeze the baseline — transcripts older than ~30 days are deleted:
 `node .claude/skills/chat-audit/lib/effect.mjs record --id C-<n>`. `record` rewrites only that line.
