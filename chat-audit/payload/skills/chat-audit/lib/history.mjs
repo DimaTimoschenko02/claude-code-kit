@@ -30,6 +30,11 @@ const day = (ts) => new Date(ts).toISOString().slice(0, 10);
 const when = (c) => (Number.isFinite(Date.parse(c.applied_at)) ? c.applied_at : c.ts);
 const days = (from, to) => Math.floor((Date.parse(to) - Date.parse(from)) / DAY);
 const cell = (s) => String(s ?? '').replace(/\s+/g, ' ').trim();
+/** Russian number agreement: plural(4, 'раз', 'раза', 'раз') → «4 раза». */
+export const plural = (n, one, few, many) => {
+  const d = n % 10, h = n % 100;
+  return `${n} ${d === 1 && h !== 11 ? one : d >= 2 && d <= 4 && (h < 12 || h > 14) ? few : many}`;
+};
 
 /** The failure class as a match key, or null when it names only the form of the finding. */
 export function classKey(text) {
@@ -173,7 +178,7 @@ function repeatsSection(h) {
     const fixes = h.changes.filter((c) => classKey(c.class) === key || g.findings.some((f) => f.change === c.id));
     const last = fixes[fixes.length - 1];
     const effect = last ? `последняя правка ${last.id} (${day(when(last))}): ${effectText(last)}${last.rotted ? ', сгнила' : ''}` : 'правок не было';
-    out.push(`- «${g.class}» — советовали ${audits.size} раз (${g.findings.map((f) => day(f.ts)).join(', ')}); ${effect}`);
+    out.push(`- «${g.class}» — советовали ${plural(audits.size, 'раз', 'раза', 'раз')} (${g.findings.map((f) => day(f.ts)).join(', ')}); ${effect}`);
   }
   return out;
 }
@@ -191,9 +196,10 @@ export function renderNote({ project, lens, title, h, today, created, revision }
     '---', 'kind: note', 'topic: ["[[chat-audit]]"]', `created: ${created}`,
     `description: История линзы ${lens} чат-аудита в проекте ${project}: что находили, что меняли, сработало ли, что вернулось.`,
     '---', '', `# ${project} · ${lens}${title ? ` — ${title}` : ''}`, '', MARK, `<!-- source revision: ${revision} -->`, '',
-    `На ${today} (UTC). Находок ${h.findings.length}, правок ${h.changes.length}`
-      + `${measured.length ? ` (измерено ${measured.length}: ${Object.entries(tally).map(([k, v]) => `${k} ${v}`).join(' · ')})` : ''}`
-      + `, сгнило ${rotted.length}.`, '',
+    `На ${today} (UTC). ${plural(h.findings.length, 'находка', 'находки', 'находок')}, `
+      + `${plural(h.changes.length, 'правка', 'правки', 'правок')}`
+      + `${measured.length ? ` (измерено: ${measured.length} — ${Object.entries(tally).map(([k, v]) => `${k} ${v}`).join(' · ')})` : ''}`
+      + `, сгнило: ${rotted.length}.`, '',
     '## Уже советовали', '', ...(repeats.length ? repeats : ['- Повторов класса нет.']), '',
     '## Сгнившие правки', '',
     ...(rotted.length ? rotted.map((c) => `- ${c.id} (${day(when(c))}): ${c.rotted.lifetime != null ? `${c.rotted.lifetime} дн.` : 'срок не известен'} — ${cell(c.class)}`) : ['- Нет.']),
