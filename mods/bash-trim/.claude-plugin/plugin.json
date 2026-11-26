@@ -1,0 +1,8 @@
+{
+  "name": "bash-trim",
+  "version": "0.1.0",
+  "author": {
+    "name": "Dima Timoschenko"
+  },
+  "description": "Cuts a main-session Bash output over 6000 characters to its head and tail, the error-looking lines of the cut part and the path of a file with the whole output, so the main context stops re-reading long sed/cat/grep dumps; failed calls and subagents are left whole."
+}
