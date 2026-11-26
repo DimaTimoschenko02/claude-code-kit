@@ -43,6 +43,14 @@ Pass comma-separated coverage, omitting empty lists, and optionally `--report <p
 the vault's `.claude/machines.json`. The command also generates `01 projects/chat-audit/runs.md`.
 Run `node lib/runs.mjs refresh` to regenerate it from the log and catalogue, including after a manual merge.
 
+Both commands also write the **lens history**: one generated note per project and lens,
+`01 projects/chat-audit/history/<project>/<lens>.md`, from the project's ledger (`--ledger <file>`, else the current
+directory's, else the machine's `projectDirs` entry in `machines.json`; plain `refresh` does every project the machine
+lists). Each note says what the lens found, what was changed, the effect `effect.mjs` measures on this machine
+(`--no-measure` skips the transcript pass), whether the finding came back, and which changes rotted — the class
+returned after them — with their lifetime in days. Lines without `lens` go to «без линзы». `analyze.md` reads the
+note before the lens runs, so a repeat is reported as one.
+
 ## What it looks at
 
 | Signal | Reads as |
@@ -152,6 +160,13 @@ The frequency and drift analysis is a generalized port of three tools built for 
 
 ## Changes
 
+- **1.12.0** (2026-11-26) — lens history. Every ledger line carries `lens`; `runs.mjs` writes one note per project
+  and lens into the vault (found → changed → effect → came back) and marks a change rotted when its class returns,
+  with the change's lifetime (`class:"fix-rotted"` lines name it). `effect.mjs` measures numbers, not only regex
+  counts: `metric:main-context-p50`, `metric:main-compactions-per-day`, `metric:cache-read-share` over main-session
+  calls, with `signals_extra`, hand baselines keyed by metric and `applied_at` for lines logged after the fact.
+  `land.md` makes every accepted fix a change line with a signal; `analyze.md` reads the lens note before dispatch.
+  Why: four token audits found the same ~200k context per call, and no fix could be checked.
 - **1.11.0** (2026-11-25) — `memory` lens: `memory-recall.mjs` measures, per code module, how many sessions
   that worked on it (with their agents and Codex rollouts) opened its knowledge, which modules have none, which pages
   nobody opened. `memory-audit.md` check 3 runs it instead of guessing; `analyze.md` prices the rate with anchors.

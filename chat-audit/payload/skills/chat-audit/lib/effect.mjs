@@ -35,8 +35,21 @@
 //                      test, not an attempt, and is dropped.          occasion default: sessions
 //   hooklog:<hook>     .claude/state/hooks/*.jsonl lines of that hook (test lines dropped), re on
 //                      "decision reason target"               occasion default: every line of that hook
+//   metric:<name>      a number over main-session API calls, not a count of matches; `re` is ignored, `want` is
+//                      down|up, `by` the relative move that counts (default 0.1). Names:
+//                        main-context-p50          median context (input + cache read + cache write) of a call
+//                        cache-read-share          cache read / all input tokens
+//                        main-compactions-per-day  compaction boundaries / days with a call
+//                      (`context-median`, `compactions-per-day` are the same). `signals_extra: [signal, …]` on the
+//                      line are measured on the same calls. Baseline: `baseline["<name>"]` when the number was
+//                      taken by hand (a token audit's table), else the 7 days before. works: moved `by` the right
+//                      way · harmful: moved 2×`by` the wrong way · else no-effect; fewer than 20 calls (3 days for
+//                      per-day) after → unclear-window.
+// A line written after the fact carries `applied_at`: every window counts from it, not from `ts`.
+//                      Why (2026-11-26): four token audits found the same ~190–200k context per call and none of
+//                      their fixes could be checked — a regex count cannot say «the median context fell by 30%».
 // Dedup: tool_use by id, tool_result by tool_use_id, reply text by message.id + block (resumed sessions copy
-// history; a raw grep counts denies ~2.4x).
+// history; a raw grep counts denies ~2.4x), an API call by message.id, a compaction by its uuid.
 import fs from 'node:fs';
 import { realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -93,7 +106,79 @@ function compile(spec) {
     return { kind: 'tool', names: set, field, re };
   }
   if (head === 'deny' || head === 'hooklog') return { kind: head, hook: rest, re };
+  if (head === 'metric') return { kind: 'metric', name: metricName(rest), re };
   return { kind: head, re };   // assistant | user
+}
+
+// ------------------------------------------------------------------ numeric signals
+
+const median = (xs) => {
+  if (!xs.length) return null;
+  const v = [...xs].sort((a, b) => a - b), m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+};
+
+/** Each metric: which events it reads, how a window of them becomes one number, and how many make it trustworthy. */
+export const METRICS = {
+  'main-context-p50': {
+    min: 20,
+    of: (calls) => ({ value: median(calls.map((e) => e.ctx)), n: calls.length }),
+    show: (v) => `${(v / 1000).toFixed(1)}k`,
+  },
+  'cache-read-share': {
+    min: 20,
+    of: (calls) => {
+      const total = calls.reduce((x, e) => x + e.ctx, 0);
+      return { value: total ? calls.reduce((x, e) => x + e.cr, 0) / total : null, n: calls.length };
+    },
+    show: (v) => `${(100 * v).toFixed(1)}%`,
+  },
+  'main-compactions-per-day': {
+    min: 3,
+    of: (calls, compacts) => {
+      const days = new Set(calls.map((e) => new Date(e.t).toISOString().slice(0, 10))).size;
+      return { value: days ? compacts.length / days : null, n: days };
+    },
+    show: (v) => `${v.toFixed(2)}/d`,
+  },
+};
+
+const ALIAS = { 'context-median': 'main-context-p50', 'compactions-per-day': 'main-compactions-per-day' };
+
+/** `metric:<name>` → the canonical name; an unknown one is an error, never a silent zero. */
+export function metricName(src) {
+  const raw = String(src).replace(/^metric:/, ''), name = ALIAS[raw] || raw;
+  if (!METRICS[name]) throw new Error(`unknown metric: ${raw} (known: ${Object.keys(METRICS).join(', ')})`);
+  return name;
+}
+
+/** When the change took effect: `applied_at` for a line written after the fact, else its `ts`. */
+export const changeTime = (ch) => {
+  const applied = Date.parse(ch.applied_at);
+  return Number.isFinite(applied) ? applied : Date.parse(ch.ts);
+};
+
+/** The metric over [from, to). */
+export function metricWindow(name, calls, compacts, from, to) {
+  const inW = (e) => e.t >= from && e.t < to;
+  return METRICS[name].of(calls.filter(inW), compacts.filter(inW));
+}
+
+/** Numeric verdict for one signal of a change made at `ts` (ms): before/after are {value, n}. */
+export function metricVerdict(sig, ts, before, after, now = Date.now()) {
+  const m = METRICS[metricName(sig.src)];
+  if (!before || before.value == null) return 'unmeasurable';   // no baseline frozen and its transcripts are gone
+  if (!after || after.n < m.min || after.value == null) return 'unclear-window';
+  const by = Number(sig.by) > 0 ? Number(sig.by) : 0.1, up = sig.want === 'up';
+  const b = before.value, a = after.value;
+  const move = b ? (a - b) / b : a > 0 ? Infinity : 0;    // relative; from zero any rise is a full move
+  const good = up ? move : -move;
+  let v = good >= by ? 'works' : good <= -2 * by ? 'harmful' : 'no-effect';
+  // Same fade test as the counted signals: the gain is gone in the last third of the window.
+  const last = after.last;
+  if (v === 'works' && last && last.n >= m.min && last.value != null && now - ts >= 3 * DAY
+    && (up ? last.value <= b : last.value >= b)) v = 'decaying';
+  return v;
 }
 
 function defaultOccasion(signal) {
@@ -147,6 +232,7 @@ const hookName = (cmd) => path.basename(String(cmd).trim().split(/\s+/).pop() ||
  */
 export function scanTranscripts(project, emit, { scope = 'subtree', since = 0 } = {}) {
   const seenTool = new Set(), seenText = new Set(), seenReply = new Set(), seenUser = new Set(), seenDeny = new Set();
+  const seenCall = new Set(), seenCompact = new Set();
   const hookTests = new Set();   // tool_use ids of calls that feed a payload to a hook — their denies are tests
   for (const { file, session, main } of transcriptFiles(project, scope, since)) {
     let raw;
@@ -166,7 +252,20 @@ export function scanTranscripts(project, emit, { scope = 'subtree', since = 0 } 
       if (Number.isNaN(t)) continue;
       const s = session;
       const c = o.message?.content;
+      if (main && !o.isSidechain && o.type === 'system' && o.subtype === 'compact_boundary') {
+        const k = o.uuid || `${s}|${o.timestamp}`;
+        if (!seenCompact.has(k)) { seenCompact.add(k); emit({ type: 'compact', t, s }); }
+        continue;
+      }
       if (o.type === 'assistant' && Array.isArray(c)) {
+        const u = o.message?.usage;
+        // One response is written as one line per content block, each with the same usage: one call per message id.
+        if (u && main && !o.isSidechain && o.message.model !== '<synthetic>' && o.message.id && !seenCall.has(o.message.id)) {
+          seenCall.add(o.message.id);
+          const cr = u.cache_read_input_tokens || 0;
+          const total = (u.input_tokens || 0) + cr + (u.cache_creation_input_tokens || 0);
+          if (total) emit({ type: 'call', t, s, ctx: total, cr });
+        }
         c.forEach((b, i) => {
           if (b?.type === 'text' && main && !o.isSidechain) {
             const k = `${o.message.id}|${i}|${b.text.slice(0, 40)}`;
@@ -284,7 +383,7 @@ const rate = (w) => (w && w.occasions ? w.hits / w.occasions : 0);
 export function verdict(change, before, after, hookLogStart, now = Date.now()) {
   const v = baseVerdict(change, before, after, hookLogStart, now);
   const last = after && after.last, want = change.signal && (change.signal.want || 'down');
-  if (v !== 'works' || !last || last.occasions < MIN_AFTER || now - Date.parse(change.ts) < 3 * DAY
+  if (v !== 'works' || !last || last.occasions < MIN_AFTER || now - changeTime(change) < 3 * DAY
     || String(change.signal.src).startsWith('deny:')) return v;
   const rb = rate(before), ra = rate(after), rl = rate(last);
   const down = want === 'down' || want === 'zero';
@@ -299,7 +398,7 @@ function baseVerdict(change, before, after, hookLogStart, now) {
   // The window counts from the later of the change and the log's start: a hook changed before logging began and
   // silent through a full window since is just as dead.
   if (src.startsWith('hooklog:') && !after.occasions) {
-    const from = Math.max(Date.parse(change.ts), hookLogStart ?? Infinity);
+    const from = Math.max(changeTime(change), hookLogStart ?? Infinity);
     return now - from >= WINDOW ? 'dead' : 'unclear-window';
   }
   // Liveness (rows from git): it runs at all — a load, a call, a log line; `fires` also wants a decision.
@@ -307,7 +406,7 @@ function baseVerdict(change, before, after, hookLogStart, now) {
     if (after.hits) return 'alive';
     if (change.launcher) return 'external';   // runs where no transcript can name it: unseen, not dead
     if (want === 'fires') return 'untested';   // has log lines, never denied, blocked, deferred or injected
-    return now - Date.parse(change.ts) >= WINDOW ? 'dead' : 'unclear-window';
+    return now - changeTime(change) >= WINDOW ? 'dead' : 'unclear-window';
   }
   if (after.occasions < MIN_AFTER) return 'unclear-window';
   const rb = rate(before), ra = rate(after);
@@ -565,24 +664,45 @@ export function measure({ project, ledger, ids = null, now = Date.now(), git: us
   return all.map((ch) => res.get(ch));
 }
 
+/** One numeric signal of a change: the hand baseline when the line has one, else the 7 days before. */
+function measureMetric(ch, signal, sp, ts, now) {
+  const name = metricName(signal.src);
+  const hand = ch.baseline?.[name] ?? ch.baseline?.[String(signal.src).replace(/^metric:/, '')];
+  const before = Number.isFinite(hand) ? { value: hand, n: ch.baseline.n ?? null }
+    : metricWindow(name, sp.calls, sp.compacts, ts - WINDOW, ts);
+  const after = metricWindow(name, sp.calls, sp.compacts, ts, now + 1);
+  after.last = metricWindow(name, sp.calls, sp.compacts, ts + (2 * (now - ts)) / 3, now + 1);
+  return { signal: signal.src, metric: name, before, after, verdict: metricVerdict(signal, ts, before, after, now) };
+}
+
 function measureGroup(project, changes, now, scope) {
   const specs = [];
   for (const ch of changes) {
     if (!ch.signal) continue;
     const sig = compile(ch.signal);
+    if (sig.kind === 'metric') {
+      (ch.signals_extra || []).forEach((x) => metricName(x.src));   // a typo in an extra fails loudly too
+      specs.push({ ch, sig, calls: [], compacts: [] });
+      continue;
+    }
     const occ = compile(ch.occasion || defaultOccasion(ch.signal));
     // Counted in sessions when the occasion is a session, or the signal is a skill load (one load per session is enough).
     specs.push({ ch, sig, occ, perSession: sig.kind === 'skill' || occ.kind === 'sessions', hits: [], occs: [] });
   }
   const feed = (ev) => {
     for (const sp of specs) {
+      if (sp.sig.kind === 'metric') {
+        if (ev.type === 'call') sp.calls.push(ev);
+        else if (ev.type === 'compact') sp.compacts.push(ev);
+        continue;
+      }
       if (matches(sp.sig, ev)) sp.hits.push({ t: ev.t, s: ev.s });
       if (matches(sp.occ, ev)) sp.occs.push({ t: ev.t, s: ev.s });
     }
   };
   let hookLogStart = null;
   if (specs.length) {
-    const since = Math.min(...specs.map((sp) => Date.parse(sp.ch.ts))) - WINDOW;
+    const since = Math.min(...specs.map((sp) => changeTime(sp.ch))) - WINDOW;
     scanTranscripts(project, feed, { scope, since });
     const log = readHookLog(project);
     log.forEach(feed);
@@ -590,8 +710,13 @@ function measureGroup(project, changes, now, scope) {
   }
   return changes.map((ch) => {
     const sp = specs.find((x) => x.ch === ch);
-    const ts = Date.parse(ch.ts);
+    const ts = changeTime(ch);
     let before = null, after = null;
+    if (sp && sp.sig.kind === 'metric') {
+      const [main, ...extra] = [ch.signal, ...(ch.signals_extra || [])].map((s) => measureMetric(ch, s, sp, ts, now));
+      return { id: ch.id, source: ch.source || 'ledger', scope: ch.scope || null, ts: ch.ts, kind: ch.kind, class: ch.class,
+        lens: ch.lens ?? null, ...main, extra, recorded: ch.verdict || null, action: ACTION[main.verdict] };
+    }
     if (sp) {
       // The author's smoke tests and live checks sit right around the change: for actions (tool calls, guard fires)
       // the 2 h on each side of it are not behaviour. Text signals keep them — a reply right after a rule is compliance.
@@ -608,7 +733,7 @@ function measureGroup(project, changes, now, scope) {
     const v = sp ? verdict(ch, before, after, hookLogStart, now) : 'unmeasurable';
     return {
       id: ch.id, source: ch.source || 'ledger', scope: ch.scope || null, ts: ch.ts, kind: ch.kind, class: ch.class,
-      signal: ch.signal ? ch.signal.src : null, before, after, verdict: v, recorded: ch.verdict || null, action: ACTION[v],
+      lens: ch.lens ?? null, signal: ch.signal ? ch.signal.src : null, before, after, verdict: v, recorded: ch.verdict || null, action: ACTION[v],
       ...(ch.source === 'git' ? { commit: ch.commit, commits: ch.commits, edits: ch.edits, session: ch.session, paths: ch.paths,
         note: ch.note || (v === 'external' ? ch.launcher : null) } : {}),
     };
@@ -622,7 +747,14 @@ function arg(name, fallback = null) {
   return i > -1 && process.argv[i + 1] && !process.argv[i + 1].startsWith('--') ? process.argv[i + 1] : fallback;
 }
 
-function fmt(w) { return w ? `${w.hits}/${w.occasions}` : '—'; }
+/** A window as text: hits/occasions, or for a metric its value and how many calls (days) it rests on. */
+export function fmt(w, src = '') {
+  if (!w) return '—';
+  if (!String(src).startsWith('metric:')) return `${w.hits}/${w.occasions}`;
+  if (w.value == null) return `— (n=${w.n ?? 0})`;
+  const shown = METRICS[metricName(src)].show(w.value);
+  return w.n == null ? `${shown} (by hand)` : `${shown} (n=${w.n})`;
+}
 
 function main() {
   const project = path.resolve(arg('project', process.cwd()));
@@ -637,10 +769,14 @@ function main() {
     const res = measure({ project, ledger, ids: want.map((r) => r.id) });
     for (const r of want) {
       const m = res.find((x) => x.id === r.id);
-      r.baseline = { days: 7, hits: m.before.hits, occasions: m.before.occasions, at: new Date().toISOString().slice(0, 10) };
+      const at = new Date().toISOString().slice(0, 10);
+      // A metric baseline is keyed by metric name, like a token audit's hand-taken one; extras too.
+      r.baseline = m.metric
+        ? Object.fromEntries([['days', 7], ['at', at], ['n', m.before.n], ...[m, ...m.extra].map((x) => [x.metric, x.before.value])])
+        : { days: 7, hits: m.before.hits, occasions: m.before.occasions, at };
     }
     rewriteLines(ledger, new Map(want.map((r) => [r.id, r])));
-    console.log(`baseline frozen for ${want.length} change line(s): ${want.map((r) => `${r.id} ${r.baseline.hits}/${r.baseline.occasions}`).join(', ')}`);
+    console.log(`baseline frozen for ${want.length} change line(s): ${want.map((r) => `${r.id} ${JSON.stringify(r.baseline)}`).join(', ')}`);
     return;
   }
   const days = Number(arg('days', GIT_DAYS));
@@ -659,9 +795,9 @@ function main() {
   };
   const hand = res.filter((r) => r.source !== 'git'), auto = res.filter((r) => r.source === 'git');
   const measured = hand.filter((r) => r.signal), rest = hand.filter((r) => !r.signal);
-  const aft = (r) => fmt(r.after) + (r.verdict === 'decaying' ? ` (last ⅓ ${fmt(r.after.last)})` : '');
+  const aft = (r) => fmt(r.after, r.signal) + (r.verdict === 'decaying' ? ` (last ⅓ ${fmt(r.after.last, r.signal)})` : '');
   table(['id', 'kind', 'class', 'before', 'after', 'verdict', 'recorded', 'action'],
-    measured.map((r) => [r.id, r.kind || '', String(r.class || '').slice(0, 48), fmt(r.before), aft(r), r.verdict, r.recorded || '', r.action]));
+    measured.map((r) => [r.id, r.kind || '', String(r.class || '').slice(0, 48), fmt(r.before, r.signal), aft(r), r.verdict, r.recorded || '', r.action]));
   console.log(`\n${hand.length} ledger changes: ${tally(hand)}`);
   if (rest.length) console.log(`unmeasurable (signal:null): ${rest.map((r) => r.id).join(' ')}`);
   console.log('before/after = hits/occasions (skill: sessions that loaded it / occasion sessions); before = frozen baseline when recorded.');

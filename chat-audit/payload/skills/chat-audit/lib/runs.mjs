@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
+import { refreshHistory } from './history.mjs';
 
 const DAY_MS = 86_400_000;
 const STALE_DAYS = 60;
@@ -11,8 +12,10 @@ const ITEM_ID = /^(?:[1-9]\d*|[А-ЯЁ])$/u;
 const NAME = /^[\p{L}\p{N}][\p{L}\p{N}._/-]*$/u;
 const STATE_DIR = '.claude/state/chat-audit';
 const NOTES_DIR = '01 projects/chat-audit';
+const LEDGER = '.claude/state/chat-audit/ledger.jsonl';
 const USAGE = 'Usage: runs.mjs record --project <id> --audit <name> [--items <comma-separated ids>] '
-  + '[--all-mandatory] [--lenses <comma-separated names>] [--report <path>] | refresh';
+  + '[--all-mandatory] [--lenses <comma-separated names>] [--report <path>] [--ledger <file>] [--no-measure] '
+  + '| refresh [--project <id>] [--ledger <file>] [--no-measure]';
 
 function readOptional(path) {
   try { return readFileSync(path, 'utf8'); }
@@ -172,23 +175,73 @@ function record(paths, options, now) {
   appendFileSync(paths.log, newline + JSON.stringify(run) + '\n', 'utf8');
   try { refresh(paths, now.toISOString().slice(0, 10)); }
   catch (error) { throw new Error(`Run recorded. Retry with refresh to update the view: ${error.message}`); }
+  return registry;
+}
+
+/**
+ * Which project ledgers this machine can turn into history notes: the one named (--ledger, else the current
+ * directory's, else the machine's projectDirs entry), or with no project every projectDirs entry that has a ledger.
+ * A ledger stays on its machine; the notes it makes sync with the vault.
+ */
+function historyTargets(paths, options, registry) {
+  let machine = null;
+  try {
+    const machines = registry ?? JSON.parse(readFileSync(paths.machines, 'utf8'));
+    machine = machines.machines[getMachine(machines, hostname())];
+  } catch { /* an unregistered machine knows no project dirs */ }
+  const dirs = machine?.projectDirs ?? {};
+  const expand = dir => resolve(dir.replace(/^~(?=$|[\\/])/, homedir()));
+  const { project, ledger } = options;
+  if (ledger) {
+    if (!project) throw new Error('--ledger needs --project');
+    return [{ project, ledger: resolve(ledger) }];
+  }
+  if (project) {
+    const candidates = [join(process.cwd(), LEDGER), ...(dirs[project] ? [join(expand(dirs[project]), LEDGER)] : [])];
+    const found = candidates.find(file => existsSync(file));
+    return found ? [{ project, ledger: found }] : [];
+  }
+  return Object.entries(dirs).map(([id, dir]) => ({ project: id, ledger: join(expand(dir), LEDGER) }))
+    .filter(target => existsSync(target.ledger));
+}
+
+function history(paths, options, registry, now) {
+  const catalogue = parseCatalogue(readFileSync(paths.catalogue, 'utf8'));
+  const titles = new Map([...[...catalogue.items].map(([id, item]) => [id, item.title]), ...catalogue.lenses]);
+  const targets = historyTargets(paths, options, registry);
+  if (options.project && !targets.length) {
+    console.error(`runs.mjs: no ledger for ${options.project} on this machine — history not refreshed; pass --ledger`);
+  }
+  for (const { project, ledger } of targets) {
+    const result = refreshHistory({
+      root: paths.root, notesDir: NOTES_DIR, project, ledger, titles, today: now.toISOString().slice(0, 10),
+      now: now.getTime(), measureEffects: !options['no-measure'],
+    });
+    const lost = result.unlensed ? `; ${result.unlensed} ledger line(s) without lens, in «без линзы»` : '';
+    console.log(`history ${project}: ${result.written.length} note(s)${result.removed.length ? `, ${result.removed.length} removed` : ''}${lost}`);
+  }
 }
 
 function main([command, ...args]) {
   const root = resolve(process.env.MIND_VAULT || join(homedir(), 'mind'));
   const paths = {
+    root,
     log: join(root, STATE_DIR, 'runs.jsonl'), machines: join(root, '.claude/machines.json'),
     view: join(root, NOTES_DIR, 'runs.md'), catalogue: join(root, NOTES_DIR, 'audit-mandatory-items.md'),
   };
   const now = new Date();
+  const historyOptions = { project: { type: 'string' }, ledger: { type: 'string' }, 'no-measure': { type: 'boolean' } };
   if (command === 'refresh') {
-    if (args.length) throw new Error(USAGE);
-    return refresh(paths, now.toISOString().slice(0, 10));
+    const values = parseArgs({ args, options: historyOptions }).values;
+    refresh(paths, now.toISOString().slice(0, 10));
+    return history(paths, values, null, now);
   }
   if (command !== 'record') throw new Error(USAGE);
-  const options = Object.fromEntries(['project', 'audit', 'items', 'lenses', 'report'].map(name => [name, { type: 'string' }]));
-  options['all-mandatory'] = { type: 'boolean' };
-  record(paths, parseArgs({ args, options }).values, now);
+  const options = Object.fromEntries(['audit', 'items', 'lenses', 'report'].map(name => [name, { type: 'string' }]));
+  Object.assign(options, historyOptions, { 'all-mandatory': { type: 'boolean' } });
+  const values = parseArgs({ args, options }).values;
+  const registry = record(paths, values, now);
+  history(paths, values, registry, now);
 }
 
 try { main(process.argv.slice(2)); }

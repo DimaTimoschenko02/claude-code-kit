@@ -60,6 +60,7 @@ node .claude/skills/chat-audit/lib/memory-recall.mjs --project <dir> [--days N] 
 node .claude/skills/chat-audit/lib/tokens.mjs    [--project <dir>|--all] [--since YYYY-MM-DD] [--top N]  # what the tokens are spent ON
 node .claude/skills/chat-audit/lib/effect.mjs    [--project <dir>] [--id C-n,..] [--now <iso>] [--json]  # did each recorded .claude change work
 node .claude/skills/chat-audit/lib/effect.mjs    record (--id C-n | --all) [--project <dir>]   # freeze a change line's 7-day baseline
+node .claude/skills/chat-audit/lib/runs.mjs      refresh [--project <id> --ledger <file>] [--no-measure]  # runs table + lens history notes in the vault
 ```
 
 `extract.mjs` answers *what happened in these sessions* (turns, corrections, errors, anchors).
@@ -74,7 +75,10 @@ watchdog stalls actually live. Cheap and agent-free, so `extract.md` runs it by 
 runs and decides, the skill, agent or tool is used (alive · untested · dead; `external` when a script starts it
 headless, where no transcript can name it). A `type:"change"` ledger line adds a
 behaviour signal, counted 7 days before vs since (works · decaying · no-effect · harmful · unclear-window ·
-unmeasurable). `recon.md` runs it first.
+unmeasurable); a `metric:` signal measures a number instead — median context, compactions a day, cache-read share.
+`recon.md` runs it first.
+`runs.mjs` keeps, per project and lens, a generated history note in the vault: found → changed → effect → came back,
+and which changes rotted. `analyze.md` reads it before a lens runs, so a repeat is reported as one.
 `tokens.mjs` answers *what the spend consists of*: every call re-reads the whole context, so it attributes
 each call's context growth to what was appended (tool result by tool and command, hook output, thinking,
 compaction residue, startup overhead) and weights it by how many later calls re-read it. Use it when the

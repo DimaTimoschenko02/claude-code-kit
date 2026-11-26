@@ -18,6 +18,12 @@ Each agent gets, in its prompt:
    aimed at memory must state a durable fact. Tell the agent what shape its output has to take.
 4. **The ledger** — findings already reported in past runs (`.claude/state/chat-audit/ledger.jsonl`), so it
    does not resurface them.
+5. **The lens history** — before the agent is sent, read
+   `<MIND_VAULT>/01 projects/chat-audit/history/<project>/<lens>.md` (`MIND_VAULT` defaults to `~/mind`; one note
+   per item id or lens name) and put its «Уже советовали» and «Сгнившие правки» in the prompt. No note → the lens
+   has no ledger lines yet; say so. A finding of a class the note lists is a repeat, and the report says «это уже
+   советовали <dates>, правка <id>: эффект <verdict>». What follows from it: a fix that worked and rotted needs
+   another form, one that never worked another fix, one never measured a signal first.
 
 ## Free reader
 

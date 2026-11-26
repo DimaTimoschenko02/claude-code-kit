@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 
 const T = fs.mkdtempSync(path.join(os.tmpdir(), 'effect-git-'));
 process.env.HOME = path.join(T, 'home');
+process.env.USERPROFILE = process.env.HOME;   // os.homedir() reads USERPROFILE on Windows
 const { gitChanges, artifactOf } = await import('../payload/skills/chat-audit/lib/effect.mjs');
 
 const git = (dir, ...args) => execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { stdio: 'pipe' });
