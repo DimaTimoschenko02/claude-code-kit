@@ -28,8 +28,14 @@ const NOTES_MAX = 20
 export const LINE_MAX = 120
 export const AGENTS_MAX = 15
 
-/** Built-in types that run on the parent's model unless the call names one. */
-const BUILTIN = new Set(['general-purpose', 'explore', 'claude', ''])
+/**
+ * Built-in types whose definition names no model of its own (`inherit` or nothing: they run on the parent's), plus
+ * the ones whose definition this mod could not read (`claude-code-guide`, `web-fetch`): a call to any of them names
+ * its model. `statusline-setup` carries `model: "sonnet"` in the engine and is left out.
+ */
+const BUILTIN = new Set(['general-purpose', 'explore', 'plan', 'claude', 'claude-code-guide', 'web-fetch', ''])
+/** The type that copies the parent's conversation and model by design. */
+const FORK = 'fork'
 /** Built-in types that do anything: a call naming one of these went past the typed agents. */
 const CATCH_ALL = new Set(['general-purpose', 'claude', ''])
 
@@ -37,7 +43,7 @@ const ESCALATE = /\bescalate:/i
 
 export const GENERAL_RULES = [
   '- Модель Claude-агента — из его frontmatter, в вызове не пиши; поднять — `escalate: <почему>` в description.',
-  '- Встроенные (`general-purpose`, `Explore`, `claude`) — с `model: "sonnet"` в вызове, Opus — с `escalate:`; есть типизированный агент под задачу — зови его.',
+  '- Встроенные (`general-purpose`, `Explore`, `Plan`, `claude`) и агенты без `model:` во frontmatter — с `model: "sonnet"` в вызове, Opus — с `escalate:`; есть типизированный агент под задачу — зови его.',
   '- Codex — всегда `-s danger-full-access`.',
 ]
 
@@ -175,7 +181,7 @@ export const hasEscalate = (description: string | undefined) => ESCALATE.test(de
 /** The part of an Agent call the checks read. */
 export type AgentCall = { subagent_type?: string; description?: string; prompt?: string; model?: string }
 
-export type Check = 'sol-route' | 'catch-all' | 'model-typed' | 'model-builtin' | 'subscription'
+export type Check = 'sol-route' | 'catch-all' | 'model-typed' | 'model-builtin' | 'model-inherit' | 'subscription'
 
 export type Decision =
   | { kind: 'pass' }
@@ -207,12 +213,40 @@ function catchAllReason(type: string, agents: AgentDef[]): string {
 }
 
 /**
+ * The call would run on the parent's model: it names no `model`, and its type's definition names none either — a
+ * built-in that inherits, or a typed agent whose frontmatter has no `model:` (or `inherit`). Unknown and plugin
+ * types are not judged. Denied with `escalate:` too: escalation picks a stronger model, it never lets the parent's in.
+ */
+function inheritDenial(call: AgentCall, type: string, agents: AgentDef[]): Decision | null {
+  if ((call.model ?? '').trim() !== '') return null
+  const own = agents.find(a => a.name === type)
+  const escalated = hasEscalate(call.description)
+  const pick = escalated ? '`model: "opus"`' : '`model: "sonnet"` (лёгкий поиск — `"haiku"`)'
+  if (own === undefined && isBuiltin(type)) {
+    const opus = escalated ? '' : '; нужен Opus — `model: "opus"` и `escalate: <почему>` в description'
+    return {
+      kind: 'deny',
+      check: 'model-inherit',
+      reason: `${SOURCE}: \`${type || 'general-purpose'}\` без \`model\` унаследовал бы модель родительской сессии, а агент её никогда не наследует. Повтори тот же вызов с ${pick}${opus}.`,
+    }
+  }
+  if (own === undefined || own.model !== null) return null
+  return {
+    kind: 'deny',
+    check: 'model-inherit',
+    reason: `${SOURCE}: у \`${type}\` во frontmatter нет \`model:\`, без \`model\` в вызове он унаследовал бы модель родительской сессии. Повтори тот же вызов с ${pick} и допиши \`model:\` в файл агента.`,
+  }
+}
+
+/**
  * The checks on one Agent call, in order: Sol route, catch-all, model. `claim(key)` answers true the first time a
  * catch-all call (type + description) is seen in the session; it is asked only when a deny would follow.
  */
 export function decideAgent(call: AgentCall, routes: Routes | null, agents: AgentDef[], claim: (key: string) => boolean, preferSol = true): Decision {
-  if (hasEscalate(call.description)) return { kind: 'pass' }
   const type = typeOf(call.subagent_type)
+  if (type.toLowerCase() === FORK) return { kind: 'pass' }
+  const inherit = inheritDenial(call, type, agents)
+  if (hasEscalate(call.description)) return inherit ?? { kind: 'pass' }
 
   const sol = routes?.routes.find(r => r.sol === true && r.agent === type && type !== '')
   if (preferSol && sol && !(sol.marker && (call.prompt ?? '').includes(sol.marker))) {
@@ -221,14 +255,17 @@ export function decideAgent(call: AgentCall, routes: Routes | null, agents: Agen
 
   const want = family(call.model)
   // A built-in above Sonnet is named in the catch-all denial too, so the retry it asks for is the one that runs.
-  const builtinHigh = isBuiltin(type) && (want === null || RANK[want] > RANK.sonnet)
+  // A project agent of a built-in's name shadows it, as the engine resolves it: its frontmatter rules.
+  const builtin = isBuiltin(type) && !agents.some(a => a.name === type)
+  const builtinHigh = builtin && (want === null || RANK[want] > RANK.sonnet)
 
   if (isCatchAll(type) && agents.length > 0 && claim(`${type}\u0000${call.description ?? ''}`)) {
     const reason = catchAllReason(type, agents)
     return { kind: 'deny', check: 'catch-all', reason: builtinHigh ? `${reason} Повторяя, укажи \`model: "sonnet"\`.` : reason }
   }
 
-  if (isBuiltin(type)) {
+  if (inherit) return inherit
+  if (builtin) {
     if (!builtinHigh) return { kind: 'pass' }
     const was = want === null ? 'модель не указана, унаследовал бы родительскую' : `указан ${call.model}`
     return {
@@ -287,7 +324,7 @@ export function countByCheck(text: string, sinceMs: number): Map<string, number>
   return counts
 }
 
-/** Every directory from `dir` up to the root, nearest first. Copied from run-loop-hint's classify.ts. */
+/** Every directory from `dir` up to the root, nearest first. */
 export function ancestors(dir: string): string[] {
   const path = dir.replace(/\\/g, '/').replace(/\/+$/, '')
   const out: string[] = []

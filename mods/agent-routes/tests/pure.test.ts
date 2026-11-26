@@ -30,7 +30,7 @@ const always = () => true
 test('the section always carries the three general rules; with a file, the table and notes follow', () => {
   const bare = promptSection(null)
   expect(bare).toContain('Модель Claude-агента — из его frontmatter')
-  expect(bare).toContain('`general-purpose`, `Explore`, `claude`')
+  expect(bare).toContain("`general-purpose`, `Explore`, `Plan`, `claude`")
   expect(bare).toContain('Codex — всегда `-s danger-full-access`')
   expect(bare).not.toContain('| Работа |')
 
@@ -109,6 +109,37 @@ test('a model check reads the frontmatter rank: only a raise is denied', () => {
   expect(d('free', 'opus')).toBe('pass')
   expect(d('unknown-agent', 'opus')).toBe('pass')
   expect(d('feature-dev:code-reviewer', 'opus')).toBe('pass')
+})
+
+test('no agent inherits the parent model: built-ins and frontmatter-less agents without model are denied, escalate: too', () => {
+  const d = (subagent_type: string | undefined, description = 'd', model?: string) =>
+    decideAgent({ ...(subagent_type === undefined ? {} : { subagent_type }), description, ...(model ? { model } : {}) }, null, AGENTS, () => false)
+  for (const type of ['Plan', 'Explore', 'general-purpose', 'claude', 'claude-code-guide', 'web-fetch', undefined]) {
+    const r = d(type)
+    expect(r.kind).toBe('deny')
+    if (r.kind === 'deny') {
+      expect(r.check).toBe('model-inherit')
+      expect(r.reason).toContain('model: "sonnet"')
+    }
+  }
+  const free = d('free')
+  expect(free.kind === 'deny' && free.check === 'model-inherit' && free.reason.includes('допиши `model:`')).toBe(true)
+  const escalated = d('Plan', 'escalate: deep design')
+  expect(escalated.kind === 'deny' && escalated.reason.includes('model: "opus"')).toBe(true)
+  expect(d('free', 'escalate: hard').kind).toBe('deny')
+  expect(d('Plan', 'p', 'sonnet').kind).toBe('pass')
+  expect(d('free', 'p', 'haiku').kind).toBe('pass')
+  expect(d('Plan', 'escalate: deep design', 'opus').kind).toBe('pass')
+  expect(d('fork').kind).toBe('pass')
+  expect(d('statusline-setup').kind).toBe('pass')
+  expect(d('checker').kind).toBe('pass')
+  expect(d('unknown-agent').kind).toBe('pass')
+  expect(d('feature-dev:code-reviewer').kind).toBe('pass')
+})
+
+test('a typed agent named like a built-in follows its own frontmatter', () => {
+  const own: AgentDef[] = [{ name: 'Plan', description: 'Project planner.', model: 'opus' }]
+  expect(decideAgent({ subagent_type: 'Plan', description: 'p' }, null, own, () => false).kind).toBe('pass')
 })
 
 test('the journal count keeps the window and skips torn lines', () => {

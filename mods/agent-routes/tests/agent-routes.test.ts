@@ -182,7 +182,7 @@ test('/agent-routes prints the section as the model gets it and the decisions of
   expect(out).toContain(`${PROJ}/.claude/agent-routes.json`)
   expect(out).toContain('- sol-route (deny): 1')
   expect(out).toContain('- catch-all (deny): 1')
-  expect(out).toContain('- model-builtin (deny): 1')
+  expect(out).toContain('- model-inherit (deny): 1')
 })
 
 // ---- check 1: Sol routes (ported from the karts pre-agent sol-route cases) ----
@@ -241,7 +241,7 @@ test('no subagent_type and `claude` are catch-all; Explore, Plan and plugin agen
   expect((await agent($, { description: 'a' })).deny).toBeDefined()
   expect((await agent($, { subagent_type: 'claude', description: 'b' })).deny).toBeDefined()
   expect((await agent($, { subagent_type: 'Explore', model: 'sonnet', description: 'c' })).deny).toBe(undefined)
-  expect((await agent($, { subagent_type: 'Plan', description: 'd' })).deny).toBe(undefined)
+  expect((await agent($, { subagent_type: 'Plan', model: 'sonnet', description: 'd' })).deny).toBe(undefined)
   expect((await agent($, { subagent_type: 'feature-dev:code-reviewer', description: 'e' })).deny).toBe(undefined)
   expect((await agent($, { subagent_type: 'statusline-setup', description: 'f' })).deny).toBe(undefined)
 })
@@ -311,6 +311,22 @@ test('built-ins: no model or opus/fable is denied with model: "sonnet" to retry;
   await agent($, { subagent_type: 'general-purpose', model: 'opus', description: 'escalate: deep design' })
   expect(w.calls.map(c => c.model)).toEqual(['haiku', 'sonnet', 'opus'])
   expect(notes(kept)).toEqual([])
+})
+
+test('a call that would inherit the parent model is denied and journaled; with a model, or as a fork, it runs', async ($, on) => {
+  const w = world(on)
+  const plan = await agent($, { subagent_type: 'Plan', description: 'design the cache' })
+  expect(plan.deny).toContain('унаследовал бы модель родительской сессии')
+  expect(plan.deny).toContain('model: "sonnet"')
+  const free = await agent($, { subagent_type: 'free', description: 'escalate: needs depth' })
+  expect(free.deny).toContain('model: "opus"')
+  expect(free.deny).toContain('допиши `model:`')
+  expect(w.calls.length).toBe(0)
+  await agent($, { subagent_type: 'Plan', model: 'sonnet', description: 'design the cache' })
+  await agent($, { subagent_type: 'free', model: 'opus', description: 'escalate: needs depth' })
+  await agent($, { subagent_type: 'fork', description: 'try the other fix' })
+  expect(w.calls.map(c => [c.subagent_type, c.model])).toEqual([['Plan', 'sonnet'], ['free', 'opus'], ['fork', undefined]])
+  expect(journal(w).map(l => [l.check, l.subagent_type])).toEqual([['model-inherit', 'Plan'], ['model-inherit', 'free']])
 })
 
 // ---- journal and fail-open ----

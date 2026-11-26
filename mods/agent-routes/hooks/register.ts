@@ -151,7 +151,9 @@ async function record($: Engine, check: string, subagentType: string | null, act
 /** The checks on one Agent call; any error passes the call unchanged. */
 async function agentDecision($: Engine, call: { subagent_type?: string; description?: string; prompt?: string; model?: string }): Promise<Decision> {
   try {
-    if (hasEscalate(call.description)) return { kind: 'pass' }
+    // A fork runs on the parent's model by design and is never checked: skip the file reads for it.
+    if ((call.subagent_type ?? '').trim().toLowerCase() === 'fork') return { kind: 'pass' }
+    const escalated = hasEscalate(call.description)
     const root = await $.session.root()
     const home = await homeDir($)
     const [found, agents, session, priority] = await Promise.all([
@@ -161,7 +163,7 @@ async function agentDecision($: Engine, call: { subagent_type?: string; descript
       readPriority($, home),
     ])
     // Synchronous from here: parallel calls of one batch cannot both claim the same catch-all key.
-    if (priority?.mode === 'codex-first') {
+    if (priority?.mode === 'codex-first' && !escalated) {
       return { kind: 'deny', check: 'subscription', reason: preferenceText(priority) +
         (found.routes?.codexLauncher ? ' Лаунчер: ' + found.routes.codexLauncher : '') +
         ' Для работы, требующей Claude, укажи escalate: <причина> в description.' }
