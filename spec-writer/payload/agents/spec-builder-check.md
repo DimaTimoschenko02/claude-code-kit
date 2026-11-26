@@ -14,7 +14,7 @@ gap found in review costs a rewrite and a review round.
 Read the spec the caller names, then the code it points to — at the commit or branch the caller gives, else the
 working tree. Read-only: Bash only for `git show`, `git grep`, `ls`; never edit, commit or run builds.
 
-Report four things, in the spec's own language:
+Report five things, in the spec's own language:
 
 1. **Questions** — places where you would have to choose and the choice changes what gets built: a design choice the
    spec leaves to you (how a class is registered, where validation lives, one schema or hand checks), behaviour on
@@ -32,6 +32,14 @@ Report four things, in the spec's own language:
    names their ids), open the card and set each quote beside what the spec builds. A spec that serves a narrower or
    different reading than the words — another screen, one entry point of several, the example taken as the whole
    scope — is listed with the quote and the spec line. This is what the owner finds on the screen otherwise.
+
+5. **Breaks a written project rule** — a spec that builds exactly what was asked can still be built the way the
+   project forbids, and then the owner returns it after the code exists. Read the rules the project's spec-writer
+   file lists under «Rules the spec is checked against» (none listed: the project's `CLAUDE.md` and `.claude/rules/`),
+   then each part of the spec against them. List a spec line that does what a rule forbids or skips what a rule
+   prescribes: the rule quoted word for word with its `path`, then the spec line. Leave out what a lint, census or
+   other check named in that file already fails on by itself, and a rule only the code's style can break. On a
+   re-check the caller names the changed sections; check only those.
 
 Rank each list by cost of a wrong guess, most expensive first. Do not pad: a list with nothing in it says so.
 End with `итого: <n>` — or `итого: 0 — можно отдавать` / `total: 0 — ready to hand over`, in the spec's language.

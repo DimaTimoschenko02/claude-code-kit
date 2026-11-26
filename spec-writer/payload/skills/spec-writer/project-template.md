@@ -35,6 +35,12 @@ Only what the code does not already say. Each line here is a fact the spec write
 <What must be approved before the spec (scope, schema diff), what holds the order (hooks), who reviews the code against
 the spec, the round limit.>
 
+## Rules the spec is checked against
+
+<The files holding the project's written rules on how things are built — architecture, API shape, UI kit, schema — that
+agent spec-builder-check sets each spec part against (its list 5), and the checks that already enforce some of them
+mechanically (lint plugins, ratchets), so it skips those.>
+
 ## Project gotchas
 
 <Facts about this project's code that a spec keeps getting wrong. Add one each time a coder stop or a review round
