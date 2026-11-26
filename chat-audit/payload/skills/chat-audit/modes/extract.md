@@ -10,6 +10,10 @@ node .claude/skills/chat-audit/lib/analyze.mjs --project <dir> [--days N] --json
 node .claude/skills/chat-audit/lib/agents.mjs  --sessions <f1,f2,...> --json > .claude/state/chat-audit/agents.json
 ```
 
+When the project's `.claude/chat-audit.config.json` lists `extractors`, run each one too, into the run folder, as its
+header says: they hold the lens only that project has (a task's path from card to prod), and a finding about it is
+unmeasurable without them.
+
 `agents.mjs` runs by default alongside the other two — it is cheap (pure Node, no agents dispatched) and the
 main thread cannot see this material any other way: a `Task` call in the slice shows a description and a
 duration, nothing about what happened inside. Skip it only when the selected sessions spawned no subagents
