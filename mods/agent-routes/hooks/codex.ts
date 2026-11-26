@@ -9,10 +9,10 @@ const MAX_SCAN = 64 * 1024
 const FULL = 'danger-full-access'
 
 /** A word with its unquoted value and its span in the original text. */
-type Word = { value: string; start: number; end: number }
+export type Word = { value: string; start: number; end: number }
 
 const WRAPPERS = new Set(['time', 'nice', 'command', 'exec', 'nohup', 'stdbuf'])
-const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+export const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 /** Codex flags that take a value as the next word: their value is never the subcommand. */
 const VALUE_FLAGS = new Set([
   '-c', '--config', '-m', '--model', '-p', '--profile', '-C', '--cd', '-i', '--image', '-s', '--sandbox', '-a',
@@ -183,13 +183,13 @@ export function segments(text: string): Word[][] {
 }
 
 /** The command's own name: basename, lower-cased, Windows suffix off (`C:/bin/codex.cmd` → `codex`). */
-function commandName(token: string): string {
+export function commandName(token: string): string {
   const base = token.slice(Math.max(token.lastIndexOf('/'), token.lastIndexOf('\\')) + 1).toLowerCase()
   return base.replace(/\.(exe|cmd|bat|ps1)$/, '')
 }
 
 /** Index of the segment's command word, past assignments, `env …`, `timeout N` and wrappers such as `nohup`. */
-function headIndex(words: Word[]): number {
+export function headIndex(words: Word[]): number {
   let i = 0
   while (i < words.length) {
     const t = words[i]!.value

@@ -1,6 +1,7 @@
 import type { EngineInterface as Engine, Register } from 'claude-code'
 
 import { codexFix, codexReason, launcherReason, launchesCodexExec, launchesCodexWork, parseCatalog } from './codex'
+import { agentsJsonModel, claudeLaunches, fableReason, isFable, settingsFable, type Launch } from './fable'
 import { preferenceText, readPriority } from './priority'
 import {
   ancestors,
@@ -177,6 +178,84 @@ async function agentDecision($: Engine, call: { subagent_type?: string; descript
   }
 }
 
+const slashed = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '')
+
+/** A file a launch names, relative to the session's cwd; undefined when it cannot be read. */
+async function readNear($: Engine, path: string): Promise<string | undefined> {
+  const p = path.replace(/\\/g, '/')
+  const abs = /^([A-Za-z]:)?\//.test(p) ? p : `${slashed(await $.session.cwd())}/${p}`
+  const text = await $.fs.read(abs).catch(() => undefined)
+  return typeof text === 'string' ? text : undefined
+}
+
+/** Where one launch's model comes from when it names none: its `--agent`, the inherited env, the settings files. */
+async function inheritedFable($: Engine, l: Launch): Promise<string | null> {
+  if (l.settingsFile) {
+    const hit = settingsFable((await readNear($, l.settingsFile)) ?? '')
+    if (hit) return `--settings ${l.settingsFile} (${hit})`
+  }
+  if (!l.session || l.model) return null
+  const root = await $.session.root()
+  const home = await homeDir($)
+  if (l.agent) {
+    const fromFile = l.agentsFile ? agentsJsonModel((await readNear($, l.agentsFile)) ?? '', l.agent) : undefined
+    if (isFable(fromFile)) return `--agent ${l.agent} (model ${fromFile})`
+    const def = (await loadAgents($, root, home)).find(a => a.name === l.agent)
+    if (def?.model === 'fable') return `--agent ${l.agent} (model: fable в его файле)`
+    if (def?.model || fromFile) return null
+  }
+  const env = await $.env.get('ANTHROPIC_MODEL').catch(() => undefined)
+  if (env) return isFable(env) ? `унаследованный ANTHROPIC_MODEL=${env}` : null
+  // Settings precedence: the project's local, the project's, the user's; the first that sets `model` wins.
+  const files = [`${slashed(root)}/.claude/settings.local.json`, `${slashed(root)}/.claude/settings.json`]
+  if (home) files.push(`${home}/.claude/settings.json`)
+  for (const f of files) {
+    const text = await $.fs.read(f).catch(() => undefined)
+    if (typeof text !== 'string') continue
+    let model: unknown
+    try {
+      model = (JSON.parse(text) as { model?: unknown })?.model
+    } catch {
+      continue
+    }
+    if (typeof model === 'string' && model) return isFable(model) ? `модель по умолчанию ${model} в ${f}` : null
+  }
+  return null
+}
+
+/**
+ * The refusal for a shell command that starts a Claude session on Fable, or null. Hot path: a command without
+ * `claude` returns at once; only a real launch reads files. A parse error refuses only a command naming both.
+ */
+async function fableDenial($: Engine, command: string | undefined): Promise<string | null> {
+  if (!command || !/claude/i.test(command)) return null
+  let launches: Launch[]
+  try {
+    launches = claudeLaunches(command)
+  } catch (err) {
+    debug($, `fable check failed: ${String(err)}`)
+    return /fable/i.test(command) ? fableReason('команда не разобралась, а в ней claude и fable') : null
+  }
+  for (const l of launches) if (l.fable) return fableReason(l.fable)
+  for (const l of launches) {
+    try {
+      const hit = await inheritedFable($, l)
+      if (hit) return fableReason(hit)
+    } catch (err) {
+      debug($, `fable default check skipped: ${String(err)}`)
+    }
+  }
+  return null
+}
+
+/** Shell tools: deny a Fable session launch with the fix, journaled. */
+async function guardShell($: Engine, tool: string, command: string | undefined): Promise<{ deny: string } | null> {
+  const reason = await fableDenial($, command)
+  if (!reason) return null
+  await record($, 'fable-session', null, 'deny', `${tool}: ${command ?? ''}`.slice(0, 500))
+  return { deny: reason }
+}
+
 async function commandText($: Engine): Promise<string> {
   const { text, found, root } = await currentSection($)
   const source = found.path
@@ -245,7 +324,22 @@ export const register: Register = on => {
 
   // Hot path: every Bash call. `launchesCodexExec` returns at once when the text has no `codex`; only a real launch
   // reads the routes file and the Codex catalog.
+  // Sessions on Fable are the owner's alone, whichever shell tool would start one.
+  on('tool.call', { tool: 'PowerShell' }, async ($, e, next) => (await guardShell($, 'PowerShell', e.command)) ?? next(e))
+    .catch(($, e, next) => next(e))
+  on('tool.call', { tool: 'Monitor' }, async ($, e, next) => (await guardShell($, 'Monitor', e.command)) ?? next(e))
+    .catch(($, e, next) => next(e))
+  // A cloud routine is a session too: its body naming a Fable model is refused the same way.
+  on('tool.call', { tool: 'RemoteTrigger' }, async ($, e, next) => {
+    const hit = e.body ? settingsFable(JSON.stringify(e.body)) : null
+    if (!hit) return next(e)
+    await record($, 'fable-session', null, 'deny', `RemoteTrigger ${e.action}: ${hit}`)
+    return { deny: fableReason(`RemoteTrigger ${hit}`) }
+  }).catch(($, e, next) => next(e))
+
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const fable = await guardShell($, 'Bash', e.command)
+    if (fable) return fable
     let launches = false
     try {
       launches = launchesCodexExec(e.command)
